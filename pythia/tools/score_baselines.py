@@ -81,7 +81,12 @@ SPD_METRICS = ("PA", "FATALITIES", "PHASE3PLUS_IN_NEED")
 #: where climatology over three years is easy to beat by standing still.
 PERSISTENCE_MODEL_NAME = "__ext_persistence"
 #: (hazard, metric) pairs with a persistence reference.
-PERSISTENCE_PAIRS = frozenset({("ACE", "FATALITIES"), ("DR", "PHASE3PLUS_IN_NEED")})
+PERSISTENCE_PAIRS = frozenset({
+    ("ACE", "FATALITIES"), ("DR", "PHASE3PLUS_IN_NEED"),
+    # Since Oct 2026: IDMC conflict displacement is its own series, so the
+    # month before the window has a value (or an observed quiet zero).
+    ("ACE", "PA"),
+})
 #: Share of the mass spread evenly over every bucket. A pure one-hot vector
 #: gives an infinite log loss whenever the outcome leaves the bucket, which
 #: says nothing useful; 0.1 keeps the reference sharp (90% + 0.1/k on the

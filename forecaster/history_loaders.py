@@ -101,7 +101,9 @@ def _load_idmc_conflict_flow_history_summary(
                 ) AS flow_value
             FROM facts_deltas
             WHERE upper(iso3) = ?
-              AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
+              -- IDMC conflict displacement only (hazard ACE since Oct 2026);
+              -- an IDU row is the pre-fix all-cause sum and is never read.
+              AND upper(hazard_code) = 'ACE' AND ? IS NOT NULL
               AND lower(series_semantics) = 'new'
               AND lower(metric) IN (
                 'new_displacements',

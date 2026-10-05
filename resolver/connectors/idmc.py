@@ -23,57 +23,54 @@ from .validate import empty_canonical
 
 LOG = logging.getLogger(__name__)
 
-# Default hazard metadata for IDMC displacement data.
-_HAZARD_CODE = "DI"  # Displacement (internal)
-_HAZARD_LABEL = "Internal displacement"
-_HAZARD_CLASS = "displacement"
+# IDMC CONFLICT displacement only, as hazard ACE (Oct 2026). Until then this
+# connector wrote every IDMC figure as hazard DI, all causes summed, which is
+# the same fault the adapter path had: typhoon evacuations read as conflict.
+_HAZARD_LABEL = "Armed conflict — internal displacement"
+_HAZARD_CLASS = "human-induced"
 _PUBLISHER = "IDMC"
 _SOURCE_TYPE = "agency"
 _UNIT = "persons"
 
 
 class IdmcConnector:
-    """Fetch IDMC displacement data and return a canonical DataFrame."""
+    """Fetch IDMC conflict displacement and return a canonical DataFrame."""
 
     name: str = "idmc"
 
     def fetch_and_normalize(self) -> pd.DataFrame:
-        """Run the IDMC ingestion pipeline and return canonical rows.
+        """Read the IDU route, keep conflict displacement, map to canonical.
 
-        Uses the IDMC client to fetch data, then builds resolution-ready
-        facts via ``idmc.export.build_resolution_ready_facts``.  The
-        IDMC export schema has 6 columns; we map these to the full
-        21-column canonical schema, filling defaults for provenance
-        fields that IDMC does not natively provide.
+        Delegates to :mod:`resolver.ingestion.idmc_conflict`, the one place
+        that splits IDMC records by cause, so this path and the Resolver
+        Update path cannot write different series.
         """
-        from resolver.ingestion.idmc.client import IdmcClient
-        from resolver.ingestion.idmc.config import load as load_idmc_config
-        from resolver.ingestion.idmc.export import build_resolution_ready_facts
-        from resolver.ingestion.idmc.normalize import normalize_all
+        import datetime as _dt
+        import os
 
-        config = load_idmc_config()
-        client = IdmcClient(config)
+        from resolver.ingestion import idmc_conflict as ic
 
+        credential = ic._client_id()
+        if credential is None:
+            LOG.warning("[idmc] no IDMC client id; nothing written")
+            return empty_canonical()
+        months = int(os.getenv(ic.MONTHS_ENV, "") or ic.DEFAULT_MONTHS)
+        first, last = ic.month_window(_dt.date.today(), months)
         try:
-            raw = client.fetch()
-        except Exception as exc:
-            LOG.warning("[idmc] fetch failed: %s", exc)
+            records = ic._default_get(
+                os.getenv(ic.URL_ENV, "").strip() or ic.DEFAULT_IDU_ALL_URL,
+                {"client_id": credential[0]},
+                ic.REQUEST_TIMEOUT_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("[idmc] fetch failed: %s", type(exc).__name__)
             return empty_canonical()
-
-        if raw.empty:
-            LOG.info("[idmc] no raw rows fetched")
+        flows, report = ic.conflict_monthly_flows(records or [], first, last)
+        LOG.info("[idmc] conflict rows=%s excluded_people=%s",
+                 report.get("rows"), report.get("excluded_people"))
+        if flows.empty:
             return empty_canonical()
-
-        normalized = normalize_all(raw, config)
-        if normalized.empty:
-            LOG.info("[idmc] normalisation produced 0 rows")
-            return empty_canonical()
-
-        facts = build_resolution_ready_facts(normalized)
-        if facts.empty:
-            LOG.info("[idmc] resolution-ready facts empty")
-            return empty_canonical()
-
+        facts = ic.staging_frame(flows)
         return self._to_canonical(facts)
 
     @staticmethod
@@ -93,7 +90,7 @@ class IdmcConnector:
                 ),
                 "country_name": "",  # enrichment step will fill from registry
                 "iso3": facts["iso3"],
-                "hazard_code": _HAZARD_CODE,
+                "hazard_code": "ACE",
                 "hazard_label": _HAZARD_LABEL,
                 "hazard_class": _HAZARD_CLASS,
                 "metric": facts["metric"],
@@ -105,7 +102,7 @@ class IdmcConnector:
                 "publisher": _PUBLISHER,
                 "source_type": _SOURCE_TYPE,
                 "source_url": "",
-                "doc_title": "IDMC displacement data",
+                "doc_title": "IDMC conflict displacement data",
                 "definition_text": "",
                 "method": "api",
                 "confidence": "high",

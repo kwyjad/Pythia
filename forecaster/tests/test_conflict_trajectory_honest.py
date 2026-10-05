@@ -17,7 +17,7 @@ import pytest
 duckdb = pytest.importorskip("duckdb")
 
 from forecaster.history_loaders import _format_base_rate_for_prompt
-from pythia.tools.base_rate_spd import conflict_trajectory, idmc_flow_rows
+from pythia.tools.base_rate_spd import conflict_displacement_rows, conflict_trajectory
 
 
 def _summary(disp_rows, as_of="2026-10", n_negative=0):
@@ -63,15 +63,17 @@ def test_a_zero_base_still_reads_as_new_activity():
 def test_the_reader_drops_and_counts_a_negative_flow():
     con = duckdb.connect(":memory:")
     con.execute(
-        "CREATE TABLE facts_deltas (ym TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, "
-        "value_new DOUBLE, series_semantics TEXT, source_id TEXT)"
+        "CREATE TABLE facts_resolved (ym TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, "
+        "value DOUBLE, series_semantics TEXT, publisher TEXT)"
     )
     con.execute(
-        "INSERT INTO facts_deltas VALUES "
-        "('2026-07','AFG','IDU','new_displacements',1881,'new','idmc'),"
-        "('2026-08','AFG','IDU','new_displacements',-1791,'new','idmc')"
+        "INSERT INTO facts_resolved VALUES "
+        "('2026-07','AFG','ACE','new_displacements',1881,'new','IDMC'),"
+        "('2026-08','AFG','ACE','new_displacements',-1791,'new','IDMC'),"
+        # An all-cause row (the pre-Oct-2026 IDU stamp) is never read.
+        "('2026-06','AFG','IDU','new_displacements',99999,'new','IDMC')"
     )
-    rows, dropped = idmc_flow_rows(con, "AFG", "ACE", "2026-10")
+    rows, dropped = conflict_displacement_rows(con, "AFG", "2026-10")
     assert rows == [("2026-07", 1881.0)]
     assert dropped == 1
     text = _format_base_rate_for_prompt(_summary(rows, n_negative=dropped), [], metric="PA")

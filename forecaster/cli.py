@@ -868,16 +868,17 @@ def _build_conflict_base_rate(
                 "note": f"ACLED data unavailable: {type(exc).__name__}",
             }
 
-        # --- Displacements from IDMC via facts_deltas ---
-        # One reader, shared with the ACE/PA anchor in base_rate_spd: it
-        # drops and counts a negative "new displacements" figure rather than
-        # printing it (Oct 2026).
+        # --- Conflict displacements from IDMC ---
+        # One reader, shared with the ACE/PA anchor, the reference
+        # forecasters and compute_resolutions (base_rate_spd): IDMC CONFLICT
+        # displacement only, never the all-cause sum the prompt showed until
+        # Oct 2026; a negative figure is dropped and counted.
         displacements_data: Dict[str, Any]
         try:
-            from pythia.tools.base_rate_spd import idmc_flow_rows
+            from pythia.tools.base_rate_spd import conflict_displacement_rows
 
-            disp_rows, n_negative = idmc_flow_rows(
-                con, iso3_up, hz_up, current_ym, limit=6,
+            disp_rows, n_negative = conflict_displacement_rows(
+                con, iso3_up, current_ym, limit=6,
             )
             logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(disp_rows))
             displacements_data = _compute_trajectory(disp_rows, "IDMC")

@@ -1712,20 +1712,21 @@ def build_report(
                 L("| " + " | ".join(str(x) for x in row) + " |")
             L()
             hz_codes = {str(r[0]).upper().strip() for r in idu_rows}
-            # IDMC writes hazard_code=IDU by design; the forecaster's
-            # displacement history loaders match IN ('ACE','IDU') (see
-            # forecaster/history_loaders.py), so IDU-only data is expected
-            # and handled. Only warn on genuinely unexpected codes.
-            unexpected = hz_codes - {"IDU", "ACE"}
+            # Since Oct 2026 IDMC conflict displacement is written as hazard
+            # ACE (resolver.ingestion.idmc_conflict) and every reader looks
+            # at ACE alone. An IDU row is the pre-fix all-cause sum (typhoon
+            # evacuations included); load_and_derive purges them on every run.
+            unexpected = hz_codes - {"ACE"}
             if "IDU" in hz_codes:
-                L("_Note: IDMC rows use hazard_code=IDU by design; the "
-                  "forecaster matches `IN ('ACE','IDU')`, so this needs no "
-                  "action._")
+                L("> **WARNING:** hazard_code=IDU rows on new_displacements are "
+                  "the pre-Oct-2026 all-cause IDMC sum. No reader uses them; "
+                  "`load_and_derive.purge_all_cause_idmc_rows` removes them on "
+                  "the next Resolver Update.")
                 L()
-            if unexpected:
+            if unexpected - {"IDU"}:
                 L(f"> **WARNING:** unexpected hazard codes on new_displacements "
-                  f"rows: {', '.join(sorted(unexpected))} — the forecaster only "
-                  f"matches ACE/IDU.")
+                  f"rows: {', '.join(sorted(unexpected - {'IDU'}))} — the conflict "
+                  f"displacement series is hazard ACE only.")
                 L()
         else:
             L("_No new_displacements rows in facts_deltas._")

@@ -103,16 +103,53 @@ class TestConflictFatalities:
 
 
 class TestConflictDisplacement:
-    def test_ace_pa_uses_idmc_flow_series(self, con):
+    @staticmethod
+    def _series(con):
+        con.execute("ALTER TABLE facts_resolved ADD COLUMN series_semantics TEXT")
+        con.execute("ALTER TABLE facts_resolved ADD COLUMN publisher TEXT")
+
+    @staticmethod
+    def _row(con, ym, iso3, hazard, value, publisher="IDMC"):
+        con.execute(
+            "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, "
+            "series_semantics, publisher) VALUES (?, ?, ?, 'new_displacements', ?, 'new', ?)",
+            [ym, iso3, hazard, value, publisher],
+        )
+
+    def test_ace_pa_uses_idmc_conflict_series(self, con):
+        self._series(con)
         for i, val in enumerate([0, 5000, 20000, 0, 12000, 60000]):
-            con.execute(
-                "INSERT INTO facts_deltas VALUES (?, 'SOM', 'ACE', 'new_displacements', 'new', 'idmc', ?)",
-                [f"2026-0{i + 1}", val],
-            )
+            self._row(con, f"2026-0{i + 1}", "SOM", "ACE", val)
         probs, source, detail = base_rate_spd(con, "SOM", "ACE", "PA", "2026-08")
         _assert_valid_spd(probs, "PA")
-        assert source.startswith("facts_deltas:idmc")
+        assert source.startswith("idmc_conflict")
         assert detail["score_family"] == "spd"
+
+    def test_all_cause_idu_rows_never_enter_the_anchor(self, con):
+        """Oct 2026: China's 7.3 million typhoon evacuees were the ACE/PA
+        anchor, because every IDMC row was hazard IDU whatever its cause."""
+        self._series(con)
+        self._row(con, "2026-07", "CHN", "IDU", 7_305_385)
+        self._row(con, "2026-07", "SOM", "ACE", 4000)
+        probs, source, detail = base_rate_spd(con, "CHN", "ACE", "PA", "2026-08")
+        assert probs == [] and source == "NONE"
+
+    def test_a_quiet_month_is_zero_only_behind_both_gates(self, con):
+        from pythia.tools.base_rate_spd import conflict_displacement_value
+
+        self._series(con)
+        self._row(con, "2026-06", "SOM", "ACE", 4000)
+        self._row(con, "2026-07", "SDN", "ACE", 9000)
+        # Reported month: its value.
+        assert conflict_displacement_value(con, "SOM", "2026-06") == (
+            4000.0, "facts_resolved:IDMC:conflict_new_displacements"
+        )
+        # Live month, country in the universe, no row: an observed zero.
+        assert conflict_displacement_value(con, "SOM", "2026-07") == (0.0, "zero_default")
+        # A month nobody reported for is a gap, never a zero.
+        assert conflict_displacement_value(con, "SOM", "2026-08") is None
+        # A country IDMC never reported for is outside its sight.
+        assert conflict_displacement_value(con, "ISL", "2026-07") is None
 
 
 class TestPhase3History:

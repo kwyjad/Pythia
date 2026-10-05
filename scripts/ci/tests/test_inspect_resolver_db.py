@@ -9,7 +9,7 @@ The report logic previously lived as a ~1,400-line heredoc inside
 ``inspect_resolver_duckdb.yml`` and was untestable; these fixture-based tests
 pin the July-2026 fixes: chronological ACAPS "%b%Y" date handling, the
 observation/projection freshness split, the dropped legacy ipc_phases table,
-the informational (not warning) IDMC/IDU note, and the target-list inject
+the IDMC/IDU note (since Oct 2026 a warning: IDU is the purged all-cause sum), and the target-list inject
 readiness section.
 """
 
@@ -157,8 +157,9 @@ def test_the_dropped_legacy_ipc_table_is_not_mentioned(report):
     assert "legacy table from the retired" not in report
 
 
-def test_idmc_idu_is_informational_not_warning(report):
-    assert "forecaster matches `IN ('ACE','IDU')`" in report
+def test_idmc_idu_rows_are_named_as_the_purged_all_cause_sum(report):
+    # Since Oct 2026 an IDU row is the purged all-cause sum, and it says so.
+    assert "pre-Oct-2026 all-cause IDMC sum" in report
     assert "Forecaster queries filtering on ACE will miss this data" not in report
 
 

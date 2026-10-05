@@ -56,6 +56,9 @@ on:
       # naming them here a PR touching only forecaster/ or pythia/ runs none of
       # them. test_ci_shell_sanity.py enforces this wiring.
       - "resolver/tests/test_idmc_history_conflict_pa.py"
+      # The ACE/PA writer, pinned to the reader by
+      # test_base_rate_matches_resolution_source and test_ace_pa_conflict_displacement.
+      - "resolver/ingestion/idmc_conflict.py"
       - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
       - "resolver/tests/test_forecaster_llm_logging_inserts_row.py"
       - "resolver/tests/test_conflict_forecasts_table.py"
@@ -409,6 +412,9 @@ jobs:
           # test_ace_fatalities_all_event_types pins ACE/FATALITIES to the
           # series its base rate uses: 27 of 32 August 2026 conflict questions
           # resolved to ACLED's battles-only count instead.
+          # test_ace_pa_conflict_displacement pins ACE/PA to IDMC conflict
+          # displacement behind both coverage gates (Oct 2026: every IDMC row
+          # was all-cause hazard IDU and no ACE/PA question resolved).
           # test_acled_partial_month_resolution and test_source_coverage pin
           # that a row written before its month ended neither resolves a
           # horizon nor makes the month "covered" for zero-defaulting.
@@ -419,6 +425,7 @@ jobs:
             forecaster/tests/test_phase3_history_honest.py \
             forecaster/tests/test_base_rate_matches_resolution_source.py \
             pythia/tests/test_ace_fatalities_all_event_types.py \
+            pythia/tests/test_ace_pa_conflict_displacement.py \
             pythia/tests/test_compute_resolutions.py \
             pythia/tests/test_acled_partial_month_resolution.py \
             pythia/tests/test_source_coverage.py \

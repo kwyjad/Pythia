@@ -38,6 +38,11 @@ def con(tmp_path):
         "CREATE TABLE facts_deltas (iso3 TEXT, ym TEXT, hazard_code TEXT, "
         "metric TEXT, series_semantics TEXT, source_id TEXT, value_new DOUBLE)"
     )
+    # The ACE/PA series since Oct 2026: IDMC conflict displacement.
+    c.execute(
+        "CREATE TABLE facts_resolved (iso3 TEXT, ym TEXT, hazard_code TEXT, "
+        "metric TEXT, series_semantics TEXT, publisher TEXT, value DOUBLE)"
+    )
     yield c
     c.close()
 
@@ -118,11 +123,11 @@ class TestQuietMonthsAreObservations:
         rows = []
         for month in range(1, 13):
             rows.append(("ETH", f"2025-{month:02d}", "ACE", "new_displacements",
-                         "new", "idmc", 5_000.0))
+                         "new", "IDMC", 5_000.0))
         rows.append(("SOM", "2025-06", "ACE", "new_displacements", "new",
-                     "idmc", 80_000.0))
+                     "IDMC", 80_000.0))
         con.executemany(
-            "INSERT INTO facts_deltas VALUES (?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO facts_resolved VALUES (?, ?, ?, ?, ?, ?, ?)", rows
         )
         probs, _, detail = base_rate_spd.base_rate_spd(
             con, "SOM", "ACE", "PA", "2026-01"
@@ -132,14 +137,17 @@ class TestQuietMonthsAreObservations:
         assert probs[0] > 0.5
 
     def test_the_live_gate_reads_the_same_source_the_anchor_does(self, con):
-        # A month in which some OTHER publisher wrote to facts_deltas is not
-        # a month IDMC was live for.
+        # A month in which some OTHER publisher, or an all-cause IDMC row,
+        # wrote to the table is not a month IDMC conflict displacement was
+        # live for.
         con.executemany(
-            "INSERT INTO facts_deltas VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO facts_resolved VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                ("SOM", "2025-06", "ACE", "new_displacements", "new", "idmc",
+                ("SOM", "2025-06", "ACE", "new_displacements", "new", "IDMC",
                  80_000.0),
-                ("KEN", "2025-07", "FL", "affected", "new", "gdacs", 1.0),
+                ("KEN", "2025-07", "FL", "affected", "new", "GDACS", 1.0),
+                ("CHN", "2025-08", "IDU", "new_displacements", "new", "IDMC",
+                 7_000_000.0),
             ],
         )
         _, _, detail = base_rate_spd.base_rate_spd(
