@@ -434,7 +434,7 @@ class TestV3Pack:
         upcoming = outlook["upcoming_resolutions"]
         # Three questions, six horizons each.
         assert upcoming["n_question_horizons"] == 18
-        assert upcoming["first_resolution_date"] == "2026-10-28"
+        assert upcoming["first_resolution_date"] == "2026-10-11"
         text = " ".join(outlook["dormant_sentences"])
-        assert "2026-10-28" in text
+        assert "2026-10-11" in text
         assert outlook["score_explanations"], "no score copy in the pack"
