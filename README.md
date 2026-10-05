@@ -171,7 +171,7 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **VIEWS** | `resolver/connectors/views.py` | ML-based conflict fatality predictions (ACE, 1–6 month leads) | `conflict_forecasts` |
 | **conflictforecast.org** | `resolver/connectors/conflictforecast.py` | News-based conflict risk scores (ACE, 3m/12m) | `conflict_forecasts` |
 | **ACLED CAST** | `resolver/connectors/acled_cast.py` | Event-count forecasts by type: total/battles/ERV/VAC (ACE, 6-month lead) | `conflict_forecasts` |
-| **FEWS NET IPC** | `resolver/connectors/fewsnet_ipc.py` | Phase 3+ population estimates (DR hazard; Current Situation + Most Likely) | `facts_resolved` (via Resolver pipeline) |
+| **FEWS NET IPC** | `resolver/connectors/fewsnet_ipc.py` | Phase 3+ population estimates (DR hazard; Current Situation + Most Likely). The stored value is the LOWER bound of FEWS NET's published range (e.g. 1,000,000 for "1.0 - 2.49 million"); `probe_fewsnet_values.yml` re-checks this | `facts_resolved` (via Resolver pipeline) |
 | **GDACS** | `resolver/connectors/gdacs.py` | Disaster population exposure + event occurrence (FL/DR/TC) | `facts_resolved` (via Resolver pipeline) |
 | **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD). Wayback Machine scraper (monthly, in CI) + Gemini grounding (runtime fallback) | `crisiswatch_entries` |
 | **GDELT** | `pythia/gdelt.py` | Media-derived conflict intensity indicators from GDELT 1.0 daily event exports (CAMEO-tiered, Goldstein, tone; ACE only) | `gdelt_conflict_indicators` |
