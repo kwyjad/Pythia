@@ -75,6 +75,9 @@ UNITS[PROB_BELOW_VARIABLE] = "probability"
 #: moved half again above it; the drought gate's threshold lives in the
 #: rulebook and is chosen from the measured crossing frequency.
 PROB_BELOW_CATEGORY = 0.5
+#: The three category probabilities of a forecast cell sum to one; a cell
+#: summing to less than this carries no forecast.
+PROB_VALID_TOTAL = 0.5
 
 # Legacy names, kept for callers; the threshold is per variable now.
 TERCILE_UPPER = 0.5
@@ -373,7 +376,9 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
 
         # Weighted mean: sum(data * weight) / sum(weight)
         weighted_sum = (region_data * weights).sum(skipna=True)
-        weight_sum = (weights * region_mask.astype(float)).sum(skipna=True)
+        # Count only the cells that carry a value: a masked (NaN) cell inside
+        # the region must not pull the mean toward zero.
+        weight_sum = (weights * (region_mask & da.notnull()).astype(float)).sum(skipna=True)
 
         if float(weight_sum) == 0:
             skipped_weight += 1
@@ -730,6 +735,20 @@ def _aggregate_prob_nc(nc_path: Path, max_leads: int = MAX_LEAD_MONTHS) -> list[
         if da is None:
             return []
         da = _prob_as_fraction(da)
+        # A cell CPC does not forecast (a dry-season or arid mask) carries
+        # zero in all three categories. Read as a probability, that zero says
+        # "not dry"; it means "no forecast", so it is masked before the
+        # country mean (run 37309053250: EGY, LBY and SAU read 0.00 in every
+        # month, NER, MLI and SDN from October to April).
+        if {"prob_above", "prob_norm"} <= set(ds.data_vars):
+            total = sum(
+                _prob_as_fraction(_prepare_data_array(ds[[name]]))
+                for name in ("prob_above", "prob_below", "prob_norm")
+            )
+            n_masked = int((total < PROB_VALID_TOTAL).sum())
+            da = da.where(total >= PROB_VALID_TOTAL)
+            if n_masked:
+                log.info("NMME probability: %d cell-lead(s) carry no forecast and are masked", n_masked)
         # The file carries a singleton ``initial_time`` BEFORE ``target``;
         # squeeze every singleton first or it would be read as the lead axis.
         for dim in list(da.dims):

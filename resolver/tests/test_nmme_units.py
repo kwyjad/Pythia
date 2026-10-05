@@ -93,7 +93,7 @@ def test_rows_without_units_are_purged_and_refetched():
 # --- CPC's probability of below-normal precipitation (Oct 2026) -----------
 
 
-def _prob_nc(tmp_path, below, scale=1.0):
+def _prob_nc(tmp_path, below, scale=1.0, masked_lat=None):
     shape = (1, 2, 3, 4)
     coords = {"initial_time": [800.0], "target": [800.0, 801.0],
               "lat": [10.0, 11.0, 12.0], "lon": [0.0, 1.0, 2.0, 3.0]}
@@ -103,6 +103,9 @@ def _prob_nc(tmp_path, below, scale=1.0):
         "prob_below": (dims, np.full(shape, below * scale, dtype="float32")),
         "prob_norm": (dims, np.full(shape, (0.8 - below) * scale, dtype="float32")),
     }, coords=coords)
+    if masked_lat is not None:
+        for name in ("prob_above", "prob_below", "prob_norm"):
+            ds[name].loc[dict(lat=masked_lat)] = 0.0
     path = tmp_path / "prate.202609.prob.adj.mon.nc"
     ds.to_netcdf(path)
     return path
@@ -147,3 +150,46 @@ def test_crossing_table_counts_country_months_and_countries():
     assert row["share_crossing"] == 0.25
     assert row["countries_ever_crossing"] == 1
     assert row["per_country"] == {"EGY": 1, "GTM": 0}
+
+
+def test_a_cell_with_no_forecast_is_masked_not_read_as_zero(tmp_path, monkeypatch):
+    # Two of three latitude rows carry 0.6; the third is CPC's mask (all zero).
+    import regionmask  # noqa: F401  real aggregation, one synthetic region
+
+    class _Region:
+        abbrev = "SOM"
+        name = "Somalia"
+
+    class _Regions:
+        numbers = [0]
+
+        def mask(self, da):
+            return xr.zeros_like(da, dtype=float)
+
+        def __getitem__(self, i):
+            return _Region()
+
+    monkeypatch.setattr(nmme, "_get_country_regions", lambda: _Regions())
+    out = nmme._aggregate_prob_nc(_prob_nc(tmp_path, 0.6, masked_lat=12.0))
+    assert out[0][1]["anomaly_value"].iloc[0] == pytest.approx(0.6, abs=1e-3)
+
+
+def test_a_country_wholly_masked_writes_no_row(tmp_path, monkeypatch):
+    pytest.importorskip("regionmask")
+
+    class _Region:
+        abbrev = "EGY"
+        name = "Egypt"
+
+    class _Regions:
+        numbers = [0]
+
+        def mask(self, da):
+            return xr.zeros_like(da, dtype=float)
+
+        def __getitem__(self, i):
+            return _Region()
+
+    monkeypatch.setattr(nmme, "_get_country_regions", lambda: _Regions())
+    out = nmme._aggregate_prob_nc(_prob_nc(tmp_path, 0.0, masked_lat=[10.0, 11.0, 12.0]))
+    assert all(df.empty for _, df in out)
