@@ -375,6 +375,22 @@ def test_headline_matches_a_hand_computed_paired_skill(db):
     assert "+0.400" in lines
 
 
+def test_headline_is_also_split_by_horizon_and_the_digest_prints_h2_beside_h1(db):
+    ctx = _ctx(db)
+    head = ea.build_headline(ctx)
+    (g,) = [g for g in head["groups"] if g["metric"] == "FATALITIES"]
+    by_h = g["scores"]["brier"]["by_horizon"]
+    # The fixture scores horizon 1 only, so h1 carries the whole pooled figure
+    # and h2 is absent rather than invented.
+    assert set(by_h) == {"1"}
+    assert by_h["1"]["n_paired_questions"] == 2
+    assert by_h["1"]["skill_vs_climatology"] == pytest.approx(0.4)
+    lines = "\n".join(ea.headline_digest_lines(head))
+    assert "### Horizon 1 beside horizon 2" in lines
+    assert "| h1 n q | h1 skill vs clim [90%] | h2 n q | h2 skill vs clim [90%] |" in lines
+    assert "| ACE | FATALITIES | T1 | Brier | 2 ⚠ | +0.400" in lines and "| 0 | — |" in lines
+
+
 def test_skill_history_is_per_observed_month_and_split_on_partial_input(db):
     ctx = _ctx(db)
     rows = ea.build_skill_history(ctx)

@@ -39,6 +39,8 @@ on:
       # account tier vs schema change vs upstream stop for the CAST
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
+      # The twelve-edition CrisisWatch check reads its registered gaps here.
+      - "horizon_scanner/crisiswatch_known_gaps.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
       # The INFORM Warning probe lives under tools/ but its tests live here.
       - "tools/probe_inform_warning.py"
@@ -114,6 +116,8 @@ on:
       # account tier vs schema change vs upstream stop for the CAST
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
+      # The twelve-edition CrisisWatch check reads its registered gaps here.
+      - "horizon_scanner/crisiswatch_known_gaps.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
       # The INFORM Warning probe lives under tools/ but its tests live here.
       - "tools/probe_inform_warning.py"

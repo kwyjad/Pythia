@@ -196,6 +196,71 @@ def _recompute_trace_quality(
         member["trace_quality"] = result
 
 
+def _shown_prior_vector(shown: Mapping[str, Any] | None) -> tuple[list[float] | None, str | None]:
+    """The month-1 distribution the prompt told members to start from.
+
+    The level-and-volatility vector where the prompt showed one, else the
+    anchor ``forecast_deviation`` reconstructs. (None, reason) when neither.
+    """
+    if not isinstance(shown, Mapping):
+        return None, "base_rate_shown absent"
+    lv = shown.get("level_volatility") or {}
+    if lv.get("shown"):
+        vec = (lv.get("spd_by_horizon") or {}).get("1")
+        if isinstance(vec, list) and vec:
+            return [float(x) for x in vec], "level_volatility_h1"
+    anchor = shown.get("anchor") or {}
+    probs = anchor.get("probs")
+    if anchor.get("available") and isinstance(probs, list) and probs:
+        if all(isinstance(x, (int, float)) for x in probs):
+            return [float(x) for x in probs], f"anchor:{anchor.get('source')}"
+    return None, "no base-rate distribution recorded for this question"
+
+
+def rescore_trace_prior(record: dict[str, Any]) -> None:
+    """Score each member's stated prior against the base rate the prompt SHOWED.
+
+    ``trace_validation`` checks the prior against a base-rate summary the
+    bundle does not have, so it returned a constant 0.7 for every member and
+    40% of ``trace_quality_score`` was that constant. This replaces the prior
+    component with the same distance rule (modal bucket equal 1.0, one apart
+    0.7, further 0.3) measured against ``base_rate_shown``, and recomputes the
+    composite with the original weights. Where nothing was recorded the prior
+    is marked uncompared and the composite is the other two components
+    re-weighted, never a guessed constant.
+    """
+    vec, source = _shown_prior_vector(record.get("base_rate_shown"))
+    for m in record.get("members") or []:
+        tq = m.get("trace_quality")
+        if not isinstance(tq, dict) or not tq.get("has_trace"):
+            continue
+        delta = float((tq.get("delta_arithmetic") or {}).get("score") or 0.0)
+        mag = float((tq.get("magnitude_consistency") or {}).get("score") or 0.0)
+        prior = ((m.get("reasoning_trace") or {}).get("prior") or {}).get("spd")
+        if vec is None or not isinstance(prior, list) or len(prior) != len(vec):
+            reason = source if vec is None else "prior.spd missing or a different length from the shown vector"
+            tq["prior_quality"] = {"score": None, "compared": False, "detail": reason}
+            tq["trace_quality_score"] = round((0.4 * delta + 0.2 * mag) / 0.6, 4)
+            tq["trace_quality_basis"] = "delta_and_magnitude_only"
+            continue
+        try:
+            model_mode = max(range(len(prior)), key=lambda i: float(prior[i]))
+        except (TypeError, ValueError):
+            tq["prior_quality"] = {"score": 0.0, "compared": True, "detail": "prior.spd not numeric"}
+            tq["trace_quality_score"] = round(0.4 * delta + 0.2 * mag, 4)
+            tq["trace_quality_basis"] = "prior_vs_base_rate_shown"
+            continue
+        shown_mode = max(range(len(vec)), key=lambda i: vec[i])
+        distance = abs(model_mode - shown_mode)
+        score = 1.0 if distance == 0 else 0.7 if distance == 1 else 0.3
+        tq["prior_quality"] = {
+            "score": score, "compared": True, "shown_source": source,
+            "model_mode": model_mode, "shown_mode": shown_mode, "distance": distance,
+        }
+        tq["trace_quality_score"] = round(0.4 * score + 0.4 * delta + 0.2 * mag, 4)
+        tq["trace_quality_basis"] = "prior_vs_base_rate_shown"
+
+
 # ---------------------------------------------------------------------------
 # Per-question record
 # ---------------------------------------------------------------------------
@@ -781,9 +846,8 @@ ROLLUP_SPLIT_KEYS = _err.ROLLUP_SPLIT_KEYS
 
 def _group_key(sm: Mapping[str, Any]) -> tuple:
     """The question-level part of a rollup key (shared with climatology)."""
-    return (sm.get("hazard_code"), sm.get("metric"), sm.get("score_family"), sm.get("track")) + tuple(
-        sm.get(k) for k in ROLLUP_SPLIT_KEYS
-    )
+    return (sm.get("hazard_code"), sm.get("metric"), sm.get("score_family"), sm.get("track"),
+            sm.get("horizon_m")) + tuple(sm.get(k) for k in ROLLUP_SPLIT_KEYS)
 
 
 def _row_key(sm: Mapping[str, Any]) -> tuple:
@@ -853,6 +917,7 @@ def _emit_rollups(
         rows.append({
             "hazard_code": first["hazard_code"], "metric": first["metric"],
             "score_family": first["score_family"], "track": first["track"],
+            "horizon_m": first.get("horizon_m"),
             **{k: first.get(k) for k in ROLLUP_SPLIT_KEYS},
             "correction": first.get("correction"),
             "model_name": first["model_name"], "score_type": first["score_type"],
@@ -862,7 +927,8 @@ def _emit_rollups(
             "median_value": statistics.median(vals) if vals else None,
         })
     rows.sort(key=lambda r: (str(r["score_family"]), str(r["hazard_code"]), str(r["metric"]),
-                             str(r["track"]), tuple(str(r.get(k)) for k in ROLLUP_SPLIT_KEYS),
+                             str(r["track"]), int(r.get("horizon_m") or 0),
+                             tuple(str(r.get(k)) for k in ROLLUP_SPLIT_KEYS),
                              str(r["score_type"]),
                              r["mean_value"] if r["mean_value"] is not None else 0.0))
     _attach_skill(rows, samples)
@@ -878,8 +944,8 @@ def _emit_rollups(
     write_csv(
         out_dir / "rollups.csv",
         [
-            "hazard_code", "metric", "score_family", "track", *ROLLUP_SPLIT_KEYS, "correction",
-            "model_name", "score_type",
+            "hazard_code", "metric", "score_family", "track", "horizon_m", *ROLLUP_SPLIT_KEYS,
+            "correction", "model_name", "score_type",
             "n_samples", "n_questions", "n_questions_scored", "mean_value", "median_value",
             "n_paired", "paired_model_mean", "climatology_mean", "skill_vs_climatology",
             "cost_per_question_usd",
@@ -1591,6 +1657,10 @@ def build_bundle(
                 continue
             _attach_provenance(con, record, q, costs.get(qid) or {})
             meta = _attach_error_fields(con, record, q, err_ctx, err_ctx_error)
+            try:
+                rescore_trace_prior(record)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("trace prior rescoring failed for %s: %s", qid, exc)
             try:
                 inject_rows.extend(
                     _err.inject_health_rows(qid, meta, record.get("inject_status") or {})

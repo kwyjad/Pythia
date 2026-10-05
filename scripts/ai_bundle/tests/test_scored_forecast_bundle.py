@@ -370,8 +370,12 @@ def test_trace_quality_recomputed(built_bundle: Path) -> None:
     record = _read_json(built_bundle / "questions" / f"{QID_SPD}.json")
     member = record["members"][0]
     tq = member["trace_quality"]
-    # prior 0.7 (no base rate at bundle time) + delta 1.0 + magnitude 1.0
-    assert tq["trace_quality_score"] == pytest.approx(0.88)
+    # The fixture records no shown base rate, so the prior is uncompared and
+    # the score rests on delta 1.0 + magnitude 1.0 (it was a constant 0.7
+    # prior, 0.88 overall, before Oct 2026).
+    assert tq["prior_quality"]["compared"] is False
+    assert tq["trace_quality_basis"] == "delta_and_magnitude_only"
+    assert tq["trace_quality_score"] == pytest.approx(1.0)
     assert tq["has_trace"] is True
 
 
@@ -529,18 +533,23 @@ def test_rollups_carry_skill_vs_climatology(mini_db: str, tmp_path: Path) -> Non
     header = rows[0].keys()
     assert "climatology_mean" in header and "skill_vs_climatology" in header
 
-    def _row(model, score_type):
+    def _row(model, score_type, horizon="1"):
         matches = [
             r for r in rows
             if r["model_name"] == model and r["score_type"] == score_type
             and r["hazard_code"] == "ACE" and r["metric"] == "FATALITIES"
+            and r["horizon_m"] == horizon
         ]
-        assert matches, f"no rollup row for {model}/{score_type}"
+        assert matches, f"no rollup row for {model}/{score_type}/h{horizon}"
         return matches[0]
 
+    # Rows are split by horizon (Oct 2026): the mean ensemble's 0.4 over two
+    # horizons was 0.3 at h1 and 0.5 at h2, i.e. skill 0.625 and 0.375.
+    assert "horizon_m" in header
     mean_row = _row("ensemble_mean_v2", "brier")
     assert float(mean_row["climatology_mean"]) == pytest.approx(0.80)
-    assert float(mean_row["skill_vs_climatology"]) == pytest.approx(0.5)
+    assert float(mean_row["skill_vs_climatology"]) == pytest.approx(0.625)
+    assert float(_row("ensemble_mean_v2", "brier", "2")["skill_vs_climatology"]) == pytest.approx(0.375)
     # Climatology's own skill is exactly 0 (it matches itself).
     assert float(_row("__ext_climatology", "brier")["skill_vs_climatology"]) == pytest.approx(0.0)
     # crps has NO climatology reference in this fixture — skill must be empty,

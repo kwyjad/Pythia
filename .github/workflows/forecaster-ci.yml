@@ -429,6 +429,7 @@ jobs:
             pythia/tests/test_ace_fatalities_all_event_types.py \
             pythia/tests/test_ace_pa_conflict_displacement.py \
             pythia/tests/test_compute_resolutions.py \
+            pythia/tests/test_resolutions_repair_question_provenance.py \
             pythia/tests/test_acled_partial_month_resolution.py \
             pythia/tests/test_source_coverage.py \
             pythia/tests/test_diagnose_pa_coverage.py \
