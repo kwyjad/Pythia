@@ -1926,6 +1926,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "recalibration_json": "TEXT",
                 # Advice experiment arm (PYTHIA_ADVICE_EXPERIMENT_SHARE).
                 "advice_arm": "TEXT",
+                # RC shift-guidance split test (PYTHIA_RC_SHIFT_SHARE, Oct
+                # 2026): 'shift' or 'control' on Track 1 member rows, NULL
+                # when the test was off.
+                "rc_shift_arm": "TEXT",
             },
         )
 

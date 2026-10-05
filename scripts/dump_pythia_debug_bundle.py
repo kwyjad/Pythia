@@ -1894,6 +1894,80 @@ def _load_llm_call_counts(
     )
 
 
+def _load_recalibration_health(
+    con: duckdb.DuckDBPyConnection, forecaster_run_id: str | None
+) -> list[dict[str, Any]]:
+    """Per (hazard, metric): was family recalibration applied, shadowed or
+    absent for this run, and why (Oct 2026).
+
+    Read off the members' own ``forecasts_raw.recalibration_json`` and the
+    ``<model>__raw`` / ``<model>__recal`` copies the run wrote, beside the
+    factors ``family_recalibration`` holds. The 1 October 2026 run wrote no
+    copy at all, because the factors were first fitted the next day, and
+    nothing said so. Never raises.
+    """
+    out: list[dict[str, Any]] = []
+    if not forecaster_run_id:
+        return out
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info('forecasts_raw')").fetchall()}
+        if "recalibration_json" not in cols:
+            return out
+        rows = con.execute(
+            """
+            SELECT upper(q.hazard_code), upper(q.metric),
+                   CASE WHEN fr.model_name LIKE '%\\_\\_recal' ESCAPE '\\' THEN 'copy_recal'
+                        WHEN fr.model_name LIKE '%\\_\\_raw' ESCAPE '\\' THEN 'copy_raw'
+                        ELSE COALESCE(json_extract_string(fr.recalibration_json, '$.mode'), 'unrecorded')
+                   END AS mode,
+                   ANY_VALUE(json_extract_string(fr.recalibration_json, '$.reason')) AS reason,
+                   COUNT(DISTINCT fr.model_name) AS n_members
+            FROM forecasts_raw fr JOIN questions q ON q.question_id = fr.question_id
+            WHERE fr.run_id = ?
+            GROUP BY 1, 2, 3
+            ORDER BY 1, 2, 3
+            """,
+            [forecaster_run_id],
+        ).fetchall()
+        fitted: set[tuple[str, str]] = set()
+        try:
+            fitted = {
+                (str(h).upper(), str(m).upper())
+                for h, m in con.execute(
+                    "SELECT DISTINCT hazard_code, metric FROM family_recalibration"
+                ).fetchall()
+            }
+        except Exception:  # noqa: BLE001 - no table: nothing fitted
+            fitted = set()
+    except Exception as exc:  # noqa: BLE001
+        return [{"error": str(exc)}]
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for hz, metric, mode, reason, n in rows:
+        g = groups.setdefault((hz, metric), {"hazard_code": hz, "metric": metric, "modes": {}, "reasons": {}})
+        g["modes"][mode] = int(n)
+        if reason:
+            g["reasons"][mode] = reason
+    for (hz, metric), g in groups.items():
+        modes = g["modes"]
+        if "apply" in modes or "copy_raw" in modes:
+            state = "applied"
+        elif "copy_recal" in modes or "shadow" in modes or "auto_shadow" in modes:
+            state = "shadowed"
+        else:
+            state = "absent"
+        why = (
+            g["reasons"].get("auto_shadow")
+            or g["reasons"].get("none")
+            or ("mode off" if "off" in modes and set(modes) <= {"off", "unrecorded"} else "")
+            or ("nothing recorded on the member rows" if set(modes) == {"unrecorded"} else "")
+        )
+        if state == "absent" and (hz, metric) not in fitted and not why:
+            why = "no factors fitted for this group"
+        g.update({"state": state, "why": why, "factors_fitted": (hz, metric) in fitted})
+        out.append(g)
+    return out
+
+
 def _load_batch_health(
     con: duckdb.DuckDBPyConnection,
     hs_run_id: str | None,
@@ -3106,6 +3180,7 @@ class BundleData:
     # LLM call counts
     llm_call_counts: list[dict[str, Any]] = field(default_factory=list)
     batch_health: dict[str, Any] = field(default_factory=dict)
+    recalibration_health: list[dict[str, Any]] = field(default_factory=list)
     llm_error_rows: list[dict[str, Any]] = field(default_factory=list)
     llm_calls_skip_note: str | None = None
     self_search_stats: dict[str, int] = field(default_factory=dict)
@@ -3352,6 +3427,7 @@ def _load_bundle_data(
         data.batch_health = _load_batch_health(
             con, hs_run_id, forecaster_run_id, data.predicate, data.predicate_params
         )
+        data.recalibration_health = _load_recalibration_health(con, forecaster_run_id)
     except Exception as exc:
         data.llm_calls_skip_note = f"Error loading llm_calls: {exc}"
     data.latency_block = render_latency_markdown(
@@ -3960,6 +4036,19 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         checks.append(
             {"subsystem": "Batch Economics", "status": b_status, "detail": " · ".join(parts)}
         )
+
+    # Family recalibration: applied, shadowed or absent, per hazard/metric.
+    rh = [g for g in (data.recalibration_health or []) if "state" in g]
+    if rh:
+        checks.append({
+            "subsystem": "Family Recalibration",
+            "status": "OK",
+            "detail": " · ".join(
+                f"{g['hazard_code']}/{g['metric']}: {g['state']}"
+                + (f" ({g['why']})" if g.get("why") else "")
+                for g in rh
+            ),
+        })
 
     # Ensemble completeness (forecaster only)
     if data.forecaster_run_id:

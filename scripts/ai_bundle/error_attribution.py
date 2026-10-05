@@ -88,6 +88,7 @@ ROLLUP_SPLIT_KEYS = (
     "lineup_id",
     "base_rate_block_version",
     "rc_guidance",
+    "rc_shift_arm",
     "advice_arm",
     "recalibration_mode",
     "input_partial_month",
@@ -537,7 +538,7 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
         "AND model_name NOT LIKE '%\\_\\_recal' ESCAPE '\\'"
     )
     if fr:
-        for col in ("base_rate_block_version", "rc_guidance", "advice_arm"):
+        for col in ("base_rate_block_version", "rc_guidance", "rc_shift_arm", "advice_arm"):
             if column_exists(con, "forecasts_raw", col):
                 attrs[col] = _mode_by_run_question(con, col, member_where)
         if column_exists(con, "forecasts_raw", "recalibration_json"):
@@ -598,6 +599,7 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
             "lineup_id": lineups.get(key),
             "base_rate_block_version": _label((attrs.get("base_rate_block_version") or {}).get(key), "none"),
             "rc_guidance": _label((attrs.get("rc_guidance") or {}).get(key), "legacy"),
+            "rc_shift_arm": _label((attrs.get("rc_shift_arm") or {}).get(key), "none"),
             "advice_arm": _label((attrs.get("advice_arm") or {}).get(key), "none"),
             "recalibration_mode": _label((attrs.get("recalibration_mode") or {}).get(key), "off"),
             "rc_level": t.get("regime_change_level"),
