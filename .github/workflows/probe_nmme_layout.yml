@@ -1,0 +1,54 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: lists what CPC publishes under /NMME (climatologies, probability
+# products) so the NMME precipitation thresholds can be set on a relative
+# measure. No DB, no secrets, outside the pythia-resolver-db group. It also
+# runs on a pull request that changes the probe itself, because the build
+# sandbox cannot reach CPC and the answer is needed before the change lands.
+name: Probe NMME layout
+
+"on":
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/ci/probe_nmme_layout.py"
+      - "scripts/ci/nmme_prob_crossing.py"
+      - "resolver/ingestion/nmme.py"
+      - ".github/workflows/probe_nmme_layout.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: >-
+          pip install -c constraints-ci.txt xarray netCDF4 regionmask
+          pandas pycountry "numpy<3"
+      - name: Probe
+        run: python -m scripts.ci.probe_nmme_layout
+      - name: Crossing frequency over the last 12 issues
+        timeout-minutes: 30
+        run: python -m scripts.ci.nmme_prob_crossing 12
+      - name: Upload layout
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nmme-layout
+          path: |
+            diagnostics/nmme_layout.json
+            diagnostics/nmme_prob_crossing.json
+          retention-days: 14

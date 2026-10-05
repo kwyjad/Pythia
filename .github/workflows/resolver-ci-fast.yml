@@ -33,6 +33,7 @@ on:
       - "pyproject.toml"
       - "scripts/ci/collect_diagnostics.py"
       - "scripts/ci/inspect_resolver_db.py"
+      - "scripts/ci/nmme_prob_crossing.py"
       - "scripts/ci/tests/test_inspect_resolver_db.py"
       # Guards resolver/connectors/acled_cast.py: the diagnostic decides
       # account tier vs schema change vs upstream stop for the CAST
@@ -107,6 +108,7 @@ on:
       - "pyproject.toml"
       - "scripts/ci/collect_diagnostics.py"
       - "scripts/ci/inspect_resolver_db.py"
+      - "scripts/ci/nmme_prob_crossing.py"
       - "scripts/ci/tests/test_inspect_resolver_db.py"
       # Guards resolver/connectors/acled_cast.py: the diagnostic decides
       # account tier vs schema change vs upstream stop for the CAST

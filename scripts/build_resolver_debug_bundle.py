@@ -4337,7 +4337,7 @@ class BundleBuilder:
         ingest_nmme merged 2,408 rows and the drought pass then logged
         "seasonal_forecasts holds no usable rows" for every month. A month
         some vintage forecasts (issue + lead = month) must have an
-        nmme_precip_anomaly snapshot in the indicator cache.
+        nmme_precip_prob_below snapshot in the indicator cache.
         """
 
         name = "nmme_indicator_read_for_every_month_seasonal_forecasts_covers"
@@ -4358,7 +4358,7 @@ class BundleBuilder:
             """
             SELECT DISTINCT substr(CAST(forecast_issue_date AS VARCHAR), 1, 7),
                    lead_months
-            FROM seasonal_forecasts WHERE variable = 'prate'
+            FROM seasonal_forecasts WHERE variable = 'prate_prob_below'
             """
         )
         covered: set[str] = set()
@@ -4372,8 +4372,8 @@ class BundleBuilder:
         cached = self.query(
             """
             SELECT DISTINCT ym FROM haz_raw_drought_indicators
-            WHERE payload_json LIKE '%"name":"nmme_precip_anomaly"%'
-               OR payload_json LIKE '%"name": "nmme_precip_anomaly"%'
+            WHERE payload_json LIKE '%"name":"nmme_precip_prob_below"%'
+               OR payload_json LIKE '%"name": "nmme_precip_prob_below"%'
             """
         )
         have = {str(r[0]) for r in (cached[1] if cached else [])}
@@ -4389,7 +4389,7 @@ class BundleBuilder:
             f"{len(due) - len(missing)} of {len(due)} covered months read",
             f"{len(due)} ({due})",
             "Missing: " + (", ".join(missing) or "none") + ". A month a vintage "
-            "forecasts (issue + lead_months) must yield an nmme_precip_anomaly "
+            "forecasts (issue + lead_months) must yield an nmme_precip_prob_below "
             "snapshot; a miss means the lookup, not the ingest, is broken.",
         )
 

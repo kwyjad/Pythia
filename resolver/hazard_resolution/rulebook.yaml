@@ -372,12 +372,15 @@ drought:
         absence_means_no_drought: true
         drought_classes: ["high concern", "high", "medium concern", "medium", "alarm", "warning"]
 
-      # NMME country-mean precipitation anomaly, in sigma units, already
-      # ingested monthly into seasonal_forecasts. Supporting evidence, never
-      # a primary gate: this is a FORECAST for the month rather than an
+      # NMME: CPC's calibrated probability that the month's precipitation
+      # falls in the bottom tercile of the model climatology, as a country
+      # mean (resolver.ingestion.nmme, variable prate_prob_below), ingested
+      # monthly into seasonal_forecasts. Supporting evidence, never a
+      # primary gate: this is a FORECAST for the month rather than an
       # observation of it, which is why it is required: false. A country
-      # absent from NMME is unknown, not dry.
-      - name: nmme_precip_anomaly
+      # absent from NMME, or one CPC does not forecast in that month (its
+      # dry-season and arid mask), is unknown, not dry.
+      - name: nmme_precip_prob_below
         provider: pythia_table
         table: seasonal_forecasts
         url: ""
@@ -396,20 +399,23 @@ drought:
         # shortest lead (the most recent issue) wins — pinning lead_months
         # here meant a month whose lead-1 vintage was not in the table read
         # as "no usable rows" while other vintages about it were.
-        where: "variable = 'prate'"
+        where: "variable = 'prate_prob_below'"
         match: threshold
         absence_means_no_drought: false
-        # The value is the ensemble-mean precipitation anomaly in mm/day
-        # (resolver.ingestion.nmme.UNITS). It was written as "-1.0 sigma"
-        # until Oct 2026, but CPC publishes the anomaly in mm/s and the
-        # ingest stored that rounded to zero, so this entry never fired.
-        # -1.0 mm/day is about 30 mm below normal over a month: a statement
-        # that the month is forecast dry, and one a hyper-arid country can
-        # never meet, which is the conservative failure for an attribution
-        # gate. NOT a tercile split, which would cover a third of countries
-        # in any month and file conflict-driven food insecurity as drought.
-        threshold: -1.0
-        direction: below
+        # Relative by construction: climatology puts every cell at 1/3, in
+        # the Sahel dry season and the Central American wet season alike.
+        # The entry it replaced read the ensemble-mean anomaly against
+        # -1.0 mm/day, which a hyper-arid country can never meet and a wet
+        # one meets with an ordinary shortfall: over the twelve issues to
+        # 2026-09 (run 37309526026) 124 of 234 countries never crossed it
+        # while Guatemala and Honduras read -4 mm/day. 0.5 is a forecast
+        # moved half again above climatology; over the same issues 11.2%
+        # of 2,538 country-months crossed it, 136 of 229 countries at least
+        # once (median one month), arid countries included in the months
+        # CPC forecasts them. 0.45 crossed 18% and 0.40 28%, near enough a
+        # tercile split to file conflict-driven food insecurity as drought.
+        threshold: 0.5
+        direction: above
 
       # NOT offered, deliberately: FEWS NET / IPC Phase 3+. That is the very
       # quantity the drought rule differences, so admitting it here would

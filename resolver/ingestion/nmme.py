@@ -58,6 +58,27 @@ _SCALE_TO_UNITS = {"tmp2m": 1.0, "prate": 86400.0}  # K anomaly == degC anomaly
 # +/-0.5 mm/day (about 15 mm a month) mark a forecast clearly off normal.
 CATEGORY_THRESHOLDS = {"tmp2m": 0.5, "prate": 0.5}
 
+# CPC's own calibrated probability that the month's precipitation falls in
+# the lowest tercile of the model climatology (``/NMME/prob/netcdf/
+# prate.YYYYMM.prob.adj.mon.nc``, published monthly since 2019-01; read off
+# the CPC tree by run 37308579442, 2026-10-05). It is RELATIVE by
+# construction: climatologically every grid cell sits at one third, in the
+# Sahel dry season and the Central American wet season alike, which an
+# absolute anomaly in mm/day can never be. Stored as its own variable,
+# 0..1, with units ``probability``.
+PROB_BELOW_VARIABLE = "prate_prob_below"
+PROB_FTP_DIR = "/NMME/prob/netcdf"
+PROB_FILE_TEMPLATE = "prate.{ym}.prob.adj.mon.nc"
+UNITS[PROB_BELOW_VARIABLE] = "probability"
+#: A month is categorised ``below_normal`` when the chance of a bottom-tercile
+#: month is at least this. Climatology is 1/3, so 0.5 is a forecast that has
+#: moved half again above it; the drought gate's threshold lives in the
+#: rulebook and is chosen from the measured crossing frequency.
+PROB_BELOW_CATEGORY = 0.5
+#: The three category probabilities of a forecast cell sum to one; a cell
+#: summing to less than this carries no forecast.
+PROB_VALID_TOTAL = 0.5
+
 # Legacy names, kept for callers; the threshold is per variable now.
 TERCILE_UPPER = 0.5
 TERCILE_LOWER = -0.5
@@ -355,7 +376,9 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
 
         # Weighted mean: sum(data * weight) / sum(weight)
         weighted_sum = (region_data * weights).sum(skipna=True)
-        weight_sum = (weights * region_mask.astype(float)).sum(skipna=True)
+        # Count only the cells that carry a value: a masked (NaN) cell inside
+        # the region must not pull the mean toward zero.
+        weight_sum = (weights * (region_mask & da.notnull()).astype(float)).sum(skipna=True)
 
         if float(weight_sum) == 0:
             skipped_weight += 1
@@ -661,8 +684,97 @@ def _aggregate_multi_lead_nc(
     return results
 
 
+def _download_prob_file(issue_ym: str, dest: Path) -> Optional[Path]:
+    """Download CPC's adjusted monthly probability file for ``issue_ym``.
+
+    Returns None when the file is not there; a missing probability file
+    costs this variable and nothing else.
+    """
+    fname = PROB_FILE_TEMPLATE.format(ym=issue_ym)
+    try:
+        with FTP(FTP_HOST) as ftp:
+            ftp.login()
+            ftp.cwd(PROB_FTP_DIR)
+            if fname not in set(ftp.nlst()):
+                log.warning("NMME probability file not published: %s/%s", PROB_FTP_DIR, fname)
+                return None
+            local = dest / fname
+            with open(local, "wb") as fh:
+                ftp.retrbinary(f"RETR {fname}", fh.write)
+            return local
+    except Exception as exc:  # noqa: BLE001 - the anomaly rows must still land
+        log.warning("NMME probability file %s not read: %s", fname, exc)
+        return None
+
+
+def _prob_as_fraction(da):
+    """CPC labels the field "percent" and stores fractions (0.01..0.84 in the
+    probe). Read it as a fraction either way."""
+    try:
+        if float(da.max(skipna=True)) > 1.5:
+            return da / 100.0
+    except Exception:  # noqa: BLE001
+        pass
+    return da
+
+
+def _aggregate_prob_nc(nc_path: Path, max_leads: int = MAX_LEAD_MONTHS) -> list[tuple[int, pd.DataFrame]]:
+    """Per-lead country means of the probability of below-normal precipitation.
+
+    Leads are numbered as the anomaly file's are (index + 1 on the target
+    axis), so the two variables of one issue speak for the same months.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(nc_path, decode_times=False)
+    try:
+        if "prob_below" not in ds.data_vars:
+            log.warning("NMME probability file %s has no prob_below: %s", nc_path.name, list(ds.data_vars))
+            return []
+        da = _prepare_data_array(ds[["prob_below"]])
+        if da is None:
+            return []
+        da = _prob_as_fraction(da)
+        # A cell CPC does not forecast (a dry-season or arid mask) carries
+        # zero in all three categories. Read as a probability, that zero says
+        # "not dry"; it means "no forecast", so it is masked before the
+        # country mean (run 37309053250: EGY, LBY and SAU read 0.00 in every
+        # month, NER, MLI and SDN from October to April).
+        if {"prob_above", "prob_norm"} <= set(ds.data_vars):
+            total = sum(
+                _prob_as_fraction(_prepare_data_array(ds[[name]]))
+                for name in ("prob_above", "prob_below", "prob_norm")
+            )
+            n_masked = int((total < PROB_VALID_TOTAL).sum())
+            da = da.where(total >= PROB_VALID_TOTAL)
+            if n_masked:
+                log.info("NMME probability: %d cell-lead(s) carry no forecast and are masked", n_masked)
+        # The file carries a singleton ``initial_time`` BEFORE ``target``;
+        # squeeze every singleton first or it would be read as the lead axis.
+        for dim in list(da.dims):
+            if dim not in ("lat", "lon") and da.sizes[dim] == 1:
+                da = da.squeeze(dim, drop=True)
+        lead_dim = _find_lead_dim(da)
+        countries = _get_country_regions()
+        if lead_dim is None:
+            mask = countries.mask(da)
+            df = _aggregate_2d_field_to_countries(da, countries, mask)
+            return [(1, df)] if not df.empty else []
+        mask = countries.mask(da.isel({lead_dim: 0}))
+        out: list[tuple[int, pd.DataFrame]] = []
+        for i in range(min(da.sizes[lead_dim], max_leads)):
+            df = _aggregate_2d_field_to_countries(da.isel({lead_dim: i}), countries, mask)
+            if not df.empty:
+                out.append((i + 1, df))
+        return out
+    finally:
+        ds.close()
+
+
 def _classify_tercile(anomaly: float, variable: Optional[str] = None) -> str:
     """Category from an anomaly in the variable's stored units (``UNITS``)."""
+    if variable == PROB_BELOW_VARIABLE:
+        return "below_normal" if anomaly >= PROB_BELOW_CATEGORY else "near_normal"
     limit = CATEGORY_THRESHOLDS.get(variable or "", TERCILE_UPPER)
     if anomaly > limit:
         return "above_normal"
@@ -746,6 +858,13 @@ def fetch_and_process(
             if df.empty:
                 continue
             df["variable"] = entry["variable"]
+            df["lead_months"] = lead_month
+            all_rows.append(df)
+
+    prob_path = _download_prob_file(issue_ym, dest_dir)
+    if prob_path is not None:
+        for lead_month, df in _aggregate_prob_nc(prob_path, max_leads=max_leads):
+            df["variable"] = PROB_BELOW_VARIABLE
             df["lead_months"] = lead_month
             all_rows.append(df)
 
