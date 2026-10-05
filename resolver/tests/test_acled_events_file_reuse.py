@@ -359,3 +359,22 @@ def test_staged_roundtrip_matches_direct_aggregation(tmp_path, monkeypatch):
         via_staged.drop(columns=drop_cols),
         via_direct.drop(columns=drop_cols),
     )
+
+
+def test_monthly_fatalities_records_the_newest_event_date(monkeypatch):
+    """The writer holds back a month ending after this date, so the client
+    must record it, across every country and before any country filter."""
+    client = _make_client(monkeypatch)
+    assert client.latest_event_date is None
+    events = pd.DataFrame(
+        {
+            "event_date": ["2024-03-05", "2024-03-27", "2024-02-10"],
+            "iso3": ["AFG", "ALB", "AFG"],
+            "country": ["Afghanistan", "Albania", "Afghanistan"],
+            "fatalities": [2, 4, 1],
+        }
+    )
+    client.monthly_fatalities(
+        "2024-01-01", "2024-03-31", countries=["AFG"], events_frame=events
+    )
+    assert client.latest_event_date == pd.Timestamp("2024-03-27")

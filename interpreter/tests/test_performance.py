@@ -35,15 +35,15 @@ class TestUpcomingResolutions:
         ]
 
     def test_a_window_month_resolves_the_month_after_it(self):
-        # The pipeline resolves the previous COMPLETE month, on the 28th.
-        assert performance.resolution_date_for("2026-09") == "2026-10-28"
+        # The pipeline resolves the previous COMPLETE month, on the 11th.
+        assert performance.resolution_date_for("2026-09") == "2026-10-11"
 
     def test_the_dormant_state_knows_what_is_coming_and_when(self):
         out = performance.upcoming_resolutions(
             self._questions(), as_of="2026-08-10"
         )
         assert out["n_question_horizons"] == 12  # two questions, six months
-        assert out["first_resolution_date"] == "2026-10-28"
+        assert out["first_resolution_date"] == "2026-10-11"
         assert out["first_resolution_window_month"] == "September 2026"
         assert out["n_first_resolution_horizons"] == 2
         assert out["by_hazard"] == {"ACE": 6, "DR": 6}
@@ -59,7 +59,7 @@ class TestUpcomingResolutions:
             self._questions(), as_of="2026-08-10"
         )
         text = " ".join(performance.dormant_sentences(out))
-        assert "2026-10-28" in text
+        assert "2026-10-11" in text
         assert "September 2026" in text
         assert "shadow mode" in text
 

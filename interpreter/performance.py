@@ -42,9 +42,10 @@ from interpreter.decisions import add_months, month_label, parse_ym
 N_HORIZONS = 6
 
 # The resolution pipeline resolves the previous COMPLETE month, and its
-# monthly cycle starts on the 28th (resolver_update -> compute_resolutions).
-# So a window month resolves on the 28th of the month after it.
-RESOLUTION_DAY = 28
+# monthly cycle starts on the 11th (resolver_update -> compute_resolutions;
+# the 28th until the 2026-10-05 move). So a window month resolves on the
+# 11th of the month after it.
+RESOLUTION_DAY = 11
 
 VERDICT_TOO_FEW = "too few to say"
 VERDICT_BETTER = "better than assuming a normal year"

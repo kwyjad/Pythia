@@ -684,10 +684,15 @@ def _purge_non_series_fatalities(conn) -> int:
 #: was gone. The first resolution and the ones taken at 60 and 90 days after
 #: month end are kept here and never overwritten.
 #:
-#: The resolver runs on the 28th (``resolver_update.yml``), so a month is
-#: resolved at ~28, ~58-59 and ~89-92 days after it ends; a milestone is
-#: recorded by the first run at or after ``days - VINTAGE_TOLERANCE_DAYS``,
-#: and the row carries the ACTUAL day count, never the milestone's.
+#: The resolver runs on the 11th (``resolver_update.yml``; the 28th until
+#: 2026-10-05), so a month is first resolved ~11 days after it ends and again
+#: at ~41, ~72 and ~103 days. A milestone is recorded by the first run at or
+#: after ``days - VINTAGE_TOLERANCE_DAYS``, so on the 11th cycle ``d60`` lands
+#: at ~72 days and ``d90`` at ~103 (the ~41-day run records no milestone),
+#: and the row carries the ACTUAL day count, never the milestone's. The
+#: milestones keep their meaning (a month's count about two and three months
+#: on) rather than following the calendar, so vintages written under the two
+#: cycles stay comparable; ``days_after_month_end`` says how far each was.
 VINTAGE_MILESTONES: tuple[tuple[str, int], ...] = (("d60", 60), ("d90", 90))
 VINTAGE_TOLERANCE_DAYS = 5
 VINTAGE_METRICS = frozenset({"FATALITIES"})

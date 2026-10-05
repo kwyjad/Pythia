@@ -25,7 +25,7 @@ name: Hazard Backcast
 # at workflow level the gate job (which usually decides to SKIP) took the
 # group's single pending slot before deciding anything, and a newer queued run
 # cancels whatever is pending — including a poller-dispatched pipeline stage
-# or the 1st-of-month hs_submit cron itself.
+# or the monthly hs_submit cron itself (the 13th).
 
 "on":
   workflow_dispatch:
@@ -96,25 +96,32 @@ name: Hazard Backcast
         default: ""
         type: string
   schedule:
-    # Nightly at 20:30 UTC, sized against the 28th 03:00 UTC resolver-update
-    # cron: GitHub fires crons late (observed +17 min, up to +60), so worst
-    # case this starts ~21:30; ~20 min setup + canonical download, the
-    # 240-min default budget, then base rates + signature + a ~20-min
-    # canonical upload finish by ~02:40 even on a bad night — the
-    # pythia-resolver-db group is free before 03:00. Do not raise the
-    # default budget or move this cron later without redoing that sum
-    # (the group holds ONE pending run, so a backcast still holding it at
-    # 03:00 puts the monthly ingest into the pending slot a third run can
-    # cancel).
+    # Nightly at 20:30 UTC, sized against the 11th 03:00 UTC resolver-update
+    # cron: GitHub fires crons late (observed +17 min, up to +60 on a normal
+    # night), so worst case this starts ~21:30; ~20 min setup + canonical
+    # download, the 240-min default budget, then base rates + signature + a
+    # ~20-min canonical upload finish by ~02:40 even on a bad night — the
+    # pythia-resolver-db group would be free before 03:00. Do not raise the
+    # default budget or move this cron later without redoing that sum (the
+    # group holds ONE pending run, so a backcast still holding it at 03:00
+    # puts the monthly ingest into the pending slot a third run can cancel).
     #
-    # The 27th and 28th are skipped outright. Crons are delivered HOURS late
-    # in this repo (the 28 Aug 2026 resolver-update tick arrived 11h41m
-    # late), so "before 03:00" is not a promise the sum above can keep, and
-    # the group's single pending slot then cancels whichever of the monthly
-    # ingest, the resolutions chain hanging off it, or this run queued last.
-    # Two nights of a self-converging replay cost nothing; a cancelled
-    # compute_resolutions costs the month's scores and calibration.
-    - cron: "30 20 1-26,29-31 * *"
+    # The 10th, 11th and 12th are skipped outright (they were the 27th and
+    # 28th until the 2026-10-05 move to an 11th/13th cycle). Crons are
+    # delivered HOURS late in this repo (the 28 Aug 2026 resolver-update tick
+    # arrived 11h41m late), so "before 03:00" is not a promise the sum above
+    # can keep, and the group's single pending slot then cancels whichever
+    # of the monthly ingest, the resolutions chain hanging off it, or this
+    # run queued last. Skipping the 10th leaves the last pre-ingest backcast
+    # (the 9th, done by ~02:40 on the 10th) a full day clear of the 11th
+    # 03:00 tick; skipping the 11th keeps the resolutions -> scores ->
+    # calibration chain clear. The 12th is skipped for the forecast's sake:
+    # a 12th-night run (20:30 -> ~02:40) would hold the group across the
+    # 13th 00:00 hs_submit cron, which nothing re-dispatches. Three nights of
+    # a self-converging replay cost nothing. The freshness watchdog's limit
+    # for this workflow (scripts/ci/check_workflow_freshness.py) covers the
+    # four-day gap from the 9th night to the 13th.
+    - cron: "30 20 1-9,13-31 * *"
 
 permissions:
   contents: read
@@ -161,7 +168,7 @@ jobs:
       group: pythia-resolver-db
       cancel-in-progress: false
     # Budget (default 240 min) + download/upload/setup headroom, and a hard
-    # stop that frees the pythia-resolver-db group before the 28th 03:00 UTC
+    # stop that frees the pythia-resolver-db group before the 11th 03:00 UTC
     # resolver-update cron even on the slowest night (a killed night loses
     # only that night's chunk — the resume ledger continues tomorrow).
     timeout-minutes: 310

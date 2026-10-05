@@ -110,21 +110,22 @@ concurrency:
         default: "14400"
         type: string
   schedule:
-    # The 10th. The consolidated product this producer requests runs 2-3
-    # months behind real time and updates monthly, so no day of the month is
-    # "too early" for it — what the 10th buys is a fixed slot clear of the
-    # ingest chain. (An earlier version of this comment reasoned from ERA5T's
-    # five-day lag, which is the lag of a release this producer does not ask
-    # for; the figure also disagrees with the dataset page, which is the
-    # source to trust.)
+    # The 8th (moved from the 10th on 2026-10-05 with the 11th/13th cycle).
+    # The consolidated release runs 2-3 months behind real time and the
+    # intermediate one about a month, both updated monthly, so no day is
+    # "too early": a month not yet published on the 8th is planned again
+    # next run, because plan_window asks for every month the CSV lacks. What
+    # the 8th buys is a committed feed BEFORE Resolver Update on the 11th,
+    # whose Phase 2.5 drought pass reads it, and a slot clear of that ingest.
     #
-    # NOT the 27th or 28th, for the reason haz_backcast.yml documents: crons
-    # in this repository are delivered hours late (the 28 Aug 2026 tick
-    # arrived 11h41m late) and those two days belong to the monthly ingest
-    # and the resolutions chain hanging off it. This workflow holds no DB
-    # lock, but a six-hour job competing for runners on the one night the
-    # month's scores depend on is a cost with nothing on the other side.
-    - cron: "40 5 10 * *"
+    # NOT the 10th to the 12th, for the reason haz_backcast.yml documents:
+    # crons in this repository are delivered hours late (the 28 Aug 2026 tick
+    # arrived 11h41m late) and those days belong to the monthly ingest, the
+    # resolutions chain hanging off it and the forecast on the 13th. This
+    # workflow holds no DB lock, but a six-hour job competing for runners on
+    # the nights the month's scores depend on is a cost with nothing on the
+    # other side.
+    - cron: "40 5 8 * *"
 
 # contents: write covers the push. No pull-requests scope: there is no
 # pull-request route, for the reason the commit step documents.

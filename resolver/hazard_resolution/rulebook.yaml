@@ -976,7 +976,7 @@ extraction:
   # live_reserve_calls + backcast_max_calls_per_month <= max_calls_per_month.
   #
   # Sized for the live pass: three hazards over the trailing three unfrozen
-  # months, which is what resolver_update Phase 2.5 runs on the 28th.
+  # months, which is what resolver_update Phase 2.5 runs on the 11th.
   # 1500 -> 3000 on 2026-09-29: sweep-hit cells are now walked by the live
   # ladder too (reliefweb_sweep.confirm_hits_with_ladder), which reads
   # documents a bare trigger pass did not.

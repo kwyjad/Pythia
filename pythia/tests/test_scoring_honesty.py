@@ -254,6 +254,22 @@ def test_vintages_accumulate_and_are_never_overwritten() -> None:
     assert str(rows[0][3]) == "2026-09-28"
 
 
+def test_vintages_on_the_11th_cycle() -> None:
+    """Resolver Update on the 11th: first at ~11 days, nothing at ~41, d60 at
+    ~72, d90 at ~103 (the actual day count is what the row keeps)."""
+    con = duckdb.connect(":memory:")
+    cr._ensure_vintage_table(con)
+    kw = dict(question_id="Q1", horizon_m=1, observed_month="2026-10",
+              source_desc=cr.ACE_FATALITIES_SERIES, is_test=False, source_ts=None)
+    assert cr.record_vintages(con, value=1, today=date(2026, 11, 11), **kw) == ["first"]
+    assert cr.record_vintages(con, value=2, today=date(2026, 12, 11), **kw) == []
+    assert cr.record_vintages(con, value=3, today=date(2027, 1, 11), **kw) == ["d60"]
+    assert cr.record_vintages(con, value=4, today=date(2027, 2, 11), **kw) == ["d90"]
+    days = [r[0] for r in con.execute(
+        "SELECT days_after_month_end FROM resolution_vintages ORDER BY 1").fetchall()]
+    assert days == [11, 72, 103]
+
+
 @pytest.mark.db
 def test_compute_resolutions_stamps_the_acled_snapshot_and_a_vintage(
     tmp_path: Path, monkeypatch

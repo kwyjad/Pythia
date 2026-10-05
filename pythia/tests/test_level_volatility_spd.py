@@ -169,3 +169,36 @@ def test_known_at_accepts_dates_datetimes_and_strings():
     assert brs._as_date("2026-10-01 04:05:00") == date(2026, 10, 1)
     assert brs._usable_at("2026-08", date(2026, 9, 15))
     assert not brs._usable_at("2026-09", date(2026, 10, 1))
+
+
+def test_settle_days_matches_the_11th_13th_cycle(tmp_path):
+    """Resolver Update writes the month just ended on the 11th; the forecast
+    runs on the 13th. On 13 November 2026 the forecaster read October, so
+    the scored reference must read October too, while a forecast dated the
+    10th (before that ingest) could not have. Fails at the old value of 14,
+    which would put the 13 November level at September."""
+    assert brs.ACLED_SETTLE_DAYS == 11
+    con = _db(tmp_path)
+    _fill(con, "SOM", _stable(first="2024-11"))  # through 2026-10
+    # Ingest on 11 November, forecast on 13 November, window opens December.
+    _, _, d = brs.level_volatility_spds(con, "SOM", "2026-12", known_at="2026-11-13")
+    assert d["level_month"] == "2026-10"
+    # The prior-anchor block's gap from that level to month 1 is two months.
+    assert d["horizons"]["1"]["gap_months"] == 2
+    # Batches can carry created_at to the 15th: still October.
+    _, _, d15 = brs.level_volatility_spds(con, "SOM", "2026-12", known_at="2026-11-15")
+    assert d15["level_month"] == "2026-10"
+    # A forecast dated before the 11th ingest had not seen October.
+    _, _, d10 = brs.level_volatility_spds(con, "SOM", "2026-12", known_at="2026-11-10")
+    assert d10["level_month"] == "2026-09"
+
+
+def test_settle_days_leaves_old_1st_and_15th_forecasts_unchanged(tmp_path):
+    """References already scored for forecasts made on the 1st and the 15th
+    pick the same level month at 11 days as they did at 14."""
+    con = _db(tmp_path)
+    _fill(con, "SOM", _stable(first="2024-09"))  # through 2026-08
+    _, _, d1 = brs.level_volatility_spds(con, "SOM", "2026-10", known_at="2026-09-01")
+    assert d1["level_month"] == "2026-07"
+    _, _, d15 = brs.level_volatility_spds(con, "SOM", "2026-10", known_at="2026-09-15")
+    assert d15["level_month"] == "2026-08"

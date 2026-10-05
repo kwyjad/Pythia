@@ -51,6 +51,26 @@ def _current_month_start() -> pd.Timestamp:
     return today.to_period("M").to_timestamp(how="start")
 
 
+def _latest_event_date(client) -> "pd.Timestamp | None":
+    """The newest ACLED event date the client fetched, or None when unknown.
+
+    ``ACLEDClient.monthly_fatalities`` records it; a stub client in a test,
+    or an older client, carries none and the hold-back does not apply.
+    """
+    value = getattr(client, "latest_event_date", None)
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(None)
+    return ts.normalize()
+
+
 def _relpath(path: Path) -> str:
     try:
         return path.relative_to(ROOT).as_posix()
@@ -470,10 +490,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         if isinstance(work["updated_at"].dtype, pd.DatetimeTZDtype):
             work["updated_at"] = work["updated_at"].dt.tz_convert(None)
         work = work.sort_values(["iso3", "month"]).reset_index(drop=True)
-        # A month still in progress is not written. The ingest runs on the
-        # 28th and the forecast on the 1st, so a partial row was what the
-        # forecast read as "last month" (median 28% of the settled count on
-        # 1 August 2026, 75% on 1 September). The window always reaches back
+        # A month still in progress is not written. The ingest ran on the
+        # 28th and the forecast on the 1st (until 2026-10-05; now the 11th and
+        # the 13th), so a partial row was what the forecast read as "last
+        # month" (median 28% of the settled count on 1 August 2026, 75% on
+        # 1 September). The window always reaches back
         # past the month that has just ended, so every run rewrites it whole.
         current_month = _current_month_start()
         in_progress = work["month"] >= current_month
@@ -484,6 +505,33 @@ def run(argv: Sequence[str] | None = None) -> int:
                 int(in_progress.sum()),
             )
             work = work.loc[~in_progress].reset_index(drop=True)
+        # A month whose final week ACLED has not yet released is held back
+        # too. ACLED publishes weekly (Monday or Tuesday, covering Saturday to
+        # Friday of the week before), so on the 11th the month just ended is
+        # normally whole; if a release is late, the fetch's newest event falls
+        # before the month's last day and writing it would store a partial
+        # count as complete. The previous run's row (if any) stays, and the
+        # next run writes the month whole.
+        # Only on an all-country fetch: a run restricted to a few countries
+        # may legitimately see its newest event days before the month ends.
+        latest_event = None if countries else _latest_event_date(client)
+        if latest_event is not None and not work.empty:
+            month_last_day = work["month"] + pd.offsets.MonthEnd(0)
+            unfinished = month_last_day > latest_event
+            if bool(unfinished.any()):
+                held = sorted({m.strftime("%Y-%m") for m in work.loc[unfinished, "month"]})
+                LOGGER.warning(
+                    "acled_to_duckdb.hold_back_unreleased_month | months=%s latest_event=%s rows=%d",
+                    ",".join(held),
+                    latest_event.date().isoformat(),
+                    int(unfinished.sum()),
+                )
+                print(
+                    "::warning title=ACLED month held back::"
+                    f"The newest ACLED event fetched is {latest_event.date().isoformat()}, "
+                    f"before the end of {', '.join(held)}; that month is not written this run."
+                )
+                work = work.loc[~unfinished].reset_index(drop=True)
         frame = work
     else:
         LOGGER.warning(

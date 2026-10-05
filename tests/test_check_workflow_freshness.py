@@ -26,7 +26,7 @@ from scripts.ci.check_workflow_freshness import (
 )
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
-MONTHLY = Watched("Resolver Update", 35, "monthly, 28th")
+MONTHLY = Watched("Resolver Update", 35, "monthly, 11th")
 NIGHTLY = Watched("Hazard Backcast", 3, "nightly")
 
 

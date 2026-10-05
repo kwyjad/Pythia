@@ -461,7 +461,7 @@ and logs loudly when outcomes exist with no scored interpretation made of them.
 
 The **dormant state is informative**: how many question-months are due, on what
 date, for which hazards, printed from `upcoming_resolutions` (a window month
-resolves on the 28th of the month after it). A combined report with no scored
+resolves on the 11th of the month after it; the 28th before the 2026-10-05 schedule move). A combined report with no scored
 run behind it is not asked for a `performance` block at all — prose we discard
 is prose the model learns to invent.
 

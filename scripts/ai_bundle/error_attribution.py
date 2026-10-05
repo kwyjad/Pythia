@@ -104,8 +104,10 @@ EXPERIMENT_FLAGS = ROLLUP_SPLIT_KEYS
 ACLED_COMPLETE_MONTH_FIX = date(2026, 9, 30)
 #: (effective date, day of month) of the scheduled Resolver Update that wrote
 #: acled_monthly_fatalities: the 15th until the cron moved on 2026-08-03,
-#: the 28th since.
-ACLED_INGEST_CALENDAR = ((date(2000, 1, 1), 15), (date(2026, 8, 3), 28))
+#: the 28th until it moved again on 2026-10-05, the 11th since.
+ACLED_INGEST_CALENDAR = (
+    (date(2000, 1, 1), 15), (date(2026, 8, 3), 28), (date(2026, 10, 5), 11),
+)
 
 
 def _ingest_day_on(d: date) -> int:

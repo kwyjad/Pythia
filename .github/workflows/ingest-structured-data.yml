@@ -4,7 +4,7 @@
 # See the LICENSE file in the project root for details.
 
 # Mid-cycle data refresh. The primary ingestion happens in resolver_update.yml
-# (28th monthly). This workflow provides supplementary freshness for fast-changing sources
+# (11th monthly). This workflow provides supplementary freshness for fast-changing sources
 # between monthly backfills. Its DB artifact is available to the HS workflow as a candidate.
 
 ---
@@ -14,7 +14,7 @@ name: Ingest Structured Data
 # at workflow level the gate job (which usually decides to SKIP) took the
 # group's single pending slot before deciding anything, and a newer queued run
 # cancels whatever is pending — including a poller-dispatched pipeline stage
-# or the 1st-of-month hs_submit cron itself.
+# or the monthly hs_submit cron itself (the 13th).
 
 "on":
   workflow_dispatch:
@@ -234,7 +234,7 @@ jobs:
 
       # CrisisWatch rides along with the weekly refresh (Sep 2026). The
       # edition reaches the DB only through a runner that holds the canonical
-      # DB — resolver_update Phase 4 (monthly) and hs_submit (the 1st) — and
+      # DB — resolver_update Phase 4 (the 11th) and hs_submit (the 13th) — and
       # archive.org refuses connections often enough that a single attempt a
       # month is not enough: the Aug 28 Resolver Update ran BEFORE the
       # on-runner refresh existed, so the Sep 1 forecast was fed the June
