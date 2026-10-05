@@ -1292,8 +1292,10 @@ from .prompts import (  # noqa: E402
     load_member_calibration_advice,
     merge_evidence_packs,
     rc_guidance_version,
+    rc_shift_arm,
     prior_anchor_block_version,
     advice_arm,
+    effective_advice_arm,
     render_member_calibration_advice,
     reset_member_calibration_advice_cache,
 )
@@ -2027,18 +2029,48 @@ def _recalibrate_for_write(
     return stored, metas, extras
 
 
-def _stamp_advice_arm(run_id: str, question_id: str) -> None:
+def _stamp_advice_arm(run_id: str, question_id: str, question: Optional[dict] = None) -> None:
     """Record the advice-experiment arm on the question's forecast rows.
 
     Nothing is touched when the experiment is off (``advice_arm`` is None),
-    so the default path writes exactly what it wrote before.
+    so the default path writes exactly what it wrote before. Since Oct 2026
+    the arm is the one actually APPLIED: a question in the advice arm whose
+    prompts carried no advice (no shared advice for its group, no member
+    note) is stamped ``advice_empty``, per member row in ``forecasts_raw``
+    and for the question in ``forecasts_ensemble``, so the experiment
+    compares only questions where a treatment existed.
     """
     arm = advice_arm(question_id)
     if not arm or not question_id:
         return
+    hz = str((question or {}).get("hazard_code") or "").upper()
+    metric = str((question or {}).get("metric") or "").upper()
     try:
         con = connect(read_only=False)
         try:
+            if arm == "advice" and hz and metric:
+                members = [
+                    str(r[0]) for r in con.execute(
+                        "SELECT DISTINCT model_name FROM forecasts_raw "
+                        "WHERE run_id = ? AND question_id = ? AND model_name IS NOT NULL",
+                        [run_id, question_id],
+                    ).fetchall()
+                ]
+                any_treated = False
+                for name in members:
+                    member_arm = effective_advice_arm(question_id, hz, metric, (name,))
+                    any_treated = any_treated or member_arm == "advice"
+                    con.execute(
+                        "UPDATE forecasts_raw SET advice_arm = ? "
+                        "WHERE run_id = ? AND question_id = ? AND model_name = ?",
+                        [member_arm, run_id, question_id, name],
+                    )
+                q_arm = "advice" if any_treated else effective_advice_arm(question_id, hz, metric)
+                con.execute(
+                    "UPDATE forecasts_ensemble SET advice_arm = ? WHERE run_id = ? AND question_id = ?",
+                    [q_arm, run_id, question_id],
+                )
+                return
             for table in ("forecasts_raw", "forecasts_ensemble"):
                 con.execute(
                     f"UPDATE {table} SET advice_arm = ? WHERE run_id = ? AND question_id = ?",
@@ -2048,6 +2080,35 @@ def _stamp_advice_arm(run_id: str, question_id: str) -> None:
             con.close()
     except Exception as exc:  # noqa: BLE001
         LOG.warning("advice arm not stamped for %s: %s", question_id, exc)
+
+
+def _stamp_rc_shift_arm(run_id: str, question_id: str, question: Optional[dict] = None) -> None:
+    """Record the RC split-test arm on a Track 1 question's member rows.
+
+    ``forecasts_raw.rc_shift_arm`` is ``shift`` or ``control``; nothing is
+    written when the test is off or the question is not Track 1, so the
+    control arm can be told from history (whose ``rc_guidance`` is also NULL).
+    """
+    arm = rc_shift_arm(question_id)
+    if not arm or not question_id:
+        return
+    try:
+        track = int((question or {}).get("track") or 0)
+    except (TypeError, ValueError):
+        track = 0
+    if track != 1:
+        return
+    try:
+        con = connect(read_only=False)
+        try:
+            con.execute(
+                "UPDATE forecasts_raw SET rc_shift_arm = ? WHERE run_id = ? AND question_id = ?",
+                [arm, run_id, question_id],
+            )
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("RC split arm not stamped for %s: %s", question_id, exc)
 
 
 def _recalibrate_binary_members(
@@ -3162,6 +3223,12 @@ async def _call_spd_model_for_spec(
         )
     )
     arm = advice_arm(kwargs.get("question_id"))
+    if arm == "advice" and not member_note:
+        # In the advice arm but with no member note: treated only if the
+        # shared advice exists for the group (Oct 2026, the honest arm).
+        arm = effective_advice_arm(
+            kwargs.get("question_id"), kwargs.get("hazard_code") or "", kwargs.get("metric") or "",
+        )
     if not member_note:
         text, usage, error, ms_out = await _call_spd_model_for_spec_inner(ms, prompt, **kwargs)
         if arm and isinstance(usage, dict):
@@ -5566,7 +5633,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 voting_spds = _recalibrate_voting(
                     voting_spds, voting_specs, hz, metric.upper(),
                     base_rate_block_version=prior_anchor_block_version(rec),
-                    rc_guidance=rc_guidance_version(track=1),
+                    rc_guidance=rc_guidance_version(track=1, question_id=rec.get("question_id")),
                 )
                 member_weights_by_key, _member_keys, member_weight_list = (
                     _resolve_member_weights(voting_specs, hz, metric)
@@ -5725,7 +5792,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     per_model_spds=member_spds_snapshot or per_model_spds,
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
-                    rc_guidance=rc_guidance_version(track=1),
+                    rc_guidance=rc_guidance_version(track=1, question_id=rec.get("question_id")),
                     base_rate_block_version=prior_anchor_block_version(rec),
                     recalibrate=True,
                 )
@@ -5810,7 +5877,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             voting_spds = _recalibrate_voting(
                 voting_spds, voting_specs, hz, metric.upper(),
                 base_rate_block_version=prior_anchor_block_version(rec),
-                rc_guidance=rc_guidance_version(track=1),
+                rc_guidance=rc_guidance_version(track=1, question_id=rec.get("question_id")),
             )
             member_weights_by_key, _member_keys, member_weight_list = (
                 _resolve_member_weights(voting_specs, hz, metric)
@@ -5956,7 +6023,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 batch_family="spd_v2",
                 cache_prefix=spd_cache_prefix,
                 prompt_cache_key=spd_prompt_cache_key,
-                recal_versions=(prior_anchor_block_version(rec), rc_guidance_version(track=1)),
+                recal_versions=(prior_anchor_block_version(rec), rc_guidance_version(track=1, question_id=rec.get("question_id"))),
             )
             if _batch_submit_active():
                 # Members were enqueued as Batch-API requests; parsing,
@@ -5978,7 +6045,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     per_model_spds=member_spds_snapshot or per_model_spds_bm,
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
-                    rc_guidance=rc_guidance_version(track=1),
+                    rc_guidance=rc_guidance_version(track=1, question_id=rec.get("question_id")),
                     base_rate_block_version=prior_anchor_block_version(rec),
                     recalibrate=True,
                 )
@@ -6875,7 +6942,8 @@ def main() -> None:
                         await _run_track2_spd_for_question(run_id, q)
                     else:
                         await _run_spd_for_question(run_id, q)
-                    _stamp_advice_arm(run_id, qid)
+                    _stamp_advice_arm(run_id, qid, q)
+                    _stamp_rc_shift_arm(run_id, qid, q)
                 if not qid:
                     return
                 start_ms = question_start_ms.get(qid)

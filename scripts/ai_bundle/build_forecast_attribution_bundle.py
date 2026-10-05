@@ -744,6 +744,80 @@ def build_rc_assessment(
 
 
 # ---------------------------------------------------------------------------
+# The RC shift-guidance split test (PYTHIA_RC_SHIFT_SHARE, Oct 2026)
+# ---------------------------------------------------------------------------
+
+RC_SHIFT_ARM_COLUMNS = [
+    "rc_shift_arm", "hazard_code", "metric", "n_questions", "n_member_forecasts",
+    "mean_delta_expected_bucket", "mean_delta_modal_mass", "mean_delta_entropy_bits",
+]
+
+
+def _entropy_bits(vec: list[float]) -> float:
+    return -sum(p * math.log2(p) for p in vec if p > 0)
+
+
+def _month1_by_member(con, run_id: str) -> dict[tuple[str, str], tuple[list[float], str | None]]:
+    """``{(question_id, model_name): (month-1 SPD, rc_shift_arm)}``; empty
+    when the table predates the arm column."""
+
+    if not column_exists(con, "forecasts_raw", "rc_shift_arm"):
+        return {}
+    rows = con.execute(
+        "SELECT question_id, model_name, bucket_index, probability, rc_shift_arm "
+        "FROM forecasts_raw WHERE run_id = ? AND month_index = 1 "
+        "AND rc_shift_arm IS NOT NULL ORDER BY question_id, model_name, bucket_index",
+        [run_id],
+    ).fetchall()
+    out: dict[tuple[str, str], tuple[list[float], str | None]] = {}
+    for qid, model, _b, prob, arm in rows:
+        vec, _ = out.setdefault((str(qid), str(model)), ([], arm))
+        vec.append(float(prob or 0.0))
+    return out
+
+
+def build_rc_shift_arms(
+    questions: list[dict[str, Any]],
+    deviation: Mapping[str, dict[str, dict[str, Any]]],
+    month1: Mapping[tuple[str, str], tuple[list[float], str | None]],
+) -> list[dict[str, Any]]:
+    """Per arm and (hazard, metric): how far each member's month-1 SPD moved
+    from the base-rate anchor, in expected bucket, in the mass on the
+    anchor's modal bucket, and in entropy. The arms are different questions,
+    so this describes the two arms; it does not pair them."""
+    qmeta = {str(q["question_id"]): q for q in questions}
+    acc: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for (qid, _model), (post, arm) in month1.items():
+        q = qmeta.get(qid)
+        if q is None or not arm:
+            continue
+        anchor, _src, _d = _anchor_for(deviation.get(qid))
+        if not anchor or len(anchor) != len(post) or sum(post) <= 0:
+            continue
+        total = sum(post)
+        post = [p / total for p in post]
+        modal = max(range(len(anchor)), key=lambda i: anchor[i])
+        key = (str(arm), str(q.get("hazard_code")), str(q.get("metric")))
+        a = acc.setdefault(key, {"qids": set(), "n": 0, "eb": 0.0, "mm": 0.0, "h": 0.0})
+        a["qids"].add(qid)
+        a["n"] += 1
+        a["eb"] += (expected_index(post) or 0.0) - (expected_index(anchor) or 0.0)
+        a["mm"] += post[modal] - anchor[modal]
+        a["h"] += _entropy_bits(post) - _entropy_bits(anchor)
+    out = []
+    for (arm, hz, metric), a in sorted(acc.items()):
+        n = a["n"]
+        out.append({
+            "rc_shift_arm": arm, "hazard_code": hz, "metric": metric,
+            "n_questions": len(a["qids"]), "n_member_forecasts": n,
+            "mean_delta_expected_bucket": round(a["eb"] / n, 4),
+            "mean_delta_modal_mass": round(a["mm"] / n, 4),
+            "mean_delta_entropy_bits": round(a["h"] / n, 4),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Inputs: what was on the table at forecast time
 # ---------------------------------------------------------------------------
 
@@ -1680,6 +1754,12 @@ def build_bundle(
              "rc_flag_mass_moved_l1", "total_mass_moved_l1"],
             rc_rows,
         )
+        shift_rows = sections.run(
+            "rc_shift_arms",
+            lambda: build_rc_shift_arms(questions, deviation, _month1_by_member(con, run_id)),
+            [],
+        )
+        counts["rc_shift_arms"] = write_csv(att_dir / "rc_shift_arms.csv", RC_SHIFT_ARM_COLUMNS, shift_rows)
         quality_rows = built["trace_quality"]
         counts["trace_quality"] = write_csv(
             att_dir / "trace_quality.csv",

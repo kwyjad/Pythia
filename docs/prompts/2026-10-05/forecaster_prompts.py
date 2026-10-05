@@ -72,15 +72,43 @@ def _pythia_db_url_from_config() -> Optional[str]:
         return None
 
 def _load_calibration_note() -> str:
-    """The calibration note the legacy templates (``_CAL_PREFIX``) carry: none.
-
-    It used to read the newest ``calibration_advice`` row of ANY hazard and
-    metric, so a legacy prompt could carry conflict advice into a flood
-    question. Since Oct 2026 a group with no advice of its own gets none, and
-    the production SPD prompt (``build_spd_prompt_v2``) reads its own group
-    through :func:`_load_calibration_advice_for_hazard`.
     """
-    return ""
+    Pull the latest calibration guidance from DuckDB (calibration_advice).
+    Returns "" if nothing readable is found, so prompts stay valid.
+    """
+    txt = ""
+    try:
+        from resolver.db import duckdb_io
+
+        db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+        db_url = db_url or duckdb_io.DEFAULT_DB_URL
+        con = duckdb_io.get_db(db_url)
+        try:
+            row = con.execute(
+                """
+                SELECT advice
+                FROM calibration_advice
+                ORDER BY as_of_month DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            duckdb_io.close_db(con)
+        if row and row[0]:
+            txt = str(row[0])
+    except Exception:
+        txt = ""
+
+    if not txt and CALIBRATION_PATH:
+        try:
+            with open(CALIBRATION_PATH, "r", encoding="utf-8") as f:
+                txt = f.read().strip()
+        except Exception:
+            txt = ""
+
+    if not txt:
+        return ""
+    return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
 
 _MEMBER_ADVICE_CACHE: dict[tuple, str] = {}
 _MEMBER_ADVICE_LOCK = threading.Lock()
@@ -132,36 +160,6 @@ def advice_arm(question_id: Optional[str]) -> Optional[str]:
 
     frac = int(hashlib.sha1(str(question_id).encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
     return "no_advice" if frac < share else "advice"
-
-
-#: The arm recorded for a question in the advice arm whose prompts carried no
-#: advice text at all: the treatment did not exist for it, so the experiment
-#: (which compares ``advice`` with ``no_advice``) must not count it as treated.
-ADVICE_ARM_EMPTY = "advice_empty"
-
-
-def effective_advice_arm(
-    question_id: Optional[str],
-    hazard_code: str,
-    metric: str,
-    model_names: tuple = (),
-) -> Optional[str]:
-    """The arm as it was actually applied: ``advice``, ``no_advice``,
-    ``advice_empty`` (in the advice arm, but no shared advice and no member
-    note existed for it), or None when the experiment is off.
-
-    With ``model_names`` the question counts as treated when ANY of them got
-    a member note; with none, only the shared advice decides.
-    """
-    arm = advice_arm(question_id)
-    if arm != "advice":
-        return arm
-    if _load_calibration_advice_for_hazard(hazard_code, metric):
-        return arm
-    for name in model_names:
-        if load_member_calibration_advice(hazard_code, metric, name, question_id=question_id):
-            return arm
-    return ADVICE_ARM_EMPTY
 
 
 def advice_family_for(model_name: Optional[str]) -> Optional[str]:
@@ -217,18 +215,13 @@ def render_advice_observations(
     weight: float = 1.0,
     drop_buckets: bool = False,
     drop_prior: bool = False,
-    drop_horizon: bool = False,
-    tendency_line: bool = True,
 ) -> str:
     """Advice as OBSERVATIONS ("you assigned 9%, observed 34%"), never orders.
 
     ``weight`` below 1 shrinks each carried gap toward what was assigned and
     says so. ``drop_buckets`` leaves out per-bucket numbers where family
     recalibration already corrects them; ``drop_prior`` leaves out prior
-    anchoring where the prompt now hands the member its prior;
-    ``drop_horizon`` leaves out the month-1/month-6 observation where too few
-    later horizons have resolved to say what the later months should look
-    like.
+    anchoring where the prompt now hands the member its prior.
     """
     lines: list[str] = [header]
 
@@ -250,10 +243,8 @@ def render_advice_observations(
             lines.append(
                 f"- Bucket {e.get('class_bin')}: you assigned {100 * a:.0f}%; observed {100 * o:.0f}%."
             )
-    # The generator writes this as ``month_position_bias``; older rows as
-    # ``horizon_diff``.
-    hd = findings.get("horizon_diff") or findings.get("month_position_bias") or {}
-    if hd and hd.get("flat") and not drop_horizon:
+    hd = findings.get("horizon_diff") or {}
+    if hd and hd.get("flat"):
         lines.append(
             "- Your month-1 and month-6 distributions were nearly identical "
             f"(JS divergence {float(hd.get('jsd_m1_m6') or 0):.4f})."
@@ -274,12 +265,11 @@ def render_advice_observations(
             f"- Observed figures above are shown at {weight:.0%} of the measured gap, "
             "because you now have scored questions of your own."
         )
-    if tendency_line:
-        lines.append(ADVICE_TENDENCY_LINE)
+    lines.append(ADVICE_TENDENCY_LINE)
     return "\n".join(lines)
 
 
-def _structured_member_advice(hz: str, m: str, name: str, rc_guidance: Optional[str] = None) -> str:
+def _structured_member_advice(hz: str, m: str, name: str) -> str:
     """The member note under family carry-over or applied recalibration."""
     family = advice_family_for(name)
     names = [name] + ([f"family:{family}"] if family else [])
@@ -294,7 +284,7 @@ def _structured_member_advice(hz: str, m: str, name: str, rc_guidance: Optional[
             if drop_prior:
                 brbv = prior_anchor_version()
             info = fr.lookup(name, hz, m, base_rate_block_version=brbv,
-                             rc_guidance=rc_guidance)
+                             rc_guidance=rc_guidance_version(track=1))
             drop_buckets = info.get("mode") == "apply"
     except Exception:  # noqa: BLE001
         drop_buckets = False
@@ -357,17 +347,14 @@ def load_member_calibration_advice(
             structured = _fr.recalibration_mode() == "apply"
         except Exception:  # noqa: BLE001
             structured = False
-    # The recalibration lookup is keyed by prompt version, and under the RC
-    # split test two questions of one group can carry different versions.
-    rcg = rc_guidance_version(1, question_id)
-    key = (hz, m, name, "structured" if structured else "text", rcg)
+    key = (hz, m, name, "structured" if structured else "text")
     with _MEMBER_ADVICE_LOCK:
         if key in _MEMBER_ADVICE_CACHE:
             return _MEMBER_ADVICE_CACHE[key]
 
     if structured:
         try:
-            text = _structured_member_advice(hz, m, name, rcg)
+            text = _structured_member_advice(hz, m, name)
         except Exception:  # noqa: BLE001
             text = ""
         with _MEMBER_ADVICE_LOCK:
@@ -441,94 +428,32 @@ def _advice_blocked(hazard_code: str, metric: str) -> bool:
     )
 
 
-#: Distinct questions with a resolved horizon of 2 or more before the shared
-#: advice may say anything about how the later months should differ from
-#: month 1. Below it the observation that month 1 and month 6 were alike is a
-#: statement about the forecasts with nothing on the outcome side.
-ADVICE_LATER_HORIZON_MIN_QUESTIONS = 10
-
-
-def _later_horizon_questions(con, hz: str, m: str) -> int:
-    """Distinct non-test questions of this group with a resolved horizon 2..6."""
-    try:
-        row = con.execute(
-            """
-            SELECT COUNT(DISTINCT r.question_id)
-            FROM resolutions r JOIN questions q ON q.question_id = r.question_id
-            WHERE upper(q.hazard_code) = ? AND upper(q.metric) = ?
-              AND r.horizon_m BETWEEN 2 AND 6
-              AND COALESCE(q.is_test, FALSE) = FALSE
-            """,
-            [hz, m],
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
-    except Exception:  # noqa: BLE001 - no evidence reads as none
-        return 0
-
-
-def _shared_advice_observations(con, hz: str, m: str, version_params: list, version_clause: str) -> str:
-    """The shared (hazard, metric) advice, rendered from its findings as
-    observations. "" when the group has no row or nothing to observe."""
-    row = con.execute(
-        f"""
-        SELECT findings_json
-        FROM calibration_advice
-        WHERE hazard_code = ? AND metric = ? AND model_name = '__shared__'
-          {version_clause}
-        ORDER BY as_of_month DESC
-        LIMIT 1
-        """,
-        [hz, m] + version_params,
-    ).fetchone()
-    if not row or not row[0]:
-        return ""
-    try:
-        findings = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
-    except Exception:  # noqa: BLE001
-        return ""
-    drop_prior = prior_anchor_enabled() and hz == "ACE" and m == "FATALITIES"
-    drop_horizon = _later_horizon_questions(con, hz, m) < ADVICE_LATER_HORIZON_MIN_QUESTIONS
-    n = findings.get("n_questions")
-    header = (
-        f"Observed on the ensemble's scored questions on this hazard and metric"
-        f"{f' ({int(n)} questions)' if n else ''}:"
-    )
-    return render_advice_observations(
-        findings, header=header, drop_prior=drop_prior, drop_horizon=drop_horizon,
-    )
-
-
 def _load_calibration_advice_for_hazard(
     hazard_code: str,
     metric: str,
     model_name: Optional[str] = None,
 ) -> str:
-    """The shared calibration advice for this (hazard, metric), as OBSERVATIONS.
+    """Load calibration advice, preferring model-specific if available.
 
-    Since Oct 2026 the shared advice is rendered from its stored findings by
-    :func:`render_advice_observations`, as the member notes already were, and
-    carries no ACTION line: on 1 October the advice arm of the conflict-death
-    questions read "ACTION: Widen uncertainty for later months (4-6)" and
-    "ACTION: Start with more mass in bucket 5" above an instruction to copy the
-    base-rate distribution exactly, and came out flatter than the no-advice
-    arm. Where ``PYTHIA_PRIOR_ANCHOR_SPD`` hands the member its prior, the
-    prior-anchoring observation is left out; the month-1/month-6 observation
-    waits until later horizons have resolved
-    (``ADVICE_LATER_HORIZON_MIN_QUESTIONS``).
+    Fallback chain:
+      1. Shared advice for (hazard_code, metric, '__shared__')
+         + Per-model advice for (hazard_code, metric, model_name)
+      2. Global advice for ('*', '*', '__shared__')
+      3. Empty string
 
-    There is NO fallback: a group with no advice of its own gets none. The
-    global ``*``/``*`` row named retired models to every other hazard, and
-    the "newest row of any hazard" step before it was removed in Sept 2026.
     A group listed in ``PYTHIA_ADVICE_BLOCK_GROUPS`` gets nothing at all.
-    ``model_name`` is accepted for callers that pass it; a member's own note
-    is :func:`load_member_calibration_advice`, appended to its prompt tail.
+    Until Sept 2026 a third step returned "any most-recent row regardless of
+    hazard", so a flood question with no advice of its own could be shown
+    conflict advice; that step is gone.
     """
-    del model_name
     hz = (hazard_code or "").upper()
     m = (metric or "").upper()
-    if not hz or not m or _advice_blocked(hz, m):
+    if _advice_blocked(hz, m):
         return ""
+
+    # Read experiment version from env (default: any version)
     advice_version = os.getenv("PYTHIA_ADVICE_VERSION", "").strip() or None
+
     try:
         from resolver.db import duckdb_io
 
@@ -536,14 +461,72 @@ def _load_calibration_advice_for_hazard(
         db_url = db_url or duckdb_io.DEFAULT_DB_URL
         con = duckdb_io.get_db(db_url)
         try:
-            version_clause = " AND advice_version = ?" if advice_version else ""
-            version_params = [advice_version] if advice_version else []
-            txt = _shared_advice_observations(con, hz, m, version_params, version_clause)
+            version_clause = ""
+            version_params: list = []
+            if advice_version:
+                version_clause = " AND advice_version = ?"
+                version_params = [advice_version]
+
+            parts: list[str] = []
+
+            # Always load shared advice first
+            shared_row = con.execute(
+                f"""
+                SELECT advice
+                FROM calibration_advice
+                WHERE hazard_code = ? AND metric = ? AND model_name = '__shared__'
+                  {version_clause}
+                ORDER BY as_of_month DESC
+                LIMIT 1
+                """,
+                [hz, m] + version_params,
+            ).fetchone()
+
+            if shared_row and shared_row[0]:
+                parts.append(str(shared_row[0]))
+
+            # Then load model-specific advice if available
+            if model_name:
+                model_row = con.execute(
+                    f"""
+                    SELECT advice
+                    FROM calibration_advice
+                    WHERE hazard_code = ? AND metric = ? AND model_name = ?
+                      {version_clause}
+                    ORDER BY as_of_month DESC
+                    LIMIT 1
+                    """,
+                    [hz, m, model_name] + version_params,
+                ).fetchone()
+
+                if model_row and model_row[0]:
+                    parts.append(str(model_row[0]))
+
+            if parts:
+                txt = "\n\n".join(parts)
+                return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
+
+            # Fallback to global
+            global_row = con.execute(
+                f"""
+                SELECT advice
+                FROM calibration_advice
+                WHERE hazard_code = '*' AND metric = '*' AND model_name = '__shared__'
+                  {version_clause}
+                ORDER BY as_of_month DESC
+                LIMIT 1
+                """,
+                version_params,
+            ).fetchone()
+
+            if global_row and global_row[0]:
+                txt = str(global_row[0])
+                return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
         finally:
             duckdb_io.close_db(con)
-    except Exception:  # noqa: BLE001
-        return ""
-    return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
+    except Exception:
+        pass
+    return ""
 
 
 _CAL_NOTE = _load_calibration_note()
@@ -2034,46 +2017,13 @@ def rc_shift_guidance_enabled() -> bool:
     return os.getenv("PYTHIA_RC_SHIFT_GUIDANCE", "0").strip().lower() in ("1", "true", "yes")
 
 
-def rc_shift_share() -> float:
-    """``PYTHIA_RC_SHIFT_SHARE`` clamped to [0, 1] (default 0, the split test off)."""
-    try:
-        v = float(os.getenv("PYTHIA_RC_SHIFT_SHARE", "0") or 0)
-    except ValueError:
-        return 0.0
-    return min(max(v, 0.0), 1.0)
-
-
-def rc_shift_arm(question_id: Optional[str]) -> Optional[str]:
-    """``"shift"`` or ``"control"`` for a question under the RC split test,
-    None when the test is off (``PYTHIA_RC_SHIFT_SHARE`` 0, or the flag
-    ``PYTHIA_RC_SHIFT_GUIDANCE`` turning the guidance on for everyone).
-
-    A pure function of the question id with its OWN salt (``"rc_shift:"``),
-    so it is independent of the advice arm, whose hash is unsalted: crossing
-    the two tests gives four cells of roughly equal size rather than two.
-    """
-    share = rc_shift_share()
-    if share <= 0 or not question_id or rc_shift_guidance_enabled():
-        return None
-    import hashlib
-
-    key = f"rc_shift:{question_id}".encode("utf-8")
-    frac = int(hashlib.sha1(key).hexdigest()[:8], 16) / 0xFFFFFFFF
-    return "shift" if frac < share else "control"
-
-
-def rc_guidance_version(track: int = 1, question_id: Optional[str] = None) -> Optional[str]:
+def rc_guidance_version(track: int = 1) -> Optional[str]:
     """The RC guidance a member prompt of this track carries, for ``forecasts_raw.rc_guidance``.
 
-    ``None`` means the legacy wording. Only Track 1 prompts change. With the
-    flag on every Track 1 question gets the shift guidance; under the split
-    test (``PYTHIA_RC_SHIFT_SHARE``) only the questions in the ``shift`` arm
-    do, and the control arm's prompt is byte-identical to the legacy one.
+    ``None`` means the legacy wording. Only Track 1 prompts change.
     """
 
-    if track >= 2:
-        return None
-    if rc_shift_guidance_enabled() or rc_shift_arm(question_id) == "shift":
+    if track < 2 and rc_shift_guidance_enabled():
         return RC_SHIFT_GUIDANCE_VERSION
     return None
 
@@ -2540,7 +2490,7 @@ def build_spd_prompt_v2(
         "- Level 2: treat base rate as less reliable; widen posterior; ensure non-trivial tail mass in the RC direction unless rebutted.\n"
         "- Level 3: explicitly model a regime-shift scenario; avoid narrow SPDs; tails must be meaningfully represented if direction is UP/DOWN.\n\n"
     )
-    rc_shift_on = rc_guidance_version(track, question.get("question_id")) is not None
+    rc_shift_on = rc_guidance_version(track) is not None
     if rc_shift_on:
         # Same header and flag values; the legacy "widen" lines are replaced.
         rc_guidance = (

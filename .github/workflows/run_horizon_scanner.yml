@@ -97,6 +97,11 @@ jobs:
       # prior (scripts/ci/rc_shift_diagnostic.py). Keep in lockstep across
       # pythia_pipeline_stage.yml and run_horizon_scanner.yml.
       PYTHIA_RC_SHIFT_GUIDANCE: "0"
+      # Split test (Oct 2026): half of Track 1 SPD questions, by a salted hash
+      # of the question id independent of the advice arm, carry the shift
+      # guidance; the rest carry the legacy wording byte for byte. The arm is
+      # forecasts_raw.rc_shift_arm. Keep in lockstep across both workflows.
+      PYTHIA_RC_SHIFT_SHARE: "0.5"
       # ACE/FATALITIES prompts show the level-and-volatility distribution and
       # tell members to copy it as their Step 1 prior (the loss on the August
       # 2026 conflict-death questions was in the prior). Keep in lockstep across

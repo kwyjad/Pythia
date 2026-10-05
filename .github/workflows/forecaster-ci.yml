@@ -284,6 +284,8 @@ jobs:
           # forecasts_raw.rc_guidance stamp; plus the read-only diagnostic.
           pytest -vv \
             forecaster/tests/test_rc_shift_guidance.py \
+            forecaster/tests/test_rc_shift_split.py \
+            forecaster/tests/test_shared_advice_observations.py \
             scripts/ci/tests/test_rc_shift_diagnostic.py
 
       - name: Run family advice + recalibration tests
@@ -489,6 +491,7 @@ jobs:
             forecaster/tests/test_debug_bundle_adversarial_stats.py \
             forecaster/tests/test_debug_bundle_batch_economics.py \
             forecaster/tests/test_debug_bundle_member_gaps.py \
+            forecaster/tests/test_debug_bundle_recalibration.py \
             forecaster/tests/test_debug_bundle_defects.py \
             forecaster/tests/test_debug_bundle_operational.py \
             scripts/ci/tests/test_stage_context.py
