@@ -730,9 +730,10 @@ def _aggregate_prob_nc(nc_path: Path, max_leads: int = MAX_LEAD_MONTHS) -> list[
         if da is None:
             return []
         da = _prob_as_fraction(da)
-        lead_dim = _find_lead_dim(da)
+        # The file carries a singleton ``initial_time`` BEFORE ``target``;
+        # squeeze every singleton first or it would be read as the lead axis.
         for dim in list(da.dims):
-            if dim not in ("lat", "lon") and dim != lead_dim and da.sizes[dim] == 1:
+            if dim not in ("lat", "lon") and da.sizes[dim] == 1:
                 da = da.squeeze(dim, drop=True)
         lead_dim = _find_lead_dim(da)
         countries = _get_country_regions()
