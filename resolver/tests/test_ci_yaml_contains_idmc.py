@@ -25,25 +25,30 @@ def test_backfill_mentions_idmc() -> None:
 
 
 def test_backfill_runs_direct_idmc_step() -> None:
+    """Phase 1 writes IDMC CONFLICT displacement only (Oct 2026): the HELIX
+    CLI summed every cause, so typhoon evacuations became ACE/PA history."""
     data = _load_yaml(WF_BACKFILL)
     assert isinstance(data, dict)
     backfill = data.get("jobs", {}).get("backfill", {})
     steps = backfill.get("steps", [])
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
-    assert "Phase 1: Run IDMC (HELIX)" in names
+    assert "Phase 1: Run IDMC (conflict displacement)" in names
     direct_step = next(
-        step for step in steps if isinstance(step, dict) and step.get("name") == "Phase 1: Run IDMC (HELIX)"
+        step for step in steps if isinstance(step, dict)
+        and step.get("name") == "Phase 1: Run IDMC (conflict displacement)"
     )
     run_script = direct_step.get("run")
     assert isinstance(run_script, str)
-    assert "--network-mode helix" in run_script
-    # The window reaches the script through env:, never as pasted text.
-    assert "--start \"${STEP_WINDOW_START_ISO}\"" in run_script
-    assert "--end   \"${STEP_WINDOW_END_ISO}\"" in run_script
+    assert "python -m resolver.ingestion.idmc_conflict" in run_script
+    assert "network-mode helix" not in run_script
+    # Non-fatal, recorded, and turned red by the terminal gate.
+    assert direct_step.get("continue-on-error") is True
+    assert direct_step.get("id") == "phase1_idmc"
     env = direct_step.get("env") or {}
-    assert env.get("STEP_WINDOW_START_ISO") == "${{ steps.window.outputs.start_iso }}"
-    assert env.get("STEP_WINDOW_END_ISO") == "${{ steps.window.outputs.end_iso }}"
+    assert str(env.get("IDMC_CONFLICT_MONTHS")) == "36"
+    text = WF_BACKFILL.read_text()
+    assert "steps.phase1_idmc.outcome" in text
 
 
 def test_backfill_uses_load_and_derive() -> None:

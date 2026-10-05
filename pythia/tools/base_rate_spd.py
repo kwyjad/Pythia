@@ -257,42 +257,70 @@ def _live_months(
 # arrives is dropped and counted here rather than printed. Kept beside the
 # reader so the live-month gate and the anchor cannot drift apart into two
 # ideas of what an IDMC row is.
-IDMC_FLOW_TABLE = "facts_deltas"
-_IDMC_FLOW_WHERE = (
-    "lower(series_semantics) = 'new' AND ("
-    "lower(source_id) IN ('idmc', 'idmc_idu') OR lower(metric) IN ("
-    "'new_displacements', 'idp_displacement_new_dtm', "
-    "'idp_displacement_flow_idmc'))"
+#: The conflict displacement series every ACE/PA reader uses: the prompt's
+#: trajectory block, the ACE/PA anchor, the climatology and persistence
+#: references, and ``compute_resolutions``. IDMC conflict displacement only:
+#: until Oct 2026 every IDMC row was hazard ``IDU`` and counted every cause,
+#: so typhoon evacuations in China and the Philippines were shown to the
+#: models as conflict displacement, and no ACE/PA question ever resolved.
+#: Written by ``resolver.ingestion.idmc_conflict`` through the IDMC adapter;
+#: the hazard, metric and publisher are pinned equal to that writer's by
+#: forecaster/tests/test_base_rate_matches_resolution_source.py.
+CONFLICT_DISPLACEMENT_TABLE = "facts_resolved"
+CONFLICT_DISPLACEMENT_HAZARD = "ACE"
+CONFLICT_DISPLACEMENT_METRIC = "new_displacements"
+CONFLICT_DISPLACEMENT_PUBLISHER = "IDMC"
+CONFLICT_DISPLACEMENT_WHERE = (
+    "upper(hazard_code) = 'ACE' AND lower(metric) = 'new_displacements' "
+    "AND lower(series_semantics) = 'new' "
+    "AND upper(COALESCE(publisher, '')) = 'IDMC'"
 )
-_IDMC_DELTA_WHERE = _IDMC_FLOW_WHERE
+#: ``resolutions.source_desc`` for a value read from the series.
+CONFLICT_DISPLACEMENT_SERIES = "facts_resolved:IDMC:conflict_new_displacements"
+
+def _conflict_displacement_table_ok(con) -> bool:
+    """True when the table exists and carries every column the series is
+    keyed on (a hand-built test table or a pre-publisher DB holds none)."""
+    if not _table_exists(con, CONFLICT_DISPLACEMENT_TABLE):
+        return False
+    return all(
+        _column_exists(con, CONFLICT_DISPLACEMENT_TABLE, col)
+        for col in ("ym", "iso3", "hazard_code", "metric", "series_semantics", "publisher", "value")
+    )
 
 
-def idmc_flow_rows(
-    con, iso3: str, hazard_code: str, before_ym: str, *,
+# Legacy names, kept for callers outside this module.
+IDMC_FLOW_TABLE = CONFLICT_DISPLACEMENT_TABLE
+_IDMC_FLOW_WHERE = CONFLICT_DISPLACEMENT_WHERE
+_IDMC_DELTA_WHERE = CONFLICT_DISPLACEMENT_WHERE
+
+
+def conflict_displacement_rows(
+    con, iso3: str, before_ym: str, *,
     since_ym: Optional[str] = None, limit: Optional[int] = None,
 ) -> Tuple[List[Tuple[str, float]], int]:
-    """IDMC monthly new displacements before ``before_ym``, ascending by month.
+    """IDMC monthly CONFLICT displacement before ``before_ym``, ascending.
 
-    Returns ``(rows, n_negative_dropped)``. A flow cannot be negative; a row
-    that is has been mislabelled somewhere upstream and is dropped and
-    counted rather than printed. ``limit`` keeps the most recent months.
+    Returns ``(rows, n_negative_dropped)``. Only months IDMC reported are
+    returned; a quiet month is decided by :func:`conflict_displacement_coverage`.
+    A flow cannot be negative; a row that is was mislabelled upstream and is
+    dropped and counted rather than printed. ``limit`` keeps the most recent.
     """
-    if not _table_exists(con, IDMC_FLOW_TABLE):
+    if not _conflict_displacement_table_ok(con):
         return [], 0
-    params: List[Any] = [iso3.upper(), (hazard_code or "ACE").upper(), before_ym]
+    params: List[Any] = [iso3.upper(), before_ym]
     since = ""
     if since_ym:
         since = " AND substr(CAST(ym AS VARCHAR), 1, 7) >= ?"
         params.append(since_ym)
     rows = con.execute(
         f"""
-        SELECT substr(CAST(ym AS VARCHAR), 1, 7) AS ym_key, SUM(value_new) AS flow
-        FROM {IDMC_FLOW_TABLE}
+        SELECT substr(CAST(ym AS VARCHAR), 1, 7) AS ym_key, SUM(value) AS flow
+        FROM {CONFLICT_DISPLACEMENT_TABLE}
         WHERE upper(iso3) = ?
-          AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
-          AND {_IDMC_FLOW_WHERE}
+          AND {CONFLICT_DISPLACEMENT_WHERE}
           AND substr(CAST(ym AS VARCHAR), 1, 7) < ?{since}
-          AND value_new IS NOT NULL
+          AND value IS NOT NULL
         GROUP BY ym_key
         ORDER BY ym_key DESC
         """,
@@ -303,6 +331,74 @@ def idmc_flow_rows(
     if limit is not None:
         kept = kept[: int(limit)]
     return list(reversed(kept)), dropped
+
+
+def idmc_flow_rows(
+    con, iso3: str, hazard_code: str, before_ym: str, *,
+    since_ym: Optional[str] = None, limit: Optional[int] = None,
+) -> Tuple[List[Tuple[str, float]], int]:
+    """Legacy name for :func:`conflict_displacement_rows` (``hazard_code`` is
+    ignored: the series is conflict displacement whatever the caller asks)."""
+    del hazard_code
+    return conflict_displacement_rows(con, iso3, before_ym, since_ym=since_ym, limit=limit)
+
+
+def conflict_displacement_coverage(con) -> Tuple[set[str], set[str]]:
+    """``(live_months, universe)`` of the conflict displacement series.
+
+    The two gates the ACLED series uses, applied to this one. A month is LIVE
+    when IDMC reported conflict displacement for ANY country in it; a country
+    is in the UNIVERSE when IDMC has reported conflict displacement for it in
+    any month the table holds. Only a month that is live, for a country in
+    the universe, can be read as an observed zero: a month nobody reported
+    for is an ingestion gap, and a country never reported is outside the
+    source's sight. Empty sets when the table is absent.
+    """
+    if not _conflict_displacement_table_ok(con):
+        return set(), set()
+    try:
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT substr(CAST(ym AS VARCHAR), 1, 7), upper(iso3)
+            FROM {CONFLICT_DISPLACEMENT_TABLE}
+            WHERE {CONFLICT_DISPLACEMENT_WHERE} AND value IS NOT NULL
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - no gate is safer than a wrong gate
+        return set(), set()
+    live = {str(ym) for ym, _iso in rows if ym}
+    universe = {str(iso) for _ym, iso in rows if iso}
+    return live, universe
+
+
+def conflict_displacement_value(
+    con, iso3: str, ym: str, *,
+    coverage: Optional[Tuple[set[str], set[str]]] = None,
+) -> Optional[Tuple[float, str]]:
+    """The resolved conflict displacement for one country-month, or None.
+
+    ``(value, source_desc)`` when IDMC reported the month; ``(0.0,
+    'zero_default')`` when the month is live and the country is in the
+    universe but has no row (an observed quiet month); None when either gate
+    fails, so an ingestion gap never resolves as zero.
+    """
+    iso = (iso3 or "").upper()
+    if not _conflict_displacement_table_ok(con):
+        return None
+    row = con.execute(
+        f"""
+        SELECT SUM(value) FROM {CONFLICT_DISPLACEMENT_TABLE}
+        WHERE upper(iso3) = ? AND substr(CAST(ym AS VARCHAR), 1, 7) = ?
+          AND {CONFLICT_DISPLACEMENT_WHERE} AND value IS NOT NULL
+        """,
+        [iso, ym],
+    ).fetchone()
+    if row and row[0] is not None and float(row[0]) >= 0:
+        return float(row[0]), CONFLICT_DISPLACEMENT_SERIES
+    live, universe = coverage if coverage is not None else conflict_displacement_coverage(con)
+    if ym in live and iso in universe:
+        return 0.0, "zero_default"
+    return None
 
 
 def _fill_quiet_months(
@@ -415,31 +511,32 @@ def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], s
 
 
 def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
-    """ACE/PA: IDMC's monthly new displacements (``facts_deltas``), the
-    series an ACE/PA question resolves on and the prompt marks THIS
-    QUESTION'S SERIES."""
-    if not _table_exists(con, IDMC_FLOW_TABLE):
-        return [], NO_BASE_RATE_SOURCE, {"reason": f"{IDMC_FLOW_TABLE} missing"}
+    """ACE/PA: IDMC monthly CONFLICT displacement, the series an ACE/PA
+    question resolves on and the prompt marks THIS QUESTION'S SERIES.
+
+    A quiet month counts as an observed zero behind the same two gates the
+    resolver applies (:func:`conflict_displacement_coverage`), so the anchor
+    and the resolution read one series under one rule."""
+    del hazard_code
+    if not _table_exists(con, CONFLICT_DISPLACEMENT_TABLE):
+        return [], NO_BASE_RATE_SOURCE, {"reason": f"{CONFLICT_DISPLACEMENT_TABLE} missing"}
     months = _window_months(before_ym, CONFLICT_WINDOW_MONTHS)
-    rows, n_negative = idmc_flow_rows(con, iso3, hazard_code, before_ym, since_ym=months[0])
+    rows, n_negative = conflict_displacement_rows(con, iso3, before_ym, since_ym=months[0])
     observed = {ym: v for ym, v in rows}
+    live, universe = conflict_displacement_coverage(con)
     n_quiet = 0
-    if COUNT_QUIET_MONTHS_AS_ZERO and observed:
+    if COUNT_QUIET_MONTHS_AS_ZERO and (iso3 or "").upper() in universe:
         # IDMC reports a country only when it records displacement, so an
         # anchor built from present rows alone said displacement happens every
         # month in a country IDMC reported twice a year. The window's quiet
-        # months are observations, and leaving them out inflated the anchor
-        # and therefore suppressed every excess measured against it.
-        live = _live_months(
-            con, IDMC_FLOW_TABLE, "ym", months, extra_where=_IDMC_FLOW_WHERE
-        )
+        # months are observations, and leaving them out inflated the anchor.
         values, n_reported, n_quiet = _fill_quiet_months(observed, months, live)
     else:
         values = [observed[k] for k in sorted(observed)]
         n_reported = len(values)
     probs = _empirical_bucket_probs(values, "PA")
     if probs is None:
-        return [], NO_BASE_RATE_SOURCE, {"reason": "no IDMC displacement history before window"}
+        return [], NO_BASE_RATE_SOURCE, {"reason": "no IDMC conflict displacement history before window"}
     detail = {
         "score_family": "spd",
         "method": "empirical_monthly_buckets",
@@ -450,7 +547,7 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
         "n_negative_dropped": n_negative,
         "values": values,
     }
-    return probs, f"facts_deltas:idmc:{len(values)}m", detail
+    return probs, f"idmc_conflict:{len(values)}m", detail
 
 
 def _phase3_history(con, iso3: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
@@ -498,6 +595,9 @@ def last_observed_value(
       month before the window counts as an observed ZERO when ACLED was live
       that month and the country is in its universe but has no row — the
       quiet-month rule the climatology anchor applies.
+    * ACE/PA: the IDMC conflict displacement series; the month before the
+      window resolved as the resolver would (reported, quiet zero, or
+      unknown), else the latest reported month.
     * DR/PHASE3PLUS_IN_NEED: the latest ``phase3plus_in_need`` row before the
       window (a stock, reported every few months).
 
@@ -531,6 +631,21 @@ def last_observed_value(
                 return 0.0, prev, f"{CONFLICT_FATALITIES_TABLE}:quiet_month"
             if row:
                 return float(row[1] or 0), str(row[0]), CONFLICT_FATALITIES_TABLE
+            return None
+        if hz == "ACE" and m == "PA":
+            # The month before the window, as the resolver would resolve it:
+            # a reported value, an observed quiet month (0), or unknown.
+            prev = _add_months(before, -1)
+            got = conflict_displacement_value(con, iso, prev)
+            if got is not None:
+                value, src = got
+                if src == "zero_default":
+                    return 0.0, prev, f"{CONFLICT_DISPLACEMENT_SERIES}:quiet_month"
+                return value, prev, src
+            rows, _neg = conflict_displacement_rows(con, iso, before, limit=1)
+            if rows:
+                ym, value = rows[-1]
+                return value, ym, CONFLICT_DISPLACEMENT_SERIES
             return None
         if hz == "DR" and m == "PHASE3PLUS_IN_NEED":
             if not _table_exists(con, "facts_resolved"):

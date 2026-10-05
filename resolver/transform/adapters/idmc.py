@@ -15,11 +15,22 @@ from .base import BaseAdapter, CANONICAL_COLUMNS, LOGGER
 
 
 class IDMCAdapter(BaseAdapter):
-    """Normalizer for IDMC flow staging CSVs (6-column format).
+    """Normalizer for the IDMC conflict displacement staging CSV.
 
     IDMC outputs staging data to ``idmc/flow.csv`` (a subdirectory), so
     ``resolve_raw_path`` is overridden to look there instead of a flat file.
+
+    Only CONFLICT displacement is written, as hazard ``ACE``: the file is
+    produced by :mod:`resolver.ingestion.idmc_conflict`, which marks every row
+    with its ``displacement_type``. Until Oct 2026 every row was stamped
+    ``IDU`` whatever had displaced the people, so typhoon evacuations in China
+    and the Philippines were read as conflict displacement. A row of any other
+    cause, and a file that states no cause at all (the HELIX path's all-cause
+    output), is refused and counted, never written.
     """
+
+    #: Rows refused by the last :meth:`map` call, by cause.
+    last_excluded: dict = {}
 
     canonical_source = "idmc"
     raw_slug = None  # custom resolution below
@@ -51,6 +62,26 @@ class IDMCAdapter(BaseAdapter):
     def map(self, frame: pd.DataFrame) -> pd.DataFrame:  # type: ignore[override]
         df = frame.copy()
 
+        if df.empty:
+            return pd.DataFrame(columns=CANONICAL_COLUMNS)
+
+        # ------------------------------------------------------------------
+        # cause: conflict only
+        # ------------------------------------------------------------------
+        if "displacement_type" not in df.columns:
+            LOGGER.warning(
+                "idmc: staging file states no displacement_type; refusing all %s "
+                "rows (an all-cause sum must never be written as conflict "
+                "displacement)", len(df),
+            )
+            type(self).last_excluded = {"untyped": int(len(df))}
+            return pd.DataFrame(columns=CANONICAL_COLUMNS)
+        cause = df["displacement_type"].astype(str).str.strip().str.lower()
+        excluded = cause[cause != "conflict"].replace("", "untyped").value_counts()
+        type(self).last_excluded = {str(k): int(v) for k, v in excluded.items()}
+        if len(excluded):
+            LOGGER.info("idmc: refused non-conflict rows by cause: %s", type(self).last_excluded)
+        df = df.loc[cause == "conflict"].copy()
         if df.empty:
             return pd.DataFrame(columns=CANONICAL_COLUMNS)
 
@@ -96,9 +127,9 @@ class IDMCAdapter(BaseAdapter):
                 "event_id": "",
                 "country_name": "",
                 "iso3": df.get("iso3", "").str.upper(),
-                "hazard_code": "IDU",
-                "hazard_label": "Internal Displacement",
-                "hazard_class": "displacement",
+                "hazard_code": "ACE",
+                "hazard_label": "Armed conflict — internal displacement",
+                "hazard_class": "human-induced",
                 "metric": df.get("metric", "new_displacements"),
                 "unit": "persons",
                 "as_of_date": df["as_of_date"],

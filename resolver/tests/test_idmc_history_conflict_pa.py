@@ -24,31 +24,36 @@ from forecaster import cli as forecaster_cli  # type: ignore
 
 
 def _seed(db_path):
-    """facts_deltas with the columns the conflict builder actually selects."""
+    """The IDMC conflict displacement series (Oct 2026: facts_resolved,
+    hazard ACE, publisher IDMC), with an all-cause IDU row that must be ignored."""
     con = duckdb.connect(str(db_path))
     try:
         con.execute(
             """
-            CREATE TABLE facts_deltas (
-                ym DATE,
+            CREATE TABLE facts_resolved (
+                ym TEXT,
                 iso3 TEXT,
                 hazard_code TEXT,
                 metric TEXT,
                 series_semantics TEXT,
-                value_new DOUBLE,
-                source_id TEXT
+                value DOUBLE,
+                publisher TEXT
             )
             """
         )
         for month in range(1, 9):
             con.execute(
                 """
-                INSERT INTO facts_deltas
-                    (ym, iso3, hazard_code, metric, series_semantics, value_new, source_id)
-                VALUES (?, 'ETH', 'ACE', 'idp_displacement_flow_idmc', 'new', ?, 'idmc')
+                INSERT INTO facts_resolved
+                    (ym, iso3, hazard_code, metric, series_semantics, value, publisher)
+                VALUES (?, 'ETH', 'ACE', 'new_displacements', 'new', ?, 'IDMC')
                 """,
-                [f"2024-{month:02d}-01", 1000.0 * month],
+                [f"2024-{month:02d}", 1000.0 * month],
             )
+        con.execute(
+            "INSERT INTO facts_resolved VALUES "
+            "('2024-09', 'ETH', 'IDU', 'new_displacements', 'new', 999999, 'IDMC')"
+        )
         con.execute(
             """
             CREATE TABLE acled_monthly_fatalities (

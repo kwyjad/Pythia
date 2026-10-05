@@ -24,10 +24,11 @@ def idmc_staging_dir(tmp_path: Path) -> Path:
     idmc_dir = tmp_path / "idmc"
     idmc_dir.mkdir()
     csv_text = textwrap.dedent("""\
-        iso3,as_of_date,metric,value,series_semantics,source
-        SDN,2024-02-29,new_displacements,800,new,idmc_idu
-        COD,2024-01-31,new_displacements,500,new,idmc_idu
-        SDN,2024-02-29,new_displacements,700,new,idmc_idu
+        iso3,as_of_date,metric,value,series_semantics,source,displacement_type
+        SDN,2024-02-29,new_displacements,800,new,idmc_idu,conflict
+        COD,2024-01-31,new_displacements,500,new,idmc_idu,conflict
+        SDN,2024-02-29,new_displacements,700,new,idmc_idu,conflict
+        PHL,2024-02-29,new_displacements,1743994,new,idmc_idu,disaster
     """)
     (idmc_dir / "flow.csv").write_text(csv_text, encoding="utf-8")
     return tmp_path
@@ -38,8 +39,8 @@ def idmc_flat_file(tmp_path: Path) -> Path:
     """Create a staging directory with a flat idmc.csv (fallback)."""
 
     csv_text = textwrap.dedent("""\
-        iso3,as_of_date,metric,value,series_semantics,source
-        ETH,2024-03-31,new_displacements,1200,new,idmc_idu
+        iso3,as_of_date,metric,value,series_semantics,source,displacement_type
+        ETH,2024-03-31,new_displacements,1200,new,idmc_idu,conflict
     """)
     (tmp_path / "idmc.csv").write_text(csv_text, encoding="utf-8")
     return tmp_path
@@ -88,13 +89,35 @@ class TestIDMCAdapterMap:
         canonical = adapter.map(raw)
         assert (canonical["source"] == "idmc").all()
 
-    def test_hazard_code_is_idu(
+    def test_hazard_code_is_ace(
         self, adapter: IDMCAdapter, idmc_staging_dir: Path
     ) -> None:
         raw_path = adapter.resolve_raw_path(idmc_staging_dir)
         raw = adapter.load(raw_path)
         canonical = adapter.map(raw)
-        assert (canonical["hazard_code"] == "IDU").all()
+        assert (canonical["hazard_code"] == "ACE").all()
+
+    def test_disaster_rows_are_refused_and_counted(
+        self, adapter: IDMCAdapter, idmc_staging_dir: Path
+    ) -> None:
+        """A typhoon evacuation is not conflict displacement (Oct 2026)."""
+        raw = adapter.load(adapter.resolve_raw_path(idmc_staging_dir))
+        canonical = adapter.map(raw)
+        assert "PHL" not in set(canonical["iso3"])
+        assert IDMCAdapter.last_excluded == {"disaster": 1}
+
+    def test_a_file_stating_no_cause_writes_nothing(
+        self, adapter: IDMCAdapter, tmp_path: Path
+    ) -> None:
+        """The HELIX path's all-cause sum must never be written as conflict."""
+        (tmp_path / "idmc.csv").write_text(
+            "iso3,as_of_date,metric,value,series_semantics,source\n"
+            "CHN,2026-07-31,new_displacements,7305385,new,idmc_idu\n",
+            encoding="utf-8",
+        )
+        canonical = adapter.map(adapter.load(adapter.resolve_raw_path(tmp_path)))
+        assert canonical.empty
+        assert IDMCAdapter.last_excluded == {"untyped": 1}
 
     def test_hazard_label_populated(
         self, adapter: IDMCAdapter, idmc_staging_dir: Path
@@ -102,7 +125,7 @@ class TestIDMCAdapterMap:
         raw_path = adapter.resolve_raw_path(idmc_staging_dir)
         raw = adapter.load(raw_path)
         canonical = adapter.map(raw)
-        assert (canonical["hazard_label"] == "Internal Displacement").all()
+        assert (canonical["hazard_label"] == "Armed conflict — internal displacement").all()
 
     def test_unit_is_persons(
         self, adapter: IDMCAdapter, idmc_staging_dir: Path
@@ -151,7 +174,7 @@ class TestIDMCAdapterMap:
     ) -> None:
         empty = pd.DataFrame(columns=[
             "iso3", "as_of_date", "metric", "value",
-            "series_semantics", "source",
+            "series_semantics", "source", "displacement_type",
         ])
         result = adapter.map(empty)
         assert result.empty

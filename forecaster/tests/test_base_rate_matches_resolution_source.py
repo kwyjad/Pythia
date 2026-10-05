@@ -172,3 +172,66 @@ def test_seasonal_profile_source_label_names_every_publisher_present(
         con.close()
 
     assert profile["source"] == "IDMC, IFRC"
+
+
+# ---------------------------------------------------------------------------
+# ACE/PA: one conflict displacement series, one reader (Oct 2026)
+# ---------------------------------------------------------------------------
+
+
+def _conflict_db():
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE facts_resolved (ym TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, "
+        "series_semantics TEXT, value DOUBLE, publisher TEXT, source_id TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
+    rows = [
+        ("2026-05", "PHL", "ACE", 12_000), ("2026-07", "PHL", "ACE", 3_000),
+        ("2026-06", "SOM", "ACE", 900),
+        # All-cause rows as they stood on the 3 October 2026 release: typhoon
+        # evacuations, never conflict displacement.
+        ("2026-07", "CHN", "IDU", 7_305_385), ("2026-09", "PHL", "IDU", 1_743_994),
+    ]
+    for ym, iso, hz, v in rows:
+        con.execute(
+            "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, series_semantics, "
+            "value, publisher, source_id) VALUES (?, ?, ?, 'new_displacements', 'new', ?, "
+            "'IDMC', 'idmc')",
+            [ym, iso, hz, v],
+        )
+    return con
+
+
+def test_prompt_anchor_references_and_resolver_read_one_conflict_series():
+    """The prompt block, the ACE/PA anchor, the persistence reference and the
+    resolver all read IDMC CONFLICT displacement through one reader, and the
+    writer names the same hazard, metric and publisher."""
+    from pythia.tools import base_rate_spd as brs
+    from resolver.ingestion import idmc_conflict as ic
+
+    con = _conflict_db()
+    # Prompt block reader.
+    rows, _neg = brs.conflict_displacement_rows(con, "PHL", "2026-10", limit=6)
+    assert rows == [("2026-05", 12000.0), ("2026-07", 3000.0)]
+    # Anchor: built from the same rows plus quiet months behind the gates.
+    probs, source, detail = brs.base_rate_spd(con, "PHL", "ACE", "PA", "2026-10")
+    assert source.startswith("idmc_conflict")
+    assert 1_743_994.0 not in detail["values"]
+    assert 12000.0 in detail["values"] and 3000.0 in detail["values"]
+    # Resolver: a reported month, a quiet live month, a month nobody reported.
+    assert brs.conflict_displacement_value(con, "PHL", "2026-07")[0] == 3000.0
+    assert brs.conflict_displacement_value(con, "PHL", "2026-06") == (0.0, "zero_default")
+    assert brs.conflict_displacement_value(con, "PHL", "2026-09") is None
+    # China's typhoon rows put it in no conflict universe at all.
+    assert brs.conflict_displacement_value(con, "CHN", "2026-07") is None
+    probs_chn, source_chn, _ = brs.base_rate_spd(con, "CHN", "ACE", "PA", "2026-10")
+    assert probs_chn == [] and source_chn == brs.NO_BASE_RATE_SOURCE
+    # Persistence.
+    assert brs.last_observed_value(con, "PHL", "ACE", "PA", "2026-08")[:2] == (3000.0, "2026-07")
+    # Writer and reader agree on what the series is.
+    assert (ic.HAZARD_CODE, ic.METRIC, ic.SOURCE) == (
+        brs.CONFLICT_DISPLACEMENT_HAZARD,
+        brs.CONFLICT_DISPLACEMENT_METRIC,
+        brs.CONFLICT_DISPLACEMENT_PUBLISHER,
+    )

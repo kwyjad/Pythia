@@ -136,45 +136,31 @@ class TestIdmcConnectorContract:
     """Verify IDMC wrapper returns the canonical schema."""
 
     def test_idmc_connector_maps_to_canonical(self, monkeypatch):
-        """Mock the IDMC client chain to avoid network calls."""
-        # Minimal IDMC-style normalized data with the 6 fact columns.
-        fake_facts = pd.DataFrame(
-            {
-                "iso3": ["AFG", "ETH"],
-                "as_of_date": ["2025-01-31", "2025-01-31"],
-                "metric": ["new_displacements", "new_displacements"],
-                "value": [5000, 12000],
-                "series_semantics": ["new", "new"],
-                "source": ["IDMC", "IDMC"],
-            }
-        )
-
-        # Patch at the source modules (where the deferred imports resolve).
+        """Mock the IDU transport; only conflict displacement comes back,
+        as hazard ACE (Oct 2026: the connector used to write every cause)."""
+        records = [
+            {"iso3": "AFG", "displacement_type": "Conflict", "figure": 5000,
+             "displacement_start_date": "2025-01-10"},
+            {"iso3": "ETH", "displacement_type": "Conflict", "figure": 12000,
+             "displacement_start_date": "2025-01-20"},
+            {"iso3": "PHL", "displacement_type": "Disaster", "figure": 900000,
+             "displacement_start_date": "2025-01-20"},
+        ]
+        monkeypatch.setenv("IDMC_API_KEY", "test-client")
+        monkeypatch.setenv("IDMC_CONFLICT_MONTHS", "600")
         monkeypatch.setattr(
-            "resolver.ingestion.idmc.export.build_resolution_ready_facts",
-            lambda normalized: fake_facts,
-        )
-        monkeypatch.setattr(
-            "resolver.ingestion.idmc.client.IdmcClient",
-            lambda config: type("FakeClient", (), {"fetch": lambda self: pd.DataFrame({"x": [1]})})(),
-        )
-        monkeypatch.setattr(
-            "resolver.ingestion.idmc.config.load",
-            lambda: {},
-        )
-        monkeypatch.setattr(
-            "resolver.ingestion.idmc.normalize.normalize_all",
-            lambda raw, config: raw,
+            "resolver.ingestion.idmc_conflict._default_get",
+            lambda url, params, timeout: records,
         )
 
         from resolver.connectors.idmc import IdmcConnector
 
-        connector = IdmcConnector()
-        df = connector.fetch_and_normalize()
+        df = IdmcConnector().fetch_and_normalize()
 
         assert list(df.columns) == CANONICAL_COLUMNS
         assert len(df) == 2
         assert set(df["iso3"]) == {"AFG", "ETH"}
+        assert set(df["hazard_code"]) == {"ACE"}
         validate_canonical(df, source="idmc")
 
 

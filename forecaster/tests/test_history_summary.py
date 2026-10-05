@@ -75,25 +75,25 @@ def test_build_history_summary_idmc_conflict_flow(monkeypatch: pytest.MonkeyPatc
 
     con.execute(
         """
-        CREATE TABLE facts_deltas (
-            ym DATE,
+        CREATE TABLE facts_resolved (
+            ym TEXT,
             iso3 TEXT,
             hazard_code TEXT,
             metric TEXT,
-            value_new DOUBLE,
+            value DOUBLE,
             series_semantics TEXT,
-            source_id TEXT
+            publisher TEXT
         )
         """
     )
 
     con.execute(
         """
-        INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, value_new, series_semantics, source_id) VALUES
-            (DATE '2024-01-01', 'ETH', 'ACE', 'new_displacements', 1000.0, 'new', 'idmc'),
-            (DATE '2024-02-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new', 'idmc'),
-            (DATE '2024-03-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new', 'idmc'),
-            (DATE '2024-03-01', 'ETH', 'ACE', 'new_displacements', 500.0, 'new', 'idmc')
+        INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, series_semantics, publisher) VALUES
+            ('2024-01', 'ETH', 'ACE', 'new_displacements', 1000.0, 'new', 'IDMC'),
+            ('2024-02', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new', 'IDMC'),
+            ('2024-03', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new', 'IDMC'),
+            ('2024-03', 'ETH', 'ACE', 'new_displacements', 500.0, 'new', 'IDMC')
         """
     )
 

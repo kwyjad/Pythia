@@ -81,3 +81,34 @@ def test_repair_rewrites_differenced_flow_rows_once():
     assert _deltas(con, "AFG") == [("2024-02", 10758.0), ("2024-03", 90.0)]
     # A stock's delta is a difference by design and is left alone.
     assert _deltas(con, "SDN") == [("2024-02", -2000.0)]
+
+
+def test_all_cause_idmc_rows_are_purged_and_conflict_rows_kept():
+    """Oct 2026: every IDMC row was hazard IDU whatever its cause, and was
+    read as conflict displacement. The purge removes them from both tables
+    and leaves the conflict series (hazard ACE) and other sources alone."""
+    from resolver.tools.load_and_derive import purge_all_cause_idmc_rows
+
+    con = duckdb.connect(":memory:")
+    _seed(con)
+    con.execute(
+        """
+        INSERT INTO facts_resolved
+            (ym, iso3, hazard_code, metric, series_semantics, value, unit,
+             as_of_date, source_id, event_id)
+        VALUES ('2024-02', 'AFG', 'ACE', 'new_displacements', 'new', 3000,
+                'persons', '2024-02-29', 'idmc', 'x')
+        """
+    )
+    _derive_deltas(con, PeriodMonths.from_label("2024Q1"))
+    counts = purge_all_cause_idmc_rows(con)
+    assert counts == {"facts_resolved": 3, "facts_deltas": 3}
+    left = con.execute(
+        "SELECT hazard_code, COUNT(*) FROM facts_resolved GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    assert left == [("ACE", 1), ("FL", 2)]
+    assert con.execute(
+        "SELECT COUNT(*) FROM facts_deltas WHERE hazard_code = 'IDU'"
+    ).fetchone()[0] == 0
+    # Idempotent.
+    assert purge_all_cause_idmc_rows(con) == {"facts_resolved": 0, "facts_deltas": 0}

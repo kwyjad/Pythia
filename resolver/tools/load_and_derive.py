@@ -549,6 +549,43 @@ def repair_flow_deltas(conn) -> dict[str, int]:
     return {"repaired": n, "negative_repaired": n_neg}
 
 
+def purge_all_cause_idmc_rows(conn) -> dict[str, int]:
+    """Delete the all-cause IDMC rows written before Oct 2026.
+
+    Until then the IDMC adapter stamped every displacement figure hazard
+    ``IDU`` whatever its cause, so typhoon evacuations in China and the
+    Philippines sat beside conflict displacement and were read as it. The
+    adapter now writes conflict displacement alone, as hazard ``ACE``, and no
+    reader looks at ``IDU``; an all-cause row left in the table is a wrong
+    figure waiting for a reader, and an absent row is honest. Idempotent:
+    a second run finds nothing. ``facts_raw`` (the raw history) is kept.
+    """
+
+    counts: dict[str, int] = {}
+    for table, source_col in (("facts_resolved", "source_id"), ("facts_deltas", "source_id")):
+        try:
+            cols = _table_columns(conn, table)
+        except Exception:  # noqa: BLE001 - a missing table has nothing to purge
+            counts[table] = 0
+            continue
+        if not cols or "hazard_code" not in cols:
+            counts[table] = 0
+            continue
+        where = "upper(hazard_code) = 'IDU'"
+        if source_col in cols:
+            where += f" AND lower(COALESCE({source_col}, '')) IN ('idmc', 'idmc_idu', '')"
+        try:
+            n = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0])
+            if n:
+                conn.execute(f"DELETE FROM {table} WHERE {where}")
+            counts[table] = n
+        except Exception as exc:  # noqa: BLE001 - a repair must never end the load
+            LOGGER.warning("all-cause IDMC purge on %s skipped: %s", table, exc)
+            counts[table] = 0
+    LOGGER.info("all-cause IDMC (hazard IDU) rows purged: %s", counts)
+    return counts
+
+
 def _export_parquet(
     conn,
     period: PeriodMonths,
@@ -671,6 +708,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         LOGGER.info("Derived %s delta rows for period %s", derived, period.label)
         repair_flow_deltas(conn)
+        purge_all_cause_idmc_rows(conn)
         export_dir = Path(args.snapshots_root).expanduser().resolve() / args.period
         try:
             export_counts = _export_parquet(conn, period, export_dir)

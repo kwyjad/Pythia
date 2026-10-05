@@ -123,6 +123,10 @@ from pythia.tools._db_utils import (
     row_count as _row_count,
     table_exists as _table_exists,
 )
+from pythia.tools.base_rate_spd import (
+    conflict_displacement_coverage,
+    conflict_displacement_value,
+)
 from pythia.tools.source_coverage import (
     acled_complete_clause as _acled_complete_clause,
     countries_with_source_data as _coverage_countries,
@@ -265,6 +269,11 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
                         max_yms.append(str(row[0]))
                 except Exception:
                     pass
+        # The ACE/PA series (IDMC conflict displacement) lives in
+        # facts_resolved under a metric the PA filter above leaves out.
+        live, _universe = conflict_displacement_coverage(conn)
+        if live:
+            max_yms.append(max(live))
         if _table_exists(conn, "emdat_pa"):
             try:
                 row = conn.execute("SELECT MAX(ym) FROM emdat_pa").fetchone()
@@ -935,6 +944,10 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         skipped_unresolvable_hazard = 0
         skipped_outside_source_universe = 0
         skipped_partial_month = 0
+        skipped_conflict_displacement_gate = 0
+        # The IDMC conflict displacement gates (live months, universe), read
+        # once per run on the first ACE/PA horizon.
+        conflict_coverage = None
 
         # Rebuild the source_coverage table from the metric source tables so
         # the gates below (and any dashboard consumer) see current coverage.
@@ -1046,9 +1059,30 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     skipped_no_data_coverage += 1
                     continue
 
-                resolved = _resolve_value(
-                    conn, iso3_norm, hazard_norm, cal_month, metric_norm,
-                )
+                if hazard_norm == "ACE" and metric_norm == "PA":
+                    # ACE/PA resolves from the IDMC conflict displacement
+                    # series alone, through the reader the prompt and the
+                    # anchor use; a quiet month is zero only behind both
+                    # coverage gates (base_rate_spd.conflict_displacement_value).
+                    if conflict_coverage is None:
+                        conflict_coverage = conflict_displacement_coverage(conn)
+                    got = conflict_displacement_value(
+                        conn, iso3_norm, cal_month, coverage=conflict_coverage,
+                    )
+                    if got is None:
+                        skipped_conflict_displacement_gate += 1
+                        continue
+                    value, source_desc = got
+                    source_ts = None
+                    if source_desc == "zero_default":
+                        resolved_as_zero += 1
+                    else:
+                        resolved_from_source += 1
+                    resolved = (value, source_ts, source_desc)
+                else:
+                    resolved = _resolve_value(
+                        conn, iso3_norm, hazard_norm, cal_month, metric_norm,
+                    )
                 if resolved is None and metric_norm == "FATALITIES" and (
                     _acled_partial_row_exists(conn, iso3_norm, cal_month)
                 ):
@@ -1080,7 +1114,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         # horizon unresolved so scoring skips it.
                         skipped_null_resolution += 1
                         continue
-                else:
+                elif not (hazard_norm == "ACE" and metric_norm == "PA"):
                     value, source_ts, source_desc = resolved
                     resolved_from_source += 1
 
@@ -1168,6 +1202,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "%d horizon-months skipped (no data coverage yet), "
             "%d horizon-months skipped (country outside source universe), "
             "%d horizon-months skipped (only a partial-month ACLED row), "
+            "%d ACE/PA horizon-months unresolved (IDMC conflict displacement "
+            "not live that month, or the country outside its universe), "
             "%d questions skipped (unresolvable hazard); "
             "%d new FATALITIES resolution vintage(s) recorded.",
             len(rows),
@@ -1178,6 +1214,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             skipped_no_data_coverage,
             skipped_outside_source_universe,
             skipped_partial_month,
+            skipped_conflict_displacement_gate,
             skipped_unresolvable_hazard,
             vintages_written,
         )
