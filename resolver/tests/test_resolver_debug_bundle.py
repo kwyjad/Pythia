@@ -921,7 +921,7 @@ def test_nmme_must_be_read_for_a_month_seasonal_forecasts_covers(tmp_path, full_
         "anomaly_value DOUBLE, forecast_issue_date DATE)"
     )
     con.execute(
-        "INSERT INTO seasonal_forecasts VALUES ('SOM', 'prate', 1, -1.2, DATE '2026-07-08')"
+        "INSERT INTO seasonal_forecasts VALUES ('SOM', 'prate_prob_below', 1, 0.62, DATE '2026-07-08')"
     )
     con.execute(
         "CREATE TABLE haz_raw_drought_indicators (record_id TEXT, iso3 TEXT, ym TEXT, "
@@ -939,8 +939,8 @@ def test_nmme_must_be_read_for_a_month_seasonal_forecasts_covers(tmp_path, full_
 
     con = duckdb.connect(str(db))
     con.execute(
-        "INSERT INTO haz_raw_drought_indicators VALUES ('nmme_precip_anomaly-2026-08', NULL, "
-        "'2026-08', 'DR', '{\"name\":\"nmme_precip_anomaly\",\"values\":{\"SOM\":-1.2}}')"
+        "INSERT INTO haz_raw_drought_indicators VALUES ('nmme_precip_prob_below-2026-08', NULL, "
+        "'2026-08', 'DR', '{\"name\":\"nmme_precip_prob_below\",\"values\":{\"SOM\":-1.2}}')"
     )
     con.close()
     checks = _checks(tmp_path, db, full_run, "again")
@@ -954,7 +954,7 @@ def test_a_drought_zero_on_one_feed_is_a_contradiction(tmp_path, full_run):
     one_feed = json.dumps({"decision": {"delta": None, "indicators": {"readings": [
         {"name": "asap", "state": "unavailable"},
         {"name": "hdx_agricultural_stress", "state": "no_drought"},
-        {"name": "nmme_precip_anomaly", "state": "unavailable"},
+        {"name": "nmme_precip_prob_below", "state": "unavailable"},
     ]}}})
     con = duckdb.connect(str(db))
     con.execute(

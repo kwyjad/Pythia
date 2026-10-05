@@ -115,7 +115,7 @@ def _seed_nmme(con, rows: list[tuple[str, float, int, str]]):
     for iso3, anomaly, lead, issue in rows:
         con.execute(
             "INSERT INTO seasonal_forecasts (iso3, variable, lead_months, "
-            "anomaly_value, forecast_issue_date) VALUES (?, 'prate', ?, ?, ?)",
+            "anomaly_value, forecast_issue_date) VALUES (?, 'prate_prob_below', ?, ?, ?)",
             [iso3, lead, anomaly, issue],
         )
 
@@ -486,26 +486,26 @@ class TestNmmeLookup:
         """Only a lead-3 vintage exists for March. The pinned lead-1 lookup
         found nothing while the forecast about March sat in the table."""
 
-        _seed_nmme(con, [("SOM", -1.4, 3, "2023-12-08")])
+        _seed_nmme(con, [("SOM", 0.62, 3, "2023-12-08")])
         outcome = _refresh(con, rulebook)
-        assert outcome.detail["entries"]["nmme_precip_anomaly"]["ok"] is True
+        assert outcome.detail["entries"]["nmme_precip_prob_below"]["ok"] is True
         reading = {r.name: r for r in _verdict(con, "SOM", rulebook).readings}
-        assert reading["nmme_precip_anomaly"].state == ind_mod.STATE_DROUGHT
+        assert reading["nmme_precip_prob_below"].state == ind_mod.STATE_DROUGHT
 
     def test_the_shortest_lead_wins(self, con, rulebook):
         _seed_nmme(con, [
-            ("SOM", -1.4, 3, "2023-12-08"),   # about March, issued December
+            ("SOM", 0.62, 3, "2023-12-08"),   # about March, issued December
             ("SOM", 0.2, 1, "2024-02-08"),    # about March, issued February
         ])
         _refresh(con, rulebook)
         reading = {r.name: r for r in _verdict(con, "SOM", rulebook).readings}
-        assert reading["nmme_precip_anomaly"].value == pytest.approx(0.2)
-        assert reading["nmme_precip_anomaly"].state == ind_mod.STATE_NO_DROUGHT
+        assert reading["nmme_precip_prob_below"].value == pytest.approx(0.2)
+        assert reading["nmme_precip_prob_below"].state == ind_mod.STATE_NO_DROUGHT
 
     def test_a_vintage_about_a_later_month_never_answers(self, con, rulebook):
-        _seed_nmme(con, [("SOM", -1.4, 1, "2024-03-08")])  # about April
+        _seed_nmme(con, [("SOM", 0.62, 1, "2024-03-08")])  # about April
         outcome = _refresh(con, rulebook)
-        entry = outcome.detail["entries"]["nmme_precip_anomaly"]
+        entry = outcome.detail["entries"]["nmme_precip_prob_below"]
         assert entry["ok"] is False
 
     def test_a_miss_describes_the_table(self, con, rulebook):
@@ -524,11 +524,11 @@ class TestNmmeLookup:
 
         _seed_nmme(con, [
             ("SOM", None, 1, "2024-02-08"),   # about 2024-03, no value
-            ("SOM", -1.4, 1, "2024-03-08"),   # about 2024-04
+            ("SOM", 0.62, 1, "2024-03-08"),   # about 2024-04
         ])
         outcome = _refresh(con, rulebook)
-        error = outcome.detail["entries"]["nmme_precip_anomaly"]["error"]
-        assert outcome.detail["entries"]["nmme_precip_anomaly"].get("reason") == (
+        error = outcome.detail["entries"]["nmme_precip_prob_below"]["error"]
+        assert outcome.detail["entries"]["nmme_precip_prob_below"].get("reason") == (
             "no_usable_rows"
         )
         assert "seasonal_forecasts: 2 rows" in error
@@ -543,9 +543,9 @@ class TestNmmeLookup:
         before the ingest began.
         """
 
-        _seed_nmme(con, [("SOM", -1.4, 1, "2024-03-08")])  # about April
+        _seed_nmme(con, [("SOM", 0.62, 1, "2024-03-08")])  # about April
         outcome = _refresh(con, rulebook)
-        entry = outcome.detail["entries"]["nmme_precip_anomaly"]
+        entry = outcome.detail["entries"]["nmme_precip_prob_below"]
         assert entry["ok"] is False
         assert entry.get("reason") == "predates_table_coverage"
         assert "starts at 2024-04" in entry["error"]
@@ -553,7 +553,7 @@ class TestNmmeLookup:
     def test_the_shipped_where_no_longer_pins_a_lead(self, rulebook):
         entry = next(
             e for e in rulebook.get("drought.indicators.entries")
-            if e["name"] == "nmme_precip_anomaly"
+            if e["name"] == "nmme_precip_prob_below"
         )
         assert "lead_months" not in str(entry.get("where"))
         assert entry.get("date_offset_column") == "lead_months"

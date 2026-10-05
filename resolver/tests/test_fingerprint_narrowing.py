@@ -397,6 +397,18 @@ def test_the_re_stamp_touches_only_its_own_hazard(con):
 def test_the_ladder_confirmation_change_leaves_drought_untouched():
     """Drought has no sweep and no ladder, and the per-run extraction cap
     set beside the confirmation switch is a budget. Its 114 backcast months
-    must not re-walk for a change that cannot reach them."""
+    must not re-walk for a change that cannot reach them.
 
-    assert load_rulebook().hazard_fingerprint("drought") == "fd3dd63f6d197723"
+    The digest DID move in Oct 2026, deliberately: the NMME entry changed
+    from an absolute anomaly to CPC's probability of a below-normal month
+    (``nmme_precip_prob_below``), which decides drought cells, so drought
+    re-walks. Flood and cyclone stay where they were
+    (``test_the_nmme_switch_moves_drought_alone``)."""
+
+    assert load_rulebook().hazard_fingerprint("drought") == "8939a30873c37f18"
+
+
+def test_the_nmme_switch_moves_drought_alone():
+    rb = load_rulebook()
+    assert rb.hazard_fingerprint("flood") == "d122bfec246bc090"
+    assert rb.hazard_fingerprint("cyclone") == "a4e2cabf5b573378"

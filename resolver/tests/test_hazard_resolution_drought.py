@@ -453,7 +453,7 @@ class TestIndicatorSourcesBeyondAsap:
         for iso3, anomaly in values.items():
             con.execute(
                 "INSERT INTO seasonal_forecasts (iso3, variable, lead_months, "
-                "anomaly_value, forecast_issue_date) VALUES (?, 'prate', 1, ?, ?)",
+                "anomaly_value, forecast_issue_date) VALUES (?, 'prate_prob_below', 1, ?, ?)",
                 [iso3, anomaly, issue_date],
             )
 
@@ -520,37 +520,41 @@ class TestIndicatorSourcesBeyondAsap:
     def test_an_nmme_anomaly_is_read_against_the_rulebook_threshold(
         self, con, rulebook
     ):
-        self._seed_nmme(con, {"SOM": -1.6, "KEN": -0.2})
+        self._seed_nmme(con, {"SOM": 0.62, "KEN": 0.25})
         self._refresh(con, rulebook)
 
         assert _verdict(con, "SOM", rulebook).state == ind_mod.STATE_DROUGHT
-        # -0.2 sigma is an ordinary month. Absence of drought here, not
+        # A 25% chance of a bottom-tercile month is below climatology. Absence of drought here, not
         # absence of information: NMME answered about Kenya.
         kenya = _verdict(con, "KEN", rulebook)
-        nmme = next(r for r in kenya.readings if r.name == "nmme_precip_anomaly")
+        nmme = next(r for r in kenya.readings if r.name == "nmme_precip_prob_below")
         assert nmme.state == ind_mod.STATE_NO_DROUGHT
 
     def test_nmme_is_not_thresholded_at_the_tercile_boundary(self, rulebook):
-        """-0.43 sigma is a third of countries in any month, by construction.
+        """A probability of 1/3 is climatology: every cell sits there.
 
-        Under combine: any, that would attribute a third of the world's food
-        insecurity to drought — the conflict-driven deterioration this gate
-        exists to keep out.
+        Under combine: any, a threshold at or near it would attribute a
+        large share of the world's food insecurity to drought. The shipped
+        threshold is a forecast moved half again above climatology, read in
+        the "above" direction (Oct 2026, run 37309526026: 11% of
+        country-months cross it).
         """
 
         entry = next(
             e for e in rulebook.get("drought.indicators.entries")
-            if e["name"] == "nmme_precip_anomaly"
+            if e["name"] == "nmme_precip_prob_below"
         )
-        assert float(entry["threshold"]) <= -1.0
+        assert float(entry["threshold"]) >= 0.5
+        assert entry["direction"] == "above"
+        assert "prate_prob_below" in entry["where"]
 
     def test_a_country_absent_from_an_anomaly_feed_is_unknown_not_dry(
         self, con, rulebook
     ):
-        self._seed_nmme(con, {"ETH": -1.6})
+        self._seed_nmme(con, {"ETH": 0.62})
         self._refresh(con, rulebook)
         verdict = _verdict(con, "SOM", rulebook)
-        nmme = next(r for r in verdict.readings if r.name == "nmme_precip_anomaly")
+        nmme = next(r for r in verdict.readings if r.name == "nmme_precip_prob_below")
         assert nmme.state == ind_mod.STATE_UNAVAILABLE
 
     def test_no_indicator_answering_is_still_inconclusive(self, con, rulebook):

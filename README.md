@@ -122,6 +122,7 @@ Grounding for RC and triage uses OpenAI GPT-4.1-mini web search (primary) with G
 Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature and precipitation anomaly forecasts from the CPC FTP server. These provide structured climate context for drought, flood, and tropical cyclone assessments.
 
 - **Source**: `ftp://ftp.cpc.ncep.noaa.gov/NMME/realtime_anom/ENSMEAN/` — ensemble mean anomalies at 1° resolution, updated ~9th of each month with 7 lead months.
+- **Probability of a below-normal month** (since Oct 2026): `ftp://ftp.cpc.ncep.noaa.gov/NMME/prob/netcdf/prate.YYYYMM.prob.adj.mon.nc`, CPC's calibrated tercile probabilities, stored as variable `prate_prob_below` (0..1). The PA machine's drought gate reads it at 0.5; cells CPC does not forecast are masked, not read as zero. `python -m scripts.ci.nmme_prob_crossing 12` reports per-country crossing frequency for candidate thresholds (needs FTP access to CPC).
 - **Processing**: Country-level area-weighted averages using `xarray` + `regionmask` (Natural Earth admin-0 boundaries). Anomalies expressed in σ (standard deviations from climatology) with derived tercile categories (above/below/near normal).
 - **Storage**: `seasonal_forecasts` table in Pythia DuckDB (~2,700 rows per monthly update: 195 countries × 2 variables × 7 leads).
 - **Injection**: Automatically loaded into HS triage and RC prompts via the existing `climate_data` parameter for DR, FL, TC hazards. Also injected into forecaster research and SPD prompts via `research_json`.
