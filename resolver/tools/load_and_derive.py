@@ -586,6 +586,66 @@ def purge_all_cause_idmc_rows(conn) -> dict[str, int]:
     return counts
 
 
+CONFLICT_DISPLACEMENT_METRICS = ("new_displacements", "new_displacements_held")
+
+
+def replace_conflict_displacement_window(conn, canonical: pd.DataFrame) -> dict[str, int]:
+    """Delete the stored IDMC conflict displacement rows in the window this
+    run's staging covers, so the write that follows REPLACES the window.
+
+    ``resolver.ingestion.idmc_conflict`` rewrites the whole trailing window
+    every run, and a month can move from a figure to held out (a long span,
+    a total above the population) or disappear (a record IDMC no longer
+    recommends). A MERGE keyed on the metric would leave the old figure
+    beside the new marker: PSE 2023-10's 54,037,759 would survive a run that
+    held it out. Nothing is deleted when this run staged no IDMC conflict
+    rows: an unreadable IDMC is not an empty window.
+    """
+
+    counts = {"facts_resolved": 0, "facts_deltas": 0}
+    if canonical is None or canonical.empty:
+        return counts
+    mask = (
+        canonical["hazard_code"].astype(str).str.upper().eq("ACE")
+        & canonical["metric"].astype(str).str.lower().isin(CONFLICT_DISPLACEMENT_METRICS)
+        & canonical["source"].astype(str).str.lower().str.startswith("idmc")
+    )
+    staged = canonical.loc[mask]
+    if staged.empty:
+        return counts
+    months = staged["as_of_date"].astype(str).str.slice(0, 7)
+    first, last = str(months.min()), str(months.max())
+    metric_list = ",".join(f"'{m}'" for m in CONFLICT_DISPLACEMENT_METRICS)
+    for table in counts:
+        try:
+            cols = _table_columns(conn, table)
+        except Exception:  # noqa: BLE001
+            continue
+        if not cols or not {"hazard_code", "metric", "ym"} <= set(cols):
+            continue
+        source_filter = ""
+        if "publisher" in cols:
+            source_filter = " AND upper(COALESCE(publisher, '')) = 'IDMC'"
+        elif "source_id" in cols:
+            source_filter = " AND lower(COALESCE(source_id, '')) LIKE 'idmc%'"
+        where = (
+            f"upper(hazard_code) = 'ACE' AND lower(metric) IN ({metric_list})"
+            f" AND substr(CAST(ym AS VARCHAR), 1, 7) BETWEEN ? AND ?{source_filter}"
+        )
+        try:
+            n = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", [first, last]).fetchone()[0])
+            if n:
+                conn.execute(f"DELETE FROM {table} WHERE {where}", [first, last])
+            counts[table] = n
+        except Exception as exc:  # noqa: BLE001 - never ends the load
+            LOGGER.warning("conflict displacement window replace on %s skipped: %s", table, exc)
+    LOGGER.info(
+        "IDMC conflict displacement window %s..%s replaced: %s rows removed before the write",
+        first, last, counts,
+    )
+    return counts
+
+
 def _export_parquet(
     conn,
     period: PeriodMonths,
@@ -689,6 +749,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             canonical["source"].dropna().unique().tolist()
         )
         LOGGER.info("Sources in canonical data: %s", loaded_sources)
+        replace_conflict_displacement_window(conn, canonical)
         counts = _load_into_db(conn, canonical, loaded_sources=loaded_sources)
         LOGGER.info("Loaded canonical counts: %s", counts)
         # Scope source resolution to the sources loaded in this run.

@@ -30,6 +30,19 @@ A record's figure is attributed WHOLLY to the month its displacement started
 number for an event, and apportioning it across months invents a breakdown
 nobody reported.
 
+Three kinds of figure never enter the monthly sum (Oct 2026):
+
+* a record IDMC does not recommend for totals (its ``role`` is a
+  triangulation or a duplicate of another figure), counted and dropped;
+* a record whose displacement spans more than ``MAX_SPAN_DAYS`` days. It
+  is an aggregate over a period, and putting all of it in its start month
+  invents a spike, while apportioning it invents a breakdown nobody
+  reported. It is HELD OUT instead: every month its span touches is written
+  under ``METRIC_HELD``, so no reader can take that month for a quiet one;
+* a country-month total above the country's population, which cannot be a
+  monthly count of people (PSE 2023-10 read 54,037,759). Held out the same
+  way, and named in the run's diagnostics.
+
 The month still in progress is never written: a flow for a month that has
 not ended is a partial count, and a partial count read as a month is the
 1 August 2026 ACLED fault.
@@ -74,7 +87,17 @@ HAZARD_CODE = "ACE"
 HAZARD_LABEL = "Armed conflict — internal displacement"
 HAZARD_CLASS = "human-induced"
 METRIC = "new_displacements"
+#: Months that carry a figure IDMC reported but this series will not use as a
+#: monthly count (a long span, or a total above the population). Read by
+#: ``pythia.tools.base_rate_spd`` as UNKNOWN: neither a value nor a quiet month.
+METRIC_HELD = "new_displacements_held"
 SERIES_SEMANTICS = "new"
+#: A displacement span longer than this is a period aggregate, not an event.
+MAX_SPAN_DAYS = 31
+#: ``role`` values that mark a figure IDMC recommends for totals. A record
+#: carrying any other role (triangulation, duplicate) is dropped and counted.
+RECOMMENDED_ROLE_PREFIX = "recommended"
+POPULATION_CSV = Path("resolver/data/population.csv")
 SOURCE = "IDMC"
 
 #: Every value of ``displacement_type`` seen, mapped to the cause it names.
@@ -100,6 +123,7 @@ _FIGURE_FIELDS = ("figure", "total_figures", "displacement_figure", "new_displac
 _START_FIELDS = (
     "displacement_start_date", "event_start_date", "displacement_date", "event_date",
 )
+_END_FIELDS = ("displacement_end_date", "event_end_date")
 
 
 def cause_of(record: Mapping[str, Any]) -> str:
@@ -142,6 +166,46 @@ def _start_month(record: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _date_field(record: Mapping[str, Any], fields: tuple[str, ...]) -> dt.date | None:
+    for field in fields:
+        value = record.get(field)
+        if not value:
+            continue
+        stamp = pd.to_datetime(str(value)[:10], errors="coerce")
+        if not pd.isna(stamp):
+            return stamp.date()
+    return None
+
+
+def span_months(start: dt.date, end: dt.date) -> list[str]:
+    """Every calendar month from ``start`` to ``end`` inclusive."""
+    out: list[str] = []
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        out.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return out
+
+
+def load_population(path: Path = POPULATION_CSV) -> dict[str, float]:
+    """ISO3 -> population from ``resolver/data/population.csv`` ({} on any
+    failure: no cap is applied rather than a wrong one)."""
+    try:
+        frame = pd.read_csv(path, dtype=str)
+    except Exception:  # noqa: BLE001
+        return {}
+    frame.columns = [c.strip() for c in frame.columns]
+    out: dict[str, float] = {}
+    for iso3, raw in zip(frame.get("iso3", []), frame.get("population", [])):
+        try:
+            out[str(iso3).strip().upper()] = float(str(raw).replace(",", "").strip())
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _iso3(record: Mapping[str, Any]) -> str | None:
     text = str(record.get("iso3") or record.get("iso") or record.get("ISO3") or "")
     text = text.strip().upper()
@@ -164,19 +228,26 @@ def month_window(today: dt.date, months: int) -> tuple[str, str]:
 
 def conflict_monthly_flows(
     records: Iterable[Mapping[str, Any]], first_ym: str, last_ym: str,
+    *, population: Mapping[str, float] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Sum the conflict records per (iso3, month) inside the window.
+    """Sum the recommended conflict records per (iso3, month) in the window.
 
     Returns ``(frame, report)``. ``frame`` has columns ``iso3``, ``ym``,
-    ``value``. ``report`` counts every record by what happened to it, and
-    the excluded people by cause, so "the series is small" and "the series
-    dropped most of what IDMC sent" can be told apart.
+    ``value``, ``metric``: ``METRIC`` rows are the monthly series,
+    ``METRIC_HELD`` rows mark months held out (a span longer than
+    ``MAX_SPAN_DAYS``, or a total above the population; ``value`` is the
+    figure held). ``report`` counts every record by what happened to it.
     """
 
     totals: dict[tuple[str, str], float] = defaultdict(float)
+    held: dict[tuple[str, str], float] = defaultdict(float)
+    held_reasons: dict[tuple[str, str], set] = defaultdict(set)
     records_by_cause: Counter = Counter()
     people_by_cause: Counter = Counter()
     dropped: Counter = Counter()
+    roles: Counter = Counter()
+    people_not_recommended = 0.0
+    long_spans: list[dict[str, Any]] = []
     months_seen: set[str] = set()
     n_records = 0
     for record in records:
@@ -191,6 +262,12 @@ def conflict_monthly_flows(
             people_by_cause[cause] += figure
         if cause != CAUSE_CONFLICT:
             continue
+        role = record.get("role")
+        roles[str(role) if role else "<absent>"] += 1
+        if role and not str(role).strip().lower().startswith(RECOMMENDED_ROLE_PREFIX):
+            dropped["conflict_not_recommended_role"] += 1
+            people_not_recommended += figure or 0.0
+            continue
         iso3 = _iso3(record)
         if iso3 is None:
             dropped["conflict_no_country"] += 1
@@ -203,15 +280,50 @@ def conflict_monthly_flows(
             dropped["conflict_no_date"] += 1
             continue
         months_seen.add(ym)
+        start = _date_field(record, _START_FIELDS)
+        end = _date_field(record, _END_FIELDS)
+        if start and end and (end - start).days > MAX_SPAN_DAYS:
+            spanned = [m for m in span_months(start, end) if first_ym <= m <= last_ym]
+            if spanned:
+                for m in spanned:
+                    held[(iso3, m)] += figure
+                    held_reasons[(iso3, m)].add("span")
+                dropped["conflict_long_span_held"] += 1
+                long_spans.append({
+                    "iso3": iso3, "start": start.isoformat(), "end": end.isoformat(),
+                    "figure": figure, "event_name": str(record.get("event_name") or "")[:120],
+                })
+            else:
+                dropped["conflict_out_of_window"] += 1
+            continue
         if ym < first_ym or ym > last_ym:
             dropped["conflict_out_of_window"] += 1
             continue
         totals[(iso3, ym)] += figure
 
-    frame = pd.DataFrame(
-        [{"iso3": iso3, "ym": ym, "value": value} for (iso3, ym), value in sorted(totals.items())],
-        columns=["iso3", "ym", "value"],
-    )
+    over_population: list[dict[str, Any]] = []
+    if population:
+        for key in sorted(totals):
+            iso3, ym = key
+            pop = population.get(iso3)
+            if pop and totals[key] > pop:
+                over_population.append({
+                    "iso3": iso3, "ym": ym, "total": totals[key], "population": pop,
+                })
+                held[key] += totals.pop(key)
+                held_reasons[key].add("above_population")
+
+    rows = [
+        {"iso3": iso3, "ym": ym, "value": value, "metric": METRIC}
+        for (iso3, ym), value in sorted(totals.items())
+        if (iso3, ym) not in held
+    ]
+    rows += [
+        {"iso3": iso3, "ym": ym, "value": value, "metric": METRIC_HELD}
+        for (iso3, ym), value in sorted(held.items())
+    ]
+    frame = pd.DataFrame(rows, columns=["iso3", "ym", "value", "metric"])
+    series = frame[frame["metric"] == METRIC] if not frame.empty else frame
     in_window = sorted(m for m in months_seen if first_ym <= m <= last_ym)
     report = {
         "window": {"first": first_ym, "last": last_ym},
@@ -224,14 +336,23 @@ def conflict_monthly_flows(
         "excluded_people": {
             cause: float(v) for cause, v in people_by_cause.items() if cause != CAUSE_CONFLICT
         },
+        "conflict_roles": dict(roles),
+        "conflict_people_not_recommended": float(people_not_recommended),
         "conflict_records_dropped": dict(dropped),
-        "rows": int(len(frame)),
-        "countries": int(frame["iso3"].nunique()) if not frame.empty else 0,
+        "held_months": [
+            {"iso3": iso3, "ym": ym, "figure": float(v), "reasons": sorted(held_reasons[(iso3, ym)])}
+            for (iso3, ym), v in sorted(held.items())
+        ],
+        "long_spans": long_spans[:200],
+        "over_population": over_population,
+        "rows": int(len(series)),
+        "rows_held": int(len(held)),
+        "countries": int(series["iso3"].nunique()) if not series.empty else 0,
         "first_conflict_month_served": min(months_seen) if months_seen else None,
         "months_in_window_with_conflict_rows": in_window,
     }
-    if not frame.empty:
-        per_country = frame.groupby("iso3")["ym"].nunique()
+    if not series.empty:
+        per_country = series.groupby("iso3")["ym"].nunique()
         report["months_per_country"] = {
             "min": int(per_country.min()),
             "median": float(per_country.median()),
@@ -251,7 +372,7 @@ def staging_frame(flows: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({
         "iso3": flows["iso3"],
         "as_of_date": month_end,
-        "metric": METRIC,
+        "metric": flows["metric"] if "metric" in flows.columns else METRIC,
         "value": flows["value"].round().astype("int64"),
         "series_semantics": SERIES_SEMANTICS,
         "source": SOURCE,
@@ -340,18 +461,27 @@ def run(
         _write_summary("error", "not_a_list", {"window": {"first": first_ym, "last": last_ym}})
         return 1
 
-    flows, report = conflict_monthly_flows(rows, first_ym, last_ym)
+    population = load_population()
+    if not population:
+        print("::warning::population.csv unreadable; no population cap on conflict displacement")
+    flows, report = conflict_monthly_flows(rows, first_ym, last_ym, population=population)
+    for item in report.get("over_population", []):
+        print(
+            f"::warning title=IDMC month above population::{item['iso3']} {item['ym']}: "
+            f"{item['total']:,.0f} against a population of {item['population']:,.0f}; held out"
+        )
     staging = staging_frame(flows)
     staging.to_csv(staging_dir / "flow.csv", index=False)
     _write_summary("ok", None, report)
     excluded = report.get("excluded_people", {})
     print(
-        "[idmc_conflict] records=%d conflict_rows=%d countries=%d window=%s..%s "
-        "first_conflict_month_served=%s excluded_people=%s"
+        "[idmc_conflict] records=%d conflict_rows=%d held_months=%d countries=%d "
+        "window=%s..%s first_conflict_month_served=%s excluded_people=%s roles=%s dropped=%s"
         % (
-            report["records"], report["rows"], report["countries"], first_ym, last_ym,
-            report["first_conflict_month_served"],
+            report["records"], report["rows"], report["rows_held"], report["countries"],
+            first_ym, last_ym, report["first_conflict_month_served"],
             {k: int(v) for k, v in sorted(excluded.items())},
+            report.get("conflict_roles"), report.get("conflict_records_dropped"),
         )
     )
     return 0

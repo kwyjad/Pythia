@@ -550,6 +550,17 @@ def _format_base_rate_for_prompt(
                 f"  {avg_label}: {_fmt(series.get('trailing_3m_avg'))}/month",
                 f"  Trend: {trend_str}",
             ]
+            if series.get("latest_settled_month"):
+                settled_line = (
+                    f"  Latest settled month: {series['latest_settled_month']}. IDMC reports "
+                    "late; later months are not yet settled and are UNKNOWN, not quiet."
+                )
+                if series.get("regular_reporter") is False:
+                    settled_line += (
+                        f" IDMC reported this country in {series.get('n_reported_12m', 0)} of "
+                        "the last 12 months, so a month with no report is unknown, not zero."
+                    )
+                out.append(settled_line)
             if series.get("n_negative_dropped"):
                 out.append(
                     f"  ({series['n_negative_dropped']} negative monthly value(s) left out: "
