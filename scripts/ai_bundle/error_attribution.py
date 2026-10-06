@@ -94,7 +94,43 @@ ROLLUP_SPLIT_KEYS = (
     "input_partial_month",
 )
 #: The flags experiments.csv compares, where the data holds more than one value.
-EXPERIMENT_FLAGS = ROLLUP_SPLIT_KEYS
+#: ``base_rate_block_group`` pools prompt versions the recalibration treats as
+#: one group (prior_anchor_v1 and _v2), so the pooled arm is compared beside
+#: the per-version arms of ``base_rate_block_version``.
+EXPERIMENT_FLAGS = ROLLUP_SPLIT_KEYS + ("base_rate_block_group",)
+
+
+def block_version_group(version: Any) -> Any:
+    """The recalibration's group for a block version (labels pass through)."""
+    try:
+        from pythia.tools.family_recalibration import block_version_group as _g
+    except Exception:  # noqa: BLE001
+        return version
+    return _g(version) if version is not None else None
+
+
+def with_pooled_block_versions(
+    rows: Sequence[Mapping[str, Any]], field: str = "base_rate_block_version",
+) -> list[dict[str, Any]]:
+    """The rows, plus a copy of each whose version belongs to an equivalence
+    group (prior_anchor_v1 / _v2), relabelled with the group.
+
+    Aggregating the result by ``field`` reports each version on its own AND
+    the pooled group, so a difference between the wordings stays visible
+    while the pooled figure matches what the recalibration fits on. A copy
+    never shares a group with its original, so nothing is counted twice
+    within one row.
+
+    Copies carry ``block_version_pooled = True`` (originals False), so a
+    reader that sums rows across versions can skip them.
+    """
+    out: list[dict[str, Any]] = [{**r, "block_version_pooled": False} for r in rows]
+    for r in rows:
+        v = r.get(field)
+        g = block_version_group(v)
+        if g is not None and g != v:
+            out.append({**r, field: g, "block_version_pooled": True})
+    return out
 
 # ---------------------------------------------------------------------------
 # input_partial_month: the conflict prompt's "last month" was a partial count
@@ -598,6 +634,8 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
             "input_partial_month_basis": basis,
             "lineup_id": lineups.get(key),
             "base_rate_block_version": _label((attrs.get("base_rate_block_version") or {}).get(key), "none"),
+            "base_rate_block_group": block_version_group(
+                _label((attrs.get("base_rate_block_version") or {}).get(key), "none")),
             "rc_guidance": _label((attrs.get("rc_guidance") or {}).get(key), "legacy"),
             "rc_shift_arm": _label((attrs.get("rc_shift_arm") or {}).get(key), "none"),
             "advice_arm": _label((attrs.get("advice_arm") or {}).get(key), "none"),
@@ -837,7 +875,7 @@ def build_trace_stages(ctx: Context) -> list[dict[str, Any]]:
 
 def summarise_trace_stages(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[tuple, list[Mapping[str, Any]]] = defaultdict(list)
-    for r in rows:
+    for r in with_pooled_block_versions(rows):
         groups[(r["hazard_code"], r["metric"], r["track"], r["base_rate_block_version"],
                 r["rc_guidance"], r["input_partial_month"])].append(r)
     out: list[dict[str, Any]] = []
@@ -1411,7 +1449,7 @@ def _skill_pairs(ctx: Context, qids: Iterable[str] | None = None) -> list[dict[s
 def build_skill_history(ctx: Context) -> list[dict[str, Any]]:
     groups: dict[tuple, dict[str, list[tuple[float, float]]]] = defaultdict(lambda: defaultdict(list))
     models: dict[tuple, set[str]] = defaultdict(set)
-    for p in _skill_pairs(ctx):
+    for p in with_pooled_block_versions(_skill_pairs(ctx)):
         key = (p["observed_month"], p["hazard_code"], p["metric"], p["score_family"], p["track"],
                p["lineup_id"], p["base_rate_block_version"], p["rc_guidance"],
                p["input_partial_month"], p["forecaster"], p["reference"], p["score_type"])

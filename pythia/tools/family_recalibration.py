@@ -12,7 +12,11 @@ has answered, so it is measurable and reversible. Factors are fitted per
 bias rather than starting from none, and per PROMPT VERSION
 (``forecasts_raw.base_rate_block_version`` and ``rc_guidance``), because a
 correction learned on forecasts made under one prompt says nothing about
-forecasts made under another.
+forecasts made under another. The one exception is a pair of prompt
+versions that hand the member the SAME distribution in different words:
+``BLOCK_VERSION_EQUIVALENCE`` groups them for fitting and for applying, while
+``forecasts_raw`` keeps the version each member actually saw and the factor
+row names every version that contributed (``contributing_versions_json``).
 
 Fitting (``fit_family_recalibration``) reads scored MEMBER forecasts only:
 no aggregate, no Sibyl, no ``__ext_`` reference, no ``__raw``/``__recal``
@@ -71,6 +75,31 @@ BINARY_CLAMP = (0.001, 0.999)
 MIN_FIT_QUESTIONS = 10
 
 MODES = ("off", "shadow", "apply")
+
+#: Prompt versions that are one group for fitting and applying. Both
+#: prior-anchor wordings print the SAME level-and-volatility vector and tell
+#: the member to copy it; v2 only replaces v1's pooled move shares (which
+#: disagree with the printed vector at the edge buckets) with stay / up /
+#: down read off that vector (owner decision 2026-10-06). No other pair is
+#: equivalent, and a NULL version (no block shown) is always its own group.
+BLOCK_VERSION_EQUIVALENCE: Dict[str, str] = {
+    "prior_anchor_v1": "prior_anchor_v1|prior_anchor_v2",
+    "prior_anchor_v2": "prior_anchor_v1|prior_anchor_v2",
+    # A stored group label maps to itself, so rows written by this module
+    # and rows written before the equivalence both land in the same group.
+    "prior_anchor_v1|prior_anchor_v2": "prior_anchor_v1|prior_anchor_v2",
+}
+
+
+def block_version_group(version: Optional[str]) -> Optional[str]:
+    """The fitting/applying group of a ``base_rate_block_version``.
+
+    None stays None; a version with no equivalence is its own group.
+    """
+    if version is None:
+        return None
+    v = str(version)
+    return BLOCK_VERSION_EQUIVALENCE.get(v, v)
 
 #: Aggregates and tracks that are never fitted or corrected. ``sibyl`` is a
 #: separate research track whose output is its own; ``track2_flash`` is a
@@ -133,10 +162,23 @@ def ensure_table(con) -> None:
             rc_guidance TEXT,
             as_of_month TEXT,
             fitted_at TIMESTAMP,
-            is_test BOOLEAN DEFAULT FALSE
+            is_test BOOLEAN DEFAULT FALSE,
+            contributing_versions_json TEXT
         )
         """
     )
+    # Added after the table shipped: which forecasts_raw versions fed the
+    # group, with the distinct questions each gave.
+    con.execute(
+        f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS contributing_versions_json TEXT"
+    )
+
+
+_INSERT_COLS = (
+    "family, hazard_code, metric, score_family, bucket_index, factor, n_questions, "
+    "base_rate_block_version, rc_guidance, as_of_month, fitted_at, is_test, "
+    "contributing_versions_json"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +315,8 @@ def fit_family_recalibration(con, as_of_month: Optional[str] = None) -> Dict[str
 
     # samples[(fam, hz, metric, family_kind, brbv, rcg)][(qid, model, month)] = {bucket: p}
     spd: Dict[tuple, Dict[tuple, Dict[int, float]]] = {}
+    # contributors[key][version_seen] = {question_id, ...}
+    contributors: Dict[tuple, Dict[str, set]] = {}
     resolved: Dict[tuple, float] = {}
     for qid, model, month, bucket, p, hz, metric, brbv, rcg, value, run in rows:
         name = str(model)
@@ -289,7 +333,10 @@ def fit_family_recalibration(con, as_of_month: Optional[str] = None) -> Dict[str
             continue
         kind = "binary" if metric == "EVENT_OCCURRENCE" else "spd"
         met = metric
-        key = (fam, hz, met, kind, brbv, rcg)
+        key = (fam, hz, met, kind, block_version_group(brbv), rcg)
+        contributors.setdefault(key, {}).setdefault(
+            "null" if brbv is None else str(brbv), set()
+        ).add(qid)
         spd.setdefault(key, {}).setdefault((qid, base, int(month)), {})[int(bucket)] = float(p)
         resolved[(qid, int(month))] = float(value) if value is not None else float("nan")
 
@@ -298,6 +345,10 @@ def fit_family_recalibration(con, as_of_month: Optional[str] = None) -> Dict[str
     for key, samples in sorted(spd.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
         fam, hz, metric, kind, brbv, rcg = key
         n_q = len({s[0] for s in samples})
+        contrib = json.dumps(
+            {v: len(q) for v, q in sorted(contributors.get(key, {}).items())},
+            sort_keys=True,
+        )
         label = f"{fam} {hz}/{metric} (block={brbv}, rc={rcg})"
         if n_q < MIN_FIT_QUESTIONS:
             LOGGER.info(
@@ -332,10 +383,11 @@ def fit_family_recalibration(con, as_of_month: Optional[str] = None) -> Dict[str
             )
             for b, f in enumerate(factors, start=1):
                 con.execute(
-                    f"INSERT INTO {TABLE} VALUES (?,?,?,?,?,?,?,?,?,?,?,FALSE)",
-                    [fam, hz, metric, kind, b, f, n_q, brbv, rcg, as_of, now],
+                    f"INSERT INTO {TABLE} ({_INSERT_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,FALSE,?)",
+                    [fam, hz, metric, kind, b, f, n_q, brbv, rcg, as_of, now, contrib],
                 )
             summary["fitted"].append({"group": label, "n_questions": n_q,
+                                      "contributing_versions": json.loads(contrib),
                                       "factors": [round(f, 4) for f in factors]})
         else:
             ps: List[float] = []
@@ -350,10 +402,12 @@ def fit_family_recalibration(con, as_of_month: Optional[str] = None) -> Dict[str
                 continue
             delta = binary_logit_shift(ps, ys)
             con.execute(
-                f"INSERT INTO {TABLE} VALUES (?,?,?,?,?,?,?,?,?,?,?,FALSE)",
-                [fam, hz, metric, kind, 0, delta, n_q, brbv, rcg, as_of, now],
+                f"INSERT INTO {TABLE} ({_INSERT_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,FALSE,?)",
+                [fam, hz, metric, kind, 0, delta, n_q, brbv, rcg, as_of, now, contrib],
             )
-            summary["fitted"].append({"group": label, "n_questions": n_q, "shift": round(delta, 4)})
+            summary["fitted"].append({"group": label, "n_questions": n_q,
+                                      "contributing_versions": json.loads(contrib),
+                                      "shift": round(delta, 4)})
     LOGGER.info(
         "family_recalibration: %d group(s) fitted, %d skipped for %s",
         len(summary["fitted"]), len(summary["skipped"]), as_of,
@@ -406,7 +460,8 @@ def _load_factors(db_url: Optional[str] = None) -> Tuple[Optional[str], Dict[tup
                     f"WHERE as_of_month = ? AND NOT COALESCE(is_test, FALSE)",
                     [as_of],
                 ).fetchall():
-                    factors.setdefault((fam, hz, metric, kind, brbv, rcg), {})[int(b)] = float(f)
+                    key = (fam, hz, metric, kind, block_version_group(brbv), rcg)
+                    factors.setdefault(key, {})[int(b)] = float(f)
         finally:
             duckdb_io.close_db(con)
     except Exception as exc:  # noqa: BLE001
@@ -446,10 +501,13 @@ def lookup(
     met = (metric or "").upper()
     kind = "binary" if met == "EVENT_OCCURRENCE" else "spd"
     as_of, factors = _load_factors(db_url)
-    exact = factors.get((fam, hz, met, kind, base_rate_block_version, rc_guidance))
+    group = block_version_group(base_rate_block_version)
+    exact = factors.get((fam, hz, met, kind, group, rc_guidance))
     out = {"family": fam, "as_of_month": as_of}
     if exact:
         out.update({"mode": mode, "factors": exact})
+        if group != base_rate_block_version:
+            out["version_group"] = group
         return out
     other = [k for k in factors if k[:4] == (fam, hz, met, kind)]
     if other:

@@ -107,6 +107,14 @@ jobs:
       # 2026 conflict-death questions was in the prior). Keep in lockstep across
       # pythia_pipeline_stage.yml and run_horizon_scanner.yml; "0" reverts.
       PYTHIA_PRIOR_ANCHOR_SPD: "1"
+      # Wording of that block (owner decision 2026-10-06, from the run on the
+      # 13th): v2 reads stay / up / down off the printed vector, where v1 quoted
+      # pooled move shares that disagree with that vector at the edge buckets.
+      # Both hand the member the same distribution, so family recalibration
+      # fits and applies prior_anchor_v1 and _v2 as one group. Keep in lockstep
+      # across pythia_pipeline_stage.yml and run_horizon_scanner.yml; unset
+      # (or "v1") restores the v1 wording.
+      PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION: "v2"
       # A new version of a model line is shown its predecessors' calibration
       # notes until it has twenty questions of its own; half the questions
       # (hashed on the question id) get no advice at all, so the advice can be

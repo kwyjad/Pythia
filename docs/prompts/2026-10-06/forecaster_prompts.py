@@ -2213,11 +2213,9 @@ def prior_anchor_version() -> str:
     ``PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION`` is ``v2`` (or ``prior_anchor_v2``).
 
     The distribution is the same under both; only the Spread sentence moves.
-    v1 stays the CODE default; both production workflows set v2 from the run
-    on the 13th of November 2026 (owner decision 2026-10-06). Family
-    recalibration treats the two as one group
-    (``family_recalibration.BLOCK_VERSION_EQUIVALENCE``), so October's v1
-    evidence still corrects v2 forecasts.
+    v1 stays the default until the October 2026 run (the first v1 run) has
+    been scored, because a correction is fitted per block version and two
+    wordings in one month would split that month's evidence.
     """
     from pythia.tools.base_rate_spd import (
         LEVEL_VOLATILITY_VERSION,

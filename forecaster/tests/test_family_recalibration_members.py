@@ -34,12 +34,12 @@ def factors_db(tmp_path, monkeypatch):
     for b in range(1, 8):
         con.execute(
             "INSERT INTO family_recalibration VALUES "
-            "('gpt','ACE','FATALITIES','spd',?,?,20,NULL,NULL,'2026-09',?,FALSE)",
+            "('gpt','ACE','FATALITIES','spd',?,?,20,NULL,NULL,'2026-09',?,FALSE,NULL)",
             [b, 2.0 if b == 5 else 1.0, datetime(2026, 9, 28)],
         )
     con.execute(
         "INSERT INTO family_recalibration VALUES "
-        "('gpt','FL','EVENT_OCCURRENCE','binary',0,1.0,20,NULL,NULL,'2026-09',?,FALSE)",
+        "('gpt','FL','EVENT_OCCURRENCE','binary',0,1.0,20,NULL,NULL,'2026-09',?,FALSE,NULL)",
         [datetime(2026, 9, 28)],
     )
     con.close()
