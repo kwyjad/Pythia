@@ -452,6 +452,17 @@ jobs:
       - name: Snapshot LLM prompt artifact
         if: always()
         continue-on-error: true
+        # The prompt-shaping flags the forecaster runs under, so the artifact
+        # renders what members are sent. Kept equal to pythia_pipeline_stage.yml
+        # by scripts/ci/tests/test_snapshot_prompt_artifact.py.
+        env:
+          PYTHIA_RC_SHIFT_GUIDANCE: "0"
+          PYTHIA_RC_SHIFT_SHARE: "0.5"
+          PYTHIA_PRIOR_ANCHOR_SPD: "1"
+          PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION: "v2"
+          PYTHIA_ADVICE_FAMILY_CARRYOVER: "1"
+          PYTHIA_ADVICE_EXPERIMENT_SHARE: "0.5"
+          PYTHIA_FAMILY_RECALIBRATION_MODE: "apply"
         run: |
           set +e
           mkdir -p diagnostics

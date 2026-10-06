@@ -504,15 +504,66 @@ def _render_spd_prompt(question: Dict[str, Any],
     """Render the SPD forecast prompt with the full structured-data injects."""
     try:
         from forecaster.prompts import build_spd_prompt_v2
+        try:
+            track = int(question.get("track") or 1)
+        except (TypeError, ValueError):
+            track = 1
         return build_spd_prompt_v2(
             question=question,
             history_summary=history_summary,
             hs_triage_entry=hs_triage_entry,
             research_json=research_json,
             structured_data=structured_data,
+            track=track,
         )
     except Exception as e:
         return f"(SPD prompt rendering failed: {e})"
+
+
+def _history_summary_for(iso3: str, hazard_code: str, metric: str,
+                         fallback: Dict[str, Any]) -> Dict[str, Any]:
+    """The history block production builds (``forecaster.cli._build_history_summary``).
+
+    Until Oct 2026 the artifact passed a stub ``{"source": "resolver",
+    "summary": features}``, so the conflict displacement block, the Phase 3+
+    block and every other curated base-rate history were missing from the one
+    diagnostic meant to show them. ``fallback`` is used, and labelled, only
+    when the production builder raises."""
+    try:
+        from forecaster.cli import _build_history_summary
+
+        return _build_history_summary(iso3, hazard_code, metric)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("history summary for %s/%s/%s failed: %s", iso3, hazard_code, metric, exc)
+        return dict(fallback, note=f"production history builder failed: {exc}")
+
+
+def _nmme_outlook_for(iso3: str, hazard_code: str) -> Any:
+    """The NMME outlook production injects for climate hazards, or None."""
+    try:
+        from forecaster.cli import CLIMATE_HAZARDS, load_seasonal_forecasts
+
+        if hazard_code.upper() in CLIMATE_HAZARDS:
+            return load_seasonal_forecasts(iso3) or None
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("NMME outlook for %s failed: %s", iso3, exc)
+    return None
+
+
+def _arm_line(question: Dict[str, Any]) -> str:
+    """Which experiment arms this question sits in, under the flags in force."""
+    try:
+        from forecaster.prompts import advice_arm, rc_shift_arm
+
+        qid = question.get("question_id")
+        track = question.get("track")
+        rc = rc_shift_arm(qid) if str(track or "1") == "1" else None
+        return (
+            f"_Track {track or '?'}; RC split arm: {rc or 'none (test off or Track 2)'}; "
+            f"advice arm: {advice_arm(qid) or 'none (experiment off)'}._"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"_arms unavailable: {exc}_"
 
 
 def _render_scenario_prompt(run_id: str, question: Dict[str, Any],
@@ -647,7 +698,7 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                 }
                 research_json = {
                     "prediction_market_signals": None,
-                    "nmme_seasonal_outlook": None,
+                    "nmme_seasonal_outlook": _nmme_outlook_for(iso3, hazard_code),
                 }
 
                 # Load the full structured-data injects the pipeline feeds the
@@ -683,9 +734,13 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                         f"{hazard_code}/{metric} — {country_name} ({iso3})</summary>"
                     )
                     lines.append("")
+                    lines.append(_arm_line(q))
+                    lines.append("")
                     lines.append("```")
                     spd_prompt = _render_spd_prompt(
-                        q, history_summary, hs_triage_entry, research_json,
+                        q,
+                        _history_summary_for(iso3, hazard_code, metric, history_summary),
+                        hs_triage_entry, research_json,
                         structured_data=structured_data,
                     )
                     lines.append(spd_prompt)
