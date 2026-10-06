@@ -46,3 +46,19 @@ def test_roles_spans_and_composition_are_reported():
 
 def test_the_client_id_never_survives_in_an_error_text():
     assert "abc123" not in _scrub("GET https://x/?client_id=abc123 failed", "abc123")
+
+
+def test_the_settle_curve_counts_recommended_people_by_arrival():
+    from tools.probe_idmc_conflict import settle_curve
+
+    curve = settle_curve([
+        _rec("SDN", "2025-01-05", "2025-01-06", 100, created="2025-02-10"),   # 10 days
+        _rec("SDN", "2025-01-08", "2025-01-09", 300, created="2025-05-01"),   # 90 days
+        _rec("SDN", "2025-01-08", "2025-01-09", 9999, role="Triangulation", created="2025-02-01"),
+        _rec("MLI", "2025-02-08", "2025-02-09", 100, created="2025-06-30"),  # 122 days
+    ])
+    assert curve["country_months"] == 2
+    assert curve["share_of_people_arrived"]["15d"] == 0.2
+    assert curve["share_of_people_arrived"]["90d"] == 0.8
+    assert curve["share_of_country_months_with_a_first_report"]["15d"] == 0.5
+    assert curve["share_of_country_months_with_a_first_report"]["180d"] == 1.0

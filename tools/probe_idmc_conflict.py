@@ -98,6 +98,57 @@ def _quantiles(values: list[float], qs: Iterable[float]) -> dict[str, float | No
     return out
 
 
+SETTLE_DAYS_GRID = (15, 30, 45, 60, 75, 90, 120, 180)
+
+
+def _month_end(day: dt.date) -> dt.date:
+    return (day.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
+
+
+def settle_curve(
+    conflict: list[Mapping[str, Any]], *, first_ym: str = "2024-01", last_ym: str = "2026-03",
+) -> dict[str, Any]:
+    """How much of a month's EVENTUAL recommended total had arrived N days
+    after the month ended.
+
+    Only recommended records count (a triangulation never enters a total),
+    and only months from ``first_ym`` to ``last_ym``: old enough that their
+    total has settled, recent enough that their records were created as
+    reports rather than in a historical backfill. Two curves: the share of
+    people (pooled over the window) and the share of country-months whose
+    FIRST recommended record had arrived.
+    """
+
+    people: dict[tuple[str, str], list[tuple[float, float]]] = defaultdict(list)
+    for r in conflict:
+        role = str(r.get("role") or "").lower()
+        if role and not role.startswith("recommended"):
+            continue
+        start, stamp, fig = _start(r), _date(r.get("created_at")), _figure(r)
+        if not (start and stamp and fig is not None):
+            continue
+        ym = start.strftime("%Y-%m")
+        if not first_ym <= ym <= last_ym:
+            continue
+        people[(str(r.get("iso3") or "").upper(), ym)].append(
+            (float((stamp - _month_end(start)).days), fig)
+        )
+    total = sum(f for rows in people.values() for _d, f in rows)
+    by_people: dict[str, float | None] = {}
+    by_first: dict[str, float | None] = {}
+    for days in SETTLE_DAYS_GRID:
+        arrived = sum(f for rows in people.values() for d, f in rows if d <= days)
+        by_people[f"{days}d"] = round(arrived / total, 3) if total else None
+        first = sum(1 for rows in people.values() if min(d for d, _f in rows) <= days)
+        by_first[f"{days}d"] = round(first / len(people), 3) if people else None
+    return {
+        "months": f"{first_ym}..{last_ym}",
+        "country_months": len(people),
+        "share_of_people_arrived": by_people,
+        "share_of_country_months_with_a_first_report": by_first,
+    }
+
+
 def analyse(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Everything the report says, from the records alone (pure; tested)."""
 
@@ -152,9 +203,15 @@ def analyse(records: list[Mapping[str, Any]]) -> dict[str, Any]:
         for r in rows:
             by_role[str(r.get("role") or "<absent>")] += _figure(r) or 0.0
         biggest = sorted(rows, key=lambda r: -(_figure(r) or 0.0))[:8]
+        spans = Counter(
+            "over_31_days" if (_start(r) and _end(r) and (_end(r) - _start(r)).days > 31)
+            else "within_31_days"
+            for r in rows
+        )
         return {
             "iso3": iso3,
             "ym": ym,
+            "spans": dict(spans),
             "records": len(rows),
             "sum": sum(_figure(r) or 0.0 for r in rows),
             "people_by_role": dict(by_role),
@@ -180,7 +237,10 @@ def analyse(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     if lbn:
         targets.append(("LBN", max(lbn, key=lbn.get)))
 
+    settle = settle_curve(conflict)
+
     return {
+        "settle_curve": settle,
         "records": len(records),
         "conflict_records": len(conflict),
         "conflict_keys": dict(keys.most_common()),
@@ -202,6 +262,9 @@ def _markdown(report: dict[str, Any]) -> str:
     lines.append(f"Multi-month records: {report['multi_month_records']}; over 31 days: {report['records_over_31_days']}")
     lines.append(f"Span days: {report['span_days']}")
     lines.append("")
+    lines.append("## Settle curve (recommended figures)")
+    lines.append(str(report.get("settle_curve")))
+    lines.append("")
     lines.append("## Lag after month end, by stamp field")
     for field, info in report["lag"].items():
         lines.append(f"- {field}: {info}")
@@ -209,7 +272,7 @@ def _markdown(report: dict[str, Any]) -> str:
     lines.append("## Composition")
     for comp in report["composition"]:
         lines.append(f"### {comp['iso3']} {comp['ym']}: {comp['records']} records, sum {comp['sum']:,.0f}")
-        lines.append(f"by role: {comp['people_by_role']}")
+        lines.append(f"by role: {comp['people_by_role']}; spans: {comp.get('spans')}")
         for rec in comp["largest_records"]:
             lines.append(f"- {rec}")
     lines.append("")

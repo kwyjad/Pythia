@@ -386,9 +386,16 @@ def fit_family_recalibration(con, as_of_month: Optional[str] = None) -> Dict[str
                     f"INSERT INTO {TABLE} ({_INSERT_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,FALSE,?)",
                     [fam, hz, metric, kind, b, f, n_q, brbv, rcg, as_of, now, contrib],
                 )
+            clipped = at_clip_limit(dict(enumerate(factors, start=1)), "spd")
+            if clipped:
+                LOGGER.warning(
+                    "family_recalibration: %s factors sit at a clip limit on half or more "
+                    "of their buckets; they will run in shadow, never applied", label,
+                )
             summary["fitted"].append({"group": label, "n_questions": n_q,
                                       "contributing_versions": json.loads(contrib),
-                                      "factors": [round(f, 4) for f in factors]})
+                                      "factors": [round(f, 4) for f in factors],
+                                      "shadow_only_clipped": clipped})
         else:
             ps: List[float] = []
             ys: List[int] = []
@@ -472,6 +479,32 @@ def _load_factors(db_url: Optional[str] = None) -> Tuple[Optional[str], Dict[tup
     return as_of, factors
 
 
+#: A factor set with at least this share of its buckets pinned at a clip limit
+#: is a correction the data pushed past what the fitter allows, which is how
+#: the false conflict displacement zeros of Oct 2026 looked (ACE/PA, every
+#: family at [2.0, 0.6, 0.58, 0.5, 0.5, 0.5]: four of six buckets clipped).
+#: Such a set is never APPLIED; it runs in shadow and says why.
+CLIP_SHARE_FOR_SHADOW = 0.5
+
+
+def clipped_buckets(factors: Dict[int, float], kind: str = "spd") -> Tuple[int, int]:
+    """``(n at a clip limit, n buckets)`` for one factor set."""
+    values = [float(v) for v in (factors or {}).values()]
+    if kind == "binary":
+        n = sum(1 for v in values if abs(abs(v) - BINARY_SHIFT_MAX) < 1e-9)
+    else:
+        n = sum(
+            1 for v in values
+            if abs(v - SPD_FACTOR_MIN) < 1e-9 or abs(v - SPD_FACTOR_MAX) < 1e-9
+        )
+    return n, len(values)
+
+
+def at_clip_limit(factors: Dict[int, float], kind: str = "spd") -> bool:
+    n, total = clipped_buckets(factors, kind)
+    return total > 0 and n / total >= CLIP_SHARE_FOR_SHADOW
+
+
 def lookup(
     model_name: str,
     hazard_code: str,
@@ -508,6 +541,16 @@ def lookup(
         out.update({"mode": mode, "factors": exact})
         if group != base_rate_block_version:
             out["version_group"] = group
+        if mode == "apply" and at_clip_limit(exact, kind):
+            n, total = clipped_buckets(exact, kind)
+            LOGGER.info(
+                "family_recalibration: %s %s/%s factors clipped on %d of %d buckets; shadowing",
+                fam, hz, met, n, total,
+            )
+            out.update({
+                "mode": "auto_shadow",
+                "reason": f"factor set at a clip limit on {n} of {total} buckets",
+            })
         return out
     other = [k for k in factors if k[:4] == (fam, hz, met, kind)]
     if other:

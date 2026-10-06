@@ -292,3 +292,26 @@ def test_a_table_from_before_the_column_gains_it(tmp_path):
     fr.ensure_table(con)
     cols = {r[1] for r in con.execute("PRAGMA table_info('family_recalibration')").fetchall()}
     assert "contributing_versions_json" in cols
+
+
+def test_a_factor_set_clipped_on_half_its_buckets_runs_in_shadow(monkeypatch):
+    """The Oct 2026 ACE/PA factors ([2.0, 0.6, 0.58, 0.5, 0.5, 0.5]) were
+    learned from false zeros; a set pinned at the clip limits is never applied."""
+    from pythia.tools import family_recalibration as fr
+
+    clipped = {1: 2.0, 2: 0.6, 3: 0.58, 4: 0.5, 5: 0.5, 6: 0.5}
+    mild = {1: 1.2, 2: 0.9, 3: 1.0, 4: 0.5, 5: 1.1, 6: 1.0}
+    assert fr.clipped_buckets(clipped) == (4, 6)
+    assert fr.at_clip_limit(clipped)
+    assert not fr.at_clip_limit(mild)
+    monkeypatch.setenv("PYTHIA_FAMILY_RECALIBRATION_MODE", "apply")
+    monkeypatch.setattr(fr, "_family", lambda name: "gpt")
+    for factors, expected in ((clipped, "auto_shadow"), (mild, "apply")):
+        monkeypatch.setattr(
+            fr, "_load_factors",
+            lambda db_url=None, f=factors: ("2026-10", {("gpt", "ACE", "PA", "spd", None, None): f}),
+        )
+        info = fr.lookup("gpt-6-sol", "ACE", "PA", base_rate_block_version=None, rc_guidance=None)
+        assert info["mode"] == expected
+        if expected == "auto_shadow":
+            assert "clip limit on 4 of 6" in info["reason"]
