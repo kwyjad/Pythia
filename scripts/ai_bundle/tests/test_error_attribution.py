@@ -544,3 +544,68 @@ def test_the_digest_opens_with_the_headline_table(db, tmp_path):
     assert record["input_partial_month"] is True
     assert "acled" in record["base_rate_shown"]
     assert record["inject_status"]["crisiswatch"]["applicable"] is True
+
+
+# ---------------------------------------------------------------------------
+# prior_anchor_v1 / _v2: one recalibration group, reported apart and pooled
+# ---------------------------------------------------------------------------
+
+GROUP = "prior_anchor_v1|prior_anchor_v2"
+
+
+def _versions_db(tmp_path: Path) -> str:
+    path = tmp_path / "versions.duckdb"
+    con = duckdb.connect(str(path))
+    _schema(con)
+    plan = [("prior_anchor_v1", 3, 0.30), ("prior_anchor_v2", 2, 0.20), (None, 2, 0.60)]
+    i = 0
+    for brv, n, brier in plan:
+        for _ in range(n):
+            qid = f"V{i}"
+            i += 1
+            _question(con, qid, "ETH", "ACE", "FATALITIES")
+            _resolve(con, qid, 1, 300.0)
+            _spd(con, "forecasts_raw", "r1", qid, "model-a", 1, POST, brv=brv)
+            _spd(con, "forecasts_ensemble", "r1", qid, "ensemble_mean_v2", 1, POST)
+            _score(con, qid, "ensemble_mean_v2", 1, "brier", brier)
+            _score(con, qid, "__ext_climatology", 1, "brier", 0.5)
+    con.close()
+    return str(path)
+
+
+def test_pooled_copies_only_for_the_equivalent_versions():
+    rows = [{"base_rate_block_version": v} for v in ("prior_anchor_v1", "prior_anchor_v2", "none")]
+    out = ea.with_pooled_block_versions(rows)
+    assert [r["base_rate_block_version"] for r in out] == [
+        "prior_anchor_v1", "prior_anchor_v2", "none", GROUP, GROUP,
+    ]
+    assert [r["block_version_pooled"] for r in out] == [False, False, False, True, True]
+
+
+def test_rollups_report_v1_v2_and_the_pooled_group(tmp_path):
+    zp = build_bundle(_versions_db(tmp_path), tmp_path / "out", months_back=0)
+    with zipfile.ZipFile(zp) as zf:
+        rows = list(csv.DictReader(zf.read("rollups.csv").decode().splitlines()))
+    mean = {r["base_rate_block_version"]: r for r in rows
+            if r["model_name"] == "ensemble_mean_v2" and r["score_type"] == "brier"}
+    assert set(mean) == {"prior_anchor_v1", "prior_anchor_v2", GROUP, "none"}
+    assert mean["prior_anchor_v1"]["n_samples"] == "3"
+    assert mean["prior_anchor_v2"]["n_samples"] == "2"
+    assert mean[GROUP]["n_samples"] == "5"
+    assert float(mean[GROUP]["mean_value"]) == pytest.approx((3 * 0.3 + 2 * 0.2) / 5)
+    assert mean[GROUP]["block_version_pooled"] == "True"
+    assert mean["none"]["n_samples"] == "2" and mean["none"]["block_version_pooled"] == "False"
+    # Paired against climatology inside the pooled group too.
+    assert mean[GROUP]["n_paired"] == "5"
+
+
+def test_experiments_compare_versions_apart_and_the_pooled_group(tmp_path):
+    ctx = _ctx(_versions_db(tmp_path), [f"V{i}" for i in range(7)])
+    rows = ea.build_experiments(ctx)
+    per_version = {r["arm"] for r in rows if r["flag"] == "base_rate_block_version"} | {
+        r["reference_arm"] for r in rows if r["flag"] == "base_rate_block_version"}
+    assert per_version == {"prior_anchor_v1", "prior_anchor_v2", "none"}
+    pooled = [r for r in rows if r["flag"] == "base_rate_block_group"]
+    assert pooled and {pooled[0]["arm"], pooled[0]["reference_arm"]} == {GROUP, "none"}
+    (p,) = [r for r in pooled if r["score_type"] == "brier"]
+    assert {p["n_arm"], p["n_reference"]} == {5, 2}

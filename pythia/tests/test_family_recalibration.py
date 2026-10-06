@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import json
+
 import duckdb
 import pytest
 
@@ -197,3 +199,96 @@ def test_unknown_mode_reads_off(monkeypatch):
     monkeypatch.setenv("PYTHIA_FAMILY_RECALIBRATION_MODE", "sometimes")
     assert fr.recalibration_mode() == "off"
     assert fr.is_derived_name("x__raw") and fr.base_model_name("x__recal") == "x"
+
+
+# --- prior-anchor v1/v2 equivalence (owner decision 2026-10-06) -------------
+
+def test_only_the_two_prior_anchor_wordings_are_one_group():
+    g = fr.block_version_group
+    assert g("prior_anchor_v1") == g("prior_anchor_v2")
+    assert g("prior_anchor_v1") != g(None) and g(None) is None
+    assert g("prior_anchor_v3") == "prior_anchor_v3"
+    assert g("shift_v1") == "shift_v1"
+
+
+def _add_version_questions(con, ids, brbv):
+    probs = [0.3, 0.2, 0.2, 0.15, 0.1, 0.03, 0.02]
+    for q in ids:
+        con.execute("INSERT INTO questions VALUES (?, 'ACE', 'FATALITIES', FALSE)", [q])
+        con.execute("INSERT INTO resolutions VALUES (?, 1, 300)", [q])
+        con.execute("INSERT INTO forecasts_ensemble VALUES (?, 'r1')", [q])
+        for b, p in enumerate(probs, start=1):
+            con.execute(
+                "INSERT INTO forecasts_raw VALUES ('r1', ?, 'gpt-6-sol', 1, ?, ?, ?, NULL)",
+                [q, b, p, brbv],
+            )
+
+
+@pytest.fixture
+def fitted_on_v1(tmp_path, monkeypatch):
+    # Twelve October questions under the v1 wording; none under v2.
+    con = _db(tmp_path, brbv="prior_anchor_v1")
+    fr.fit_family_recalibration(con, "2026-10")
+    con.close()
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{tmp_path / 'f.duckdb'}")
+    monkeypatch.setenv("PYTHIA_FAMILY_RECALIBRATION_MODE", "apply")
+    fr.reset_factor_cache()
+    yield
+    fr.reset_factor_cache()
+
+
+def test_a_v2_forecast_receives_factors_fitted_on_v1(fitted_on_v1):
+    info = fr.lookup("gpt-6-sol", "ACE", "FATALITIES",
+                     base_rate_block_version="prior_anchor_v2", rc_guidance=None)
+    assert info["mode"] == "apply" and len(info["factors"]) == 7
+    assert info["version_group"] == "prior_anchor_v1|prior_anchor_v2"
+    # The v1 forecast gets the same factors.
+    v1 = fr.lookup("gpt-6-sol", "ACE", "FATALITIES",
+                   base_rate_block_version="prior_anchor_v1", rc_guidance=None)
+    assert v1["mode"] == "apply" and v1["factors"] == info["factors"]
+
+
+def test_a_null_version_forecast_does_not_receive_v1_factors(fitted_on_v1):
+    info = fr.lookup("gpt-6-sol", "ACE", "FATALITIES",
+                     base_rate_block_version=None, rc_guidance=None)
+    assert info["mode"] == "auto_shadow"
+    assert info["fitted_versions"]["base_rate_block_version"] == "prior_anchor_v1|prior_anchor_v2"
+
+
+def test_the_factor_row_names_both_versions_with_their_counts(tmp_path):
+    con = _db(tmp_path, n_questions=8, brbv="prior_anchor_v1")
+    _add_version_questions(con, [f"V2_{i}" for i in range(5)], "prior_anchor_v2")
+    # NULL-version questions stay their own group (8 + 5 pooled; 3 alone).
+    _add_version_questions(con, [f"N_{i}" for i in range(3)], None)
+    summary = fr.fit_family_recalibration(con, "2026-11")
+    assert [g["n_questions"] for g in summary["fitted"]] == [13]
+    assert summary["fitted"][0]["contributing_versions"] == {
+        "prior_anchor_v1": 8, "prior_anchor_v2": 5,
+    }
+    assert any(s.get("n_questions") == 3 for s in summary["skipped"])
+    rows = con.execute(
+        "SELECT DISTINCT base_rate_block_version, n_questions, contributing_versions_json "
+        "FROM family_recalibration"
+    ).fetchall()
+    assert len(rows) == 1
+    brbv, n, contrib = rows[0]
+    assert brbv == "prior_anchor_v1|prior_anchor_v2" and n == 13
+    assert json.loads(contrib) == {"prior_anchor_v1": 8, "prior_anchor_v2": 5}
+    # forecasts_raw keeps what each member actually saw.
+    seen = {r[0] for r in con.execute(
+        "SELECT DISTINCT base_rate_block_version FROM forecasts_raw "
+        "WHERE model_name = 'gpt-6-sol'").fetchall()}
+    assert seen == {"prior_anchor_v1", "prior_anchor_v2", None}
+
+
+def test_a_table_from_before_the_column_gains_it(tmp_path):
+    con = duckdb.connect(str(tmp_path / "old.duckdb"))
+    con.execute(
+        "CREATE TABLE family_recalibration (family TEXT, hazard_code TEXT, metric TEXT, "
+        "score_family TEXT, bucket_index INTEGER, factor DOUBLE, n_questions INTEGER, "
+        "base_rate_block_version TEXT, rc_guidance TEXT, as_of_month TEXT, "
+        "fitted_at TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    fr.ensure_table(con)
+    cols = {r[1] for r in con.execute("PRAGMA table_info('family_recalibration')").fetchall()}
+    assert "contributing_versions_json" in cols

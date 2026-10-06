@@ -517,6 +517,13 @@ horizons (primary minus `__ext_climatology`) and the arms are compared on
 that excess: question difficulty drops out. `correction` rows are genuinely
 paired: a member's corrected forecast against its own `__raw` one. Verdict:
 `too few`, `no clear difference`, or `arm X better` (lower score is better).
+The two prior-anchor wordings, `prior_anchor_v1` and `prior_anchor_v2`,
+print the same distribution and are one recalibration group, so they are
+reported APART and POOLED: `experiments.csv` adds a `base_rate_block_group`
+flag (the pooled group against the rest), and `rollups.csv`,
+`trace_stages_summary.csv` and `skill_history.csv` carry an extra row labelled
+`prior_anchor_v1|prior_anchor_v2` (rollups mark it `block_version_pooled`).
+Never add the pooled row to its two parts: it holds the same samples.
 `rollups.csv` carries the same split columns plus `correction` (`raw`,
 `corrected`, `shadow_corrected`, `none`), and its paired skill is computed
 within them.

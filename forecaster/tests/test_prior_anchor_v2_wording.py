@@ -7,8 +7,10 @@ vector below it clips moves past either end onto the end bucket and floors
 every bucket, so at bucket 0 the two disagree: the November 2026 test run
 told members Israel's count "stayed in the same bucket 42% of the time"
 beside a month-1 row putting 71% on zero. v2 reads stay / up / down straight
-off the vector. v1 stays the default; v2 is selected by
+off the vector. v1 stays the CODE default; v2 is selected by
 ``PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION=v2`` and recorded as ``prior_anchor_v2``.
+Both production workflows set v2 from the run on the 13th of November 2026
+(owner decision 2026-10-06), and the experiment flags must agree between them.
 """
 
 from __future__ import annotations
@@ -110,3 +112,39 @@ def test_flag_on_v2_reaches_the_prompt_and_the_stamp(tmp_path, monkeypatch):
     # Only the Spread line differs: the rows a member copies are identical.
     rows = lambda text: [l for l in text.splitlines() if l.startswith("  Month ")]  # noqa: E731
     assert rows(v1) == rows(v2) and rows(v1)
+
+
+# --- the two production workflows set every experiment flag alike -----------
+
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[2]
+_EXPERIMENT_FLAGS = (
+    "PYTHIA_PROMPT_V3_ORDER", "PYTHIA_PROMPT_CACHE_ENABLED",
+    "PYTHIA_RC_SHIFT_GUIDANCE", "PYTHIA_RC_SHIFT_SHARE",
+    "PYTHIA_PRIOR_ANCHOR_SPD", "PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION",
+    "PYTHIA_ADVICE_FAMILY_CARRYOVER", "PYTHIA_ADVICE_EXPERIMENT_SHARE",
+    "PYTHIA_FAMILY_RECALIBRATION_MODE", "PYTHIA_ADVICE_BLOCK_GROUPS",
+    "PYTHIA_MEMBER_ADVICE",
+)
+
+
+def _workflow_flags(name: str) -> dict:
+    text = (_ROOT / ".github" / "workflows" / name).read_text()
+    out = {}
+    for flag in _EXPERIMENT_FLAGS:
+        vals = re.findall(rf"^\s*{flag}:\s*\"?([^\"\n#]*)\"?\s*$", text, flags=re.M)
+        out[flag] = sorted(set(v.strip() for v in vals)) or None
+    return out
+
+
+def test_both_production_workflows_set_the_experiment_flags_alike():
+    stage = _workflow_flags("pythia_pipeline_stage.yml")
+    legacy = _workflow_flags("run_horizon_scanner.yml")
+    assert stage == legacy
+    assert stage["PYTHIA_PRIOR_ANCHOR_SPD"] == ["1"]
+    assert stage["PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION"] == ["v2"]
+    assert stage["PYTHIA_RC_SHIFT_GUIDANCE"] == ["0"]
+    # The shared-advice repair (#974) renders observations and drops the
+    # prior-anchoring line under the anchor, so no group is withheld.
+    assert stage["PYTHIA_ADVICE_BLOCK_GROUPS"] is None

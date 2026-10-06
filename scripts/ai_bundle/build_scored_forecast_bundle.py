@@ -876,7 +876,9 @@ def _rollup_samples(con, qids: list[str], ctx: Any = None) -> list[dict[str, Any
         else:
             r.update({k: None for k in ROLLUP_SPLIT_KEYS})
             r["correction"] = None
-    return rows
+    # prior_anchor_v1 and _v2 are one recalibration group: report each
+    # wording on its own AND pooled (a relabelled copy per sample).
+    return _err.with_pooled_block_versions(rows)
 
 
 def _cost_per_question(costs: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
@@ -920,6 +922,7 @@ def _emit_rollups(
             "horizon_m": first.get("horizon_m"),
             **{k: first.get(k) for k in ROLLUP_SPLIT_KEYS},
             "correction": first.get("correction"),
+            "block_version_pooled": bool(first.get("block_version_pooled")),
             "model_name": first["model_name"], "score_type": first["score_type"],
             "n_samples": len(vals),
             "n_questions_scored": len({x["question_id"] for x in sms}),
@@ -945,7 +948,7 @@ def _emit_rollups(
         out_dir / "rollups.csv",
         [
             "hazard_code", "metric", "score_family", "track", "horizon_m", *ROLLUP_SPLIT_KEYS,
-            "correction", "model_name", "score_type",
+            "correction", "block_version_pooled", "model_name", "score_type",
             "n_samples", "n_questions", "n_questions_scored", "mean_value", "median_value",
             "n_paired", "paired_model_mean", "climatology_mean", "skill_vs_climatology",
             "cost_per_question_usd",
@@ -1326,6 +1329,8 @@ def _write_digest(
     for r in rollups:
         if r.get("score_type") not in ("brier", "crps"):
             continue
+        if r.get("block_version_pooled"):
+            continue  # a pooled prior_anchor_v1+v2 copy; its samples are counted already
         key = (r["score_family"], r.get("track"), r["model_name"], r["score_type"])
         a = agg.setdefault(key, {"n": 0, "vsum": 0.0, "msum": 0.0,
                                  "pn": 0, "psum": 0.0, "csum": 0.0})
