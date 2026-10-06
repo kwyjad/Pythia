@@ -39,6 +39,24 @@ from .validate import empty_canonical, validate_canonical
 
 LOG = logging.getLogger(__name__)
 
+#: Columns beyond the canonical 21 this connector writes (see protocol.py).
+SUPPLEMENTARY_COLUMNS: tuple[str, ...] = ("value_high",)
+
+
+def _range_high(row, has_high: bool) -> float | None:
+    """The upper bound of the published range, or None when the feed gives
+    none or gives one that is not above the lower bound."""
+    if not has_high:
+        return None
+    try:
+        high = float(row.get("high_value"))
+        low = float(row.get("value"))
+    except (TypeError, ValueError):
+        return None
+    if high != high or low != low or high <= low:
+        return None
+    return high
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -283,6 +301,18 @@ class FewsnetIpcConnector:
         now_utc = datetime.now(timezone.utc).isoformat()
 
         # Build canonical DataFrame
+        # FEWS NET publishes a population RANGE ("1.0 - 2.49 million") and
+        # ``value`` is its lower bound: equal to ``low_value`` in 975 of 999
+        # Current Situation rows (probe run 37315217164). The upper bound
+        # travels as the supplementary column ``value_high`` so a reader can
+        # say the figure is a floor and what the ceiling was.
+        has_high = "high_value" in df_raw.columns
+        if not has_high:
+            LOG.warning(
+                "[fewsnet_ipc] the feed carries no high_value column; "
+                "value_high is NULL for every row"
+            )
+
         rows = []
         for _, r in df_raw.iterrows():
             iso3 = str(r["iso3"])
@@ -326,11 +356,14 @@ class FewsnetIpcConnector:
                     "confidence": "high",
                     "revision": "",
                     "ingested_at": now_utc,
+                    "value_high": _range_high(r, has_high),
                 }
             )
 
         if not rows:
             return empty_canonical()
 
-        df = pd.DataFrame(rows, columns=CANONICAL_COLUMNS)
-        return validate_canonical(df, source="fewsnet_ipc")
+        df = pd.DataFrame(rows, columns=[*CANONICAL_COLUMNS, *SUPPLEMENTARY_COLUMNS])
+        return validate_canonical(
+            df, source="fewsnet_ipc", extra_columns=list(SUPPLEMENTARY_COLUMNS)
+        )

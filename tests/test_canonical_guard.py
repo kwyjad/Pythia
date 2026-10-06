@@ -203,3 +203,21 @@ def test_each_chained_workflow_waits_on_its_trigger_check(workflow, job):
     assert jobs[job]["if"] == "needs.trigger.outputs.did_work == 'true'"
     # The trigger check must never take the DB group's one pending slot.
     assert "concurrency" not in wf or "pythia-resolver-db" not in str(wf.get("concurrency"))
+
+
+@pytest.mark.parametrize("workflow, job, nxt", [
+    ("compute_resolutions.yml", "compute-resolutions", "compute_scores.yml"),
+    ("compute_scores.yml", "compute-scores", "compute_calibration_pythia.yml"),
+])
+def test_a_bot_dispatched_link_starts_the_next_one(workflow, job, nxt):
+    """GitHub fires no workflow_run for a GITHUB_TOKEN-dispatched run: the
+    6 October reset's Compute Resolutions finished and nothing followed."""
+    import yaml
+
+    wf = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github" / "workflows" / workflow).read_text())
+    steps = wf["jobs"][job]["steps"]
+    cont = [s for s in steps if f"gh workflow run {nxt}" in str(s.get("run", ""))]
+    assert cont, f"{workflow} never dispatches {nxt}"
+    cond = cont[0]["if"]
+    assert "github-actions[bot]" in cond and "workflow_dispatch" in cond
+    assert wf["permissions"]["actions"] == "write"

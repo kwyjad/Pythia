@@ -1661,17 +1661,9 @@ def _load_fewsnet_projection(
         db_url = db_url or duckdb_io.DEFAULT_DB_URL
         con = duckdb_io.get_db(db_url)
         try:
-            try:
-                has_high = bool(con.execute(
-                    "SELECT COUNT(*) FROM information_schema.columns "
-                    "WHERE table_name = 'facts_resolved' AND column_name = 'value_high'"
-                ).fetchone()[0])
-            except Exception:
-                has_high = False
-            high_col = "value_high" if has_high else "CAST(NULL AS DOUBLE)"
             rows = con.execute(
-                f"""
-                SELECT ym, value, as_of_date, {high_col}
+                """
+                SELECT ym, value, as_of_date
                 FROM facts_resolved
                 WHERE iso3 = ?
                   AND metric = 'phase3plus_projection'
@@ -1691,16 +1683,12 @@ def _load_fewsnet_projection(
             "FEWS NET MOST LIKELY PROJECTION (phase3plus_projection):",
             "This is FEWS NET's forward-looking 'Most Likely' scenario for IPC Phase 3+ "
             "population. Use as a moderate-to-strong signal for the direction of change.",
-            "Each figure is the LOWER bound of the range FEWS NET publishes; the upper "
-            "bound follows \"to\" where FEWS NET gave one.",
             "",
             "  Month      | Phase 3+ Population | Analysis Date",
             "  -----------|---------------------|-------------",
         ]
-        for ym, value, as_of, high in rows:
+        for ym, value, as_of in rows:
             val_str = f"{int(value):,}" if value is not None else "n/a"
-            if value is not None and high is not None and float(high) > float(value):
-                val_str = f"{val_str} to {int(high):,}"
             as_of_str = str(as_of) if as_of else "n/a"
             lines.append(f"  {ym:10s} | {val_str:>19s} | {as_of_str}")
         lines.append("")

@@ -43,7 +43,9 @@ Rules for a supplementary column:
 4. Do NOT reuse a supplementary column for a second source with different
    semantics — add a new column instead.
 
-Current supplementary columns: ``alertlevel`` (GDACS only).
+Current supplementary columns: ``alertlevel`` (GDACS only) and ``value_high``
+(FEWS NET only: the upper bound of the published population range, whose
+lower bound is ``value``).
 """
 
 from __future__ import annotations

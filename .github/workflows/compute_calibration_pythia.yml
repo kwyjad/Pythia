@@ -132,6 +132,13 @@ jobs:
           python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
           echo "=== generate_calibration_advice completed ==="
 
+      # Half of all questions hold no advice. The comparison measures
+      # something only where the other half gets text; this says, per
+      # (hazard, metric), whether next month's advice arm will. Report only.
+      - name: Report whether the advice arm receives text
+        continue-on-error: true
+        run: python -m scripts.ci.advice_arm_text --db data/resolver.duckdb
+
       # Sibyl's two ingredients scored on their own (__ext_sibyl_raw, the raw
       # pool of its trials; __ext_sibyl_ref, its reference), the FL/TC
       # two-part scores, and the fitted reference weight the next run reads.

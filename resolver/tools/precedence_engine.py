@@ -204,7 +204,7 @@ def resolve_facts_frame(
             "publisher", "source_type", "source_url", "confidence",
             "definition_text", "doc_title", "hazard_label", "hazard_class",
             "unit", "series_semantics", "publication_date", "event_id",
-            "proxy_for", "alertlevel",
+            "proxy_for", "alertlevel", "value_high",
         )
         for _field in _PASSTHROUGH_FIELDS:
             if _field in chosen.index:

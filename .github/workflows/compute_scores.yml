@@ -19,7 +19,8 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  # write: a run the Actions bot dispatched starts the next link itself.
+  actions: write
 
 jobs:
   # A triggering run that concluded "success" may still have done nothing:
@@ -126,3 +127,14 @@ jobs:
           name: pythia-resolver-db
           retention-days: 90
           path: data/resolver.duckdb
+
+      # GitHub fires no workflow_run event for a run that GITHUB_TOKEN
+      # dispatched, so a chain started that way (compact_resolver_db's
+      # conflict_displacement_reset, 6 October 2026) stopped after this
+      # workflow. Such a run starts the next link itself; a run a person
+      # dispatched, or one started by workflow_run, leaves it to the event.
+      - name: Continue the chain (Calibration)
+        if: success() && github.event_name == 'workflow_dispatch' && github.actor == 'github-actions[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run compute_calibration_pythia.yml --ref main --repo "${GITHUB_REPOSITORY}"

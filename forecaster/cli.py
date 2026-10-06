@@ -951,9 +951,19 @@ def _load_fewsnet_phase3_history(
         # empty months (Oct 2026). IPC API rows (publisher IPC) are the
         # same quantity for the countries FEWS NET does not cover; where
         # both report a month, FEWS NET wins.
+        # FEWS NET publishes a range and ``value`` is its lower bound;
+        # ``value_high`` carries the upper bound where the DB has the column.
+        try:
+            has_high = bool(con.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = 'facts_resolved' AND column_name = 'value_high'"
+            ).fetchone()[0])
+        except Exception:
+            has_high = False
+        high_col = "value_high" if has_high else "CAST(NULL AS DOUBLE)"
         rows = con.execute(
-            """
-            SELECT ym, value, created_at, publisher
+            f"""
+            SELECT ym, value, created_at, publisher, {high_col} AS value_high
             FROM facts_resolved
             WHERE iso3 = ?
               AND hazard_code = 'DR'
@@ -964,12 +974,13 @@ def _load_fewsnet_phase3_history(
             [iso3, months * 3],
         ).fetchall()
     except Exception:
+        has_high = False
         rows = []
     projection_rows: list = []
     try:
         projection_rows = con.execute(
-            """
-            SELECT ym, value, publisher
+            f"""
+            SELECT ym, value, publisher, {"value_high" if has_high else "CAST(NULL AS DOUBLE)"}
             FROM facts_resolved
             WHERE iso3 = ?
               AND hazard_code = 'DR'
@@ -1000,19 +1011,28 @@ def _load_fewsnet_phase3_history(
     def _pub(row: tuple) -> str:
         return str(row[3]) if len(row) > 3 and row[3] is not None else ""
 
+    def _high(row: tuple) -> Optional[float]:
+        v = row[4] if len(row) > 4 else None
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     data_by_ym: Dict[str, Optional[float]] = {}
+    high_by_ym: Dict[str, Optional[float]] = {}
     pub_by_ym: Dict[str, str] = {}
     last_obs: Optional[tuple] = None
     for row in rows:
         ym_str, value = _ym(row[0]), row[1]
         val = float(value) if value is not None else None
         if val is not None and val > 0 and (last_obs is None or ym_str > last_obs[0]):
-            last_obs = (ym_str, val, _pub(row))
+            last_obs = (ym_str, val, _pub(row), _high(row))
         if ym_str not in window:
             continue
         if ym_str in data_by_ym and data_by_ym[ym_str] is not None and "fews" in pub_by_ym.get(ym_str, "").lower():
             continue
         data_by_ym[ym_str] = val
+        high_by_ym[ym_str] = _high(row)
         pub_by_ym[ym_str] = _pub(row)
 
     publishers = sorted({p for p in pub_by_ym.values() if p})
@@ -1025,7 +1045,9 @@ def _load_fewsnet_phase3_history(
         if ym_str in seen_proj or row[1] is None or ym_str < current_ym:
             continue
         seen_proj.add(ym_str)
-        projections.append({"ym": ym_str, "value": float(row[1])})
+        hi = row[3] if len(row) > 3 else None
+        projections.append({"ym": ym_str, "value": float(row[1]),
+                            "value_high": float(hi) if hi is not None else None})
     projections.sort(key=lambda e: e["ym"])
 
     if not data_by_ym and last_obs is None:
@@ -1039,7 +1061,10 @@ def _load_fewsnet_phase3_history(
             "note": "No FEWS NET or IPC Phase 3+ data available for this country.",
         }
 
-    last_6m_values = [{"ym": ym, "value": data_by_ym.get(ym)} for ym in all_yms[-6:]]
+    last_6m_values = [
+        {"ym": ym, "value": data_by_ym.get(ym), "value_high": high_by_ym.get(ym)}
+        for ym in all_yms[-6:]
+    ]
 
     # Coverage is over the displayed metric and the displayed window only.
     observed_values = [v for v in data_by_ym.values() if v is not None and v > 0]
@@ -1101,11 +1126,13 @@ def _load_fewsnet_phase3_history(
         "data_quality": data_quality,
         "last_observed": (
             {"ym": last_obs[0], "value": round(last_obs[1]), "publisher": last_obs[2],
+             "value_high": round(last_obs[3]) if last_obs[3] else None,
              "months_before_forecast": last_obs_age}
             if last_obs else None
         ),
         "projections": projections,
         "last_6m_values": last_6m_values,
+        "values_are_range_lower_bounds": any("fews" in p.lower() for p in publishers),
         "notes": (
             "FEWS NET Phase 3+ (Current Situation). Months without data reflect "
             "FEWS NET analysis cycle gaps, not zero food insecurity."
