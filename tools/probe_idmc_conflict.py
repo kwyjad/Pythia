@@ -277,6 +277,11 @@ def _markdown(report: dict[str, Any]) -> str:
             lines.append(f"- {rec}")
     lines.append("")
     lines.append(f"Keys: {report['conflict_keys']}")
+    rule = report.get("ingest_rule")
+    if rule:
+        lines.append("")
+        lines.append("## The series under the Oct 2026 ingest rules")
+        lines.append(json.dumps({k: v for k, v in rule.items() if k != "held_months"}, default=str))
     return "\n".join(lines)
 
 
@@ -312,6 +317,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::warning::IDMC probe fetch failed: {message}")
         return 0
     report = analyse(list(records or []))
+    try:
+        # The series the ingest would write under the Oct 2026 rules
+        # (recommended figures only, long spans and above-population months
+        # held out), so the resolution counts can be measured offline.
+        from resolver.ingestion import idmc_conflict as ic
+
+        first, last = ic.month_window(dt.date.today(), 36)
+        flows, flow_report = ic.conflict_monthly_flows(
+            records or [], first, last, population=ic.load_population(),
+        )
+        flows.to_csv(out / "flows.csv", index=False)
+        report["ingest_rule"] = {
+            k: flow_report.get(k)
+            for k in ("rows", "rows_held", "countries", "conflict_roles",
+                      "conflict_people_not_recommended", "conflict_records_dropped",
+                      "over_population", "months_per_country")
+        }
+        report["ingest_rule"]["held_months"] = flow_report.get("held_months", [])[:80]
+    except Exception as exc:  # noqa: BLE001
+        report["ingest_rule"] = {"error": _scrub(f"{type(exc).__name__}: {exc}", key)}
     (out / "report.json").write_text(json.dumps(report, indent=2, default=str))
     text = _markdown(report)
     (out / "report.md").write_text(text)

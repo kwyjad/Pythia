@@ -1289,6 +1289,21 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
 ZERO_DEFAULT_SHARE_LIMIT = 0.5
 
 
+def mostly_zero_default_groups(counts) -> list[str]:
+    """Groups (``"HAZ/METRIC"`` keys mapping to ``(sourced, zero_default)``)
+    whose zero-defaults exceed ``ZERO_DEFAULT_SHARE_LIMIT`` of their
+    resolutions. EVENT_OCCURRENCE is exempt: a binary event resolves "no
+    event" in most months by design, and the limit is about magnitudes."""
+    out: list[str] = []
+    for group, (sourced, zeros) in sorted(counts.items()):
+        if str(group).upper().endswith("/EVENT_OCCURRENCE"):
+            continue
+        total = int(sourced) + int(zeros)
+        if total and int(zeros) / total > ZERO_DEFAULT_SHARE_LIMIT:
+            out.append(str(group))
+    return out
+
+
 def report_outcome_counts(outcome_counts) -> list[str]:
     """Log, and append to the step summary, how each (hazard, metric)
     resolved this run: sourced, zero-default, and unresolved by reason.
@@ -1297,7 +1312,7 @@ def report_outcome_counts(outcome_counts) -> list[str]:
         "| hazard/metric | sourced | zero-default | unresolved (lag) | unresolved (other) |",
         "|---|---:|---:|---:|---:|",
     ]
-    flagged: list[str] = []
+    pairs: dict[str, tuple[int, int]] = {}
     for (hz, m), counts in sorted(outcome_counts.items()):
         sourced = int(counts.get("sourced", 0))
         zeros = int(counts.get("zero_default", 0))
@@ -1307,11 +1322,8 @@ def report_outcome_counts(outcome_counts) -> list[str]:
             if k.startswith("unresolved") and k != "unresolved_for_lag"
         )
         lines.append(f"| {hz}/{m} | {sourced} | {zeros} | {lag} | {other} |")
-        total = sourced + zeros
-        # A binary event metric resolves "no event" in most months by
-        # design; the limit is a statement about magnitudes.
-        if m != "EVENT_OCCURRENCE" and total and zeros / total > ZERO_DEFAULT_SHARE_LIMIT:
-            flagged.append(f"{hz}/{m}")
+        pairs[f"{hz}/{m}"] = (sourced, zeros)
+    flagged = mostly_zero_default_groups(pairs)
     LOGGER.info("Resolution outcomes this run:\n%s", "\n".join(lines))
     for group in flagged:
         print(

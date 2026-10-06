@@ -139,6 +139,8 @@ on:
       - "resolver/transform/adapters/acled.py"
       - "resolver/tools/repair_acled_fatalities_metric.py"
       - "scripts/reset_conflict_centroids.py"
+      - "scripts/reset_conflict_displacement.py"
+      - "pythia/tests/test_conflict_displacement_settle.py"
 
   workflow_dispatch:
     inputs:
@@ -428,6 +430,7 @@ jobs:
             forecaster/tests/test_base_rate_matches_resolution_source.py \
             pythia/tests/test_ace_fatalities_all_event_types.py \
             pythia/tests/test_ace_pa_conflict_displacement.py \
+            pythia/tests/test_conflict_displacement_settle.py \
             pythia/tests/test_compute_resolutions.py \
             pythia/tests/test_resolutions_repair_question_provenance.py \
             pythia/tests/test_acled_partial_month_resolution.py \

@@ -374,12 +374,17 @@ def conflict_displacement_coverage(con) -> Tuple[set[str], set[str]]:
 #: How long after a month ends before IDMC conflict displacement for it is
 #: read at all. IDMC's update feed reports late and irregularly: on the
 #: 5 October 2026 release 14 countries had a 2026-09 row against 27 for
-#: 2026-03, and every one of the 44 zero-defaults for 2026-09 was a country
-#: whose first later row had not arrived yet. 60 days is the starting value;
-#: ``tools/probe_idmc_conflict.py`` measures the lag from the feed's own
-#: record stamps and the value is revisited against it (CLAUDE.md, the
-#: conflict displacement settle-period entry).
-CONFLICT_SETTLE_DAYS = 60
+#: 2026-03, and 60 of the 64 ACE/PA zero-defaults were months whose first
+#: report had not arrived yet. Measured from the feed's own ``created_at``
+#: stamps (``tools/probe_idmc_conflict.py``, run 37429579956: recommended
+#: figures for 543 country-months, 2024-01 to 2026-03), the share of a
+#: month's eventual people that had arrived N days after it ended was 37% at
+#: 30, 49% at 60, 63% at 75, 68% at 90, 73% at 120 and 90% at 180; the share
+#: of country-months with a first report was 61%, 76%, 81%, 83%, 89% and 94%.
+#: 60 days is short of half the people. 90 is the first point where most of
+#: a month's total and five in six of its reports have arrived; a later
+#: revision still overwrites the resolution on the next run.
+CONFLICT_SETTLE_DAYS = 90
 #: A country is a REGULAR reporter for a month when IDMC reported conflict
 #: displacement for it in at least this many of the twelve months before.
 #: Only a regular reporter's missing month can be a quiet month: for a

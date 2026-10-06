@@ -1550,6 +1550,44 @@ def test_ace_fatalities_must_resolve_from_the_base_rate_series(tmp_path, full_ru
 
 
 # --------------------------------------------------------------------------
+# Oct 2026: conflict displacement zeros for months IDMC had not reported yet
+# --------------------------------------------------------------------------
+
+
+def test_a_group_resolved_mostly_by_zero_defaults_fails_and_is_named(tmp_path, full_run):
+    """64 of 96 ACE/PA resolutions on the 5 October 2026 release were
+    zero-defaults; the check names a group past half, and exempts binary
+    event occurrence, where "no event" is the ordinary outcome."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS questions (question_id TEXT, hazard_code TEXT, metric TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS resolutions (question_id TEXT, horizon_m INTEGER, "
+        "value DOUBLE, source_desc TEXT)"
+    )
+    con.execute("INSERT INTO questions VALUES ('SDN_PA','ACE','PA'), ('PHL_EO','TC','EVENT_OCCURRENCE')")
+    con.execute(
+        "INSERT INTO resolutions VALUES ('SDN_PA',1,0,'zero_default'), ('SDN_PA',2,0,'zero_default'), "
+        "('SDN_PA',3,9000,'facts_resolved:IDMC:conflict_new_displacements'), "
+        "('PHL_EO',1,0,'zero_default'), ('PHL_EO',2,0,'zero_default')"
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run, "zeros1")["no_resolution_group_is_mostly_zero_defaults"]
+    assert check["verdict"] == "FAIL"
+    assert check["left"] == "ACE/PA"
+    assert "TC/EVENT_OCCURRENCE" not in check["left"]
+
+    con = duckdb.connect(str(db))
+    con.execute("DELETE FROM resolutions WHERE question_id = 'SDN_PA' AND horizon_m = 1")
+    con.close()
+    assert _checks(tmp_path, db, full_run, "zeros2")[
+        "no_resolution_group_is_mostly_zero_defaults"]["verdict"] == "PASS"
+
+
+# --------------------------------------------------------------------------
 # Sept 2026: a partial ACLED month read as a whole one
 # --------------------------------------------------------------------------
 

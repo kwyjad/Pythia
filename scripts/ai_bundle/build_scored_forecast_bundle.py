@@ -1261,6 +1261,80 @@ def _sharpness_lines(fvo_rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _emit_resolution_sources(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
+    """Per (hazard, metric) of the bundled questions: resolutions drawn from a
+    source against zero-defaults. A group whose zero-defaults exceed half its
+    resolutions FAILS here and is named in the digest: on the 5 October 2026
+    release 64 of 96 ACE/PA resolutions were zero-defaults, 60 of them months
+    IDMC had not reported yet, and every score and learned table below them
+    rested on that inference."""
+    try:
+        from pythia.tools.compute_resolutions import (
+            ZERO_DEFAULT_SHARE_LIMIT as limit,
+            mostly_zero_default_groups,
+        )
+    except Exception:  # noqa: BLE001
+        limit = 0.5
+
+        def mostly_zero_default_groups(c):
+            return [
+                g for g, (a, z) in sorted(c.items())
+                if not g.endswith("/EVENT_OCCURRENCE") and a + z and z / (a + z) > limit
+            ]
+    rows: list[dict[str, Any]] = []
+    if not qids or not (table_exists(con, "resolutions") and table_exists(con, "questions")):
+        write_csv(out_dir / "resolution_sources.csv",
+                  ["hazard_code", "metric", "sourced", "zero_default", "zero_share", "verdict"], rows)
+        return rows
+    placeholders = ",".join("?" for _ in qids)
+    found = rows_as_dicts(
+        con,
+        f"""
+        SELECT upper(q.hazard_code) AS hazard_code, upper(q.metric) AS metric,
+               COUNT(*) FILTER (WHERE COALESCE(r.source_desc, '') <> 'zero_default') AS sourced,
+               COUNT(*) FILTER (WHERE r.source_desc = 'zero_default') AS zero_default
+        FROM resolutions r JOIN questions q ON q.question_id = r.question_id
+        WHERE r.question_id IN ({placeholders})
+        GROUP BY 1, 2 ORDER BY 1, 2
+        """,
+        list(qids),
+    )
+    counts = {f"{r['hazard_code']}/{r['metric']}": (int(r["sourced"]), int(r["zero_default"])) for r in found}
+    flagged = set(mostly_zero_default_groups(counts))
+    for r in found:
+        total = int(r["sourced"]) + int(r["zero_default"])
+        key = f"{r['hazard_code']}/{r['metric']}"
+        rows.append({
+            **r,
+            "zero_share": round(int(r["zero_default"]) / total, 3) if total else None,
+            "verdict": "FAIL" if key in flagged else "PASS",
+        })
+    write_csv(out_dir / "resolution_sources.csv",
+              ["hazard_code", "metric", "sourced", "zero_default", "zero_share", "verdict"], rows)
+    return rows
+
+
+def _resolution_source_lines(rows: list[dict[str, Any]]) -> list[str]:
+    failed = [r for r in rows if r.get("verdict") == "FAIL"]
+    if not failed:
+        return []
+    lines = [
+        "## FAIL: groups resolved mostly by zero-defaults",
+        "",
+        "Their outcomes are mostly the resolver's inference, not a source's figure; read "
+        "every score and calibration row for them with that in mind.",
+        "",
+        "| hazard | metric | sourced | zero-default | share |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for r in failed:
+        lines.append(
+            f"| {r['hazard_code']} | {r['metric']} | {r['sourced']} | {r['zero_default']} | "
+            f"{r['zero_share']:.0%} |"
+        )
+    return lines + [""]
+
+
 def _write_digest(
     out_dir: Path,
     summaries: list[dict[str, Any]],
@@ -1271,6 +1345,7 @@ def _write_digest(
     months_back: int,
     fvo_rows: list[dict[str, Any]] | None = None,
     error_parts: Mapping[str, Any] | None = None,
+    resolution_sources: list[dict[str, Any]] | None = None,
 ) -> None:
     error_parts = error_parts or {}
     lines: list[str] = [
@@ -1279,6 +1354,7 @@ def _write_digest(
         f"_Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
         f"question-epoch window: last {months_back} months_",
         "",
+        *_resolution_source_lines(resolution_sources or []),
         # The first table is generated from headline.json and nothing else,
         # so a report quoting the headline and this digest cannot disagree.
         *_err.headline_digest_lines(error_parts.get("headline") or {}),
@@ -1698,6 +1774,7 @@ def build_bundle(
             write_csv(staging / "inject_health.csv", _err.INJECT_HEALTH_COLUMNS, inject_rows)
 
         _emit_scores_flat(con, staging, qids)
+        resolution_sources = _emit_resolution_sources(con, staging, qids)
         fvo_rows = _emit_forecast_vs_outcome(con, staging, qids, err_ctx)
         rollups = _emit_rollups(con, staging, qids, costs, err_ctx)
         try:
@@ -1745,6 +1822,7 @@ def build_bundle(
         _write_digest(
             staging, summaries, rollups, weight_movement, case_selection,
             months_back=months_back, fvo_rows=fvo_rows, error_parts=err_digest,
+            resolution_sources=resolution_sources,
         )
         _write_briefing(staging, case_records, case_selection)
 
@@ -1773,6 +1851,11 @@ def build_bundle(
                 "case_studies": case_selection,
                 "resolved_questions": _prov.resolution_counts(con, qids),
                 "calibration_status": calibration_state,
+                "resolution_sources": resolution_sources,
+                "groups_mostly_zero_defaults": [
+                    f"{r['hazard_code']}/{r['metric']}" for r in resolution_sources
+                    if r.get("verdict") == "FAIL"
+                ],
                 "lineups": _lineups_seen(staging, summaries),
                 "error_attribution": {
                     "files": err_sections.files,
