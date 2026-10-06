@@ -541,7 +541,10 @@ def lookup(
         out.update({"mode": mode, "factors": exact})
         if group != base_rate_block_version:
             out["version_group"] = group
-        if mode == "apply" and at_clip_limit(exact, kind):
+        # SPD factor sets only: a binary group has one shift, and a single
+        # shift at its bound is a strong correction, not a set pushed past
+        # what its buckets allow.
+        if mode == "apply" and kind == "spd" and at_clip_limit(exact, kind):
             n, total = clipped_buckets(exact, kind)
             LOGGER.info(
                 "family_recalibration: %s %s/%s factors clipped on %d of %d buckets; shadowing",

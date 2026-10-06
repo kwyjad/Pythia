@@ -117,24 +117,30 @@ class TestQuietMonthsAreObservations:
         assert probs == []
         assert source == base_rate_spd.NO_BASE_RATE_SOURCE
 
-    def test_the_displacement_anchor_counts_its_quiet_months_too(self, con):
-        # IDMC reports a country only when it records displacement, so an
-        # anchor from present rows alone said displacement every month.
+    def test_the_displacement_anchor_counts_only_bracketed_quiet_months(self, con):
+        # Oct 2026: IDMC reports late and irregularly, so a missing month is
+        # quiet only for a regular reporter with a later report, and only
+        # once settled on the forecast day (base_rate_spd.resolve_conflict_month).
         rows = []
-        for month in range(1, 13):
-            rows.append(("ETH", f"2025-{month:02d}", "ACE", "new_displacements",
-                         "new", "IDMC", 5_000.0))
+        for year in (2024, 2025):
+            for month in range(1, 13):
+                if (year, month) != (2025, 3):
+                    rows.append(("ETH", f"{year}-{month:02d}", "ACE", "new_displacements",
+                                 "new", "IDMC", 5_000.0))
         rows.append(("SOM", "2025-06", "ACE", "new_displacements", "new",
                      "IDMC", 80_000.0))
         con.executemany(
             "INSERT INTO facts_resolved VALUES (?, ?, ?, ?, ?, ?, ?)", rows
         )
-        probs, _, detail = base_rate_spd.base_rate_spd(
-            con, "SOM", "ACE", "PA", "2026-01"
-        )
-        assert detail["n_months_reported"] == 1
-        assert detail["n_months_quiet"] == 11
-        assert probs[0] > 0.5
+        # Forecast day 13 Dec 2025: months ending by 14 Sep have settled.
+        _, _, eth = base_rate_spd.base_rate_spd(con, "ETH", "ACE", "PA", "2026-01")
+        assert eth["n_months_quiet"] == 1            # 2025-03, bracketed by 2025-04
+        assert eth["n_months_reported"] == 19        # 2024-01..2025-08 less March
+        # SOM reported once: its missing months are unknown, never quiet.
+        _, _, som = base_rate_spd.base_rate_spd(con, "SOM", "ACE", "PA", "2026-01")
+        assert som["n_months_reported"] == 1
+        assert som["n_months_quiet"] == 0
+        assert som["n_months_unknown"] == 35
 
     def test_the_live_gate_reads_the_same_source_the_anchor_does(self, con):
         # A month in which some OTHER publisher, or an all-cause IDMC row,

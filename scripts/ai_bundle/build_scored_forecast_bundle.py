@@ -1282,7 +1282,10 @@ def _emit_resolution_sources(con, out_dir: Path, qids: list[str]) -> list[dict[s
                 if not g.endswith("/EVENT_OCCURRENCE") and a + z and z / (a + z) > limit
             ]
     rows: list[dict[str, Any]] = []
-    if not qids or not (table_exists(con, "resolutions") and table_exists(con, "questions")):
+    from pythia.tools._db_utils import column_exists
+
+    if not qids or not (table_exists(con, "resolutions") and table_exists(con, "questions")) \
+            or not column_exists(con, "resolutions", "source_desc"):
         write_csv(out_dir / "resolution_sources.csv",
                   ["hazard_code", "metric", "sourced", "zero_default", "zero_share", "verdict"], rows)
         return rows
