@@ -86,7 +86,7 @@ jobs:
       # cycle). Sharing the script keeps this gate and the ingest gate from
       # drifting apart again.
       #
-      # Manual dispatch always polls (recovery valve). Fails open to
+      # Manual dispatch always polls (recovery valve). An unknown answer reads as
       # active=true, so a broken gate delays nothing.
       - name: Check for active pipelines
         id: gate

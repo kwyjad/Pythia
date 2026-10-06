@@ -30,12 +30,35 @@ permissions:
   actions: read
 
 jobs:
+  # A Resolver Update its pipeline gate skipped concludes "success" and
+  # uploads no DB; on 5 October 2026 (run 37317550009) this workflow then
+  # failed with "no valid artifacts found to download". Ask first.
+  trigger:
+    name: Did the triggering run upload a canonical DB?
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
+    runs-on: ubuntu-latest
+    outputs:
+      did_work: ${{ steps.check.outputs.did_work }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check the triggering run's artifacts
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: python3 -m scripts.ci.canonical_guard trigger-did-work
+
   inspect-resolver-db:
     runs-on: ubuntu-latest
     # A Resolver Update that died in Phase 1 has no pythia-resolver-db
     # artifact; inspecting it would only add a second red run beside the
     # real one. Same guard every other consumer of this workflow carries.
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
+    needs: trigger
+    if: needs.trigger.outputs.did_work == 'true'
 
     steps:
       - name: Checkout repo

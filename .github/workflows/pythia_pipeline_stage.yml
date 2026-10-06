@@ -276,6 +276,7 @@ jobs:
           pip install -r python_library_requirements.txt
 
       - name: Download canonical resolver DB
+        id: canonical_download
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -287,6 +288,15 @@ jobs:
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
+
+      # The final stage uploads canonical days later from a staged copy;
+      # it reads this row to ask whether another run uploaded a newer
+      # canonical DB in between (scripts/ci/canonical_guard.py).
+      - name: Record which canonical DB this pipeline forked from
+        env:
+          DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          DOWNLOAD_SOURCE: ${{ steps.canonical_download.outputs.source }}
+        run: python -m scripts.ci.canonical_guard record --db data/resolver.duckdb
 
       # CrisisWatch edition gate (Oct 2026). The scan should read the edition
       # horizon_scanner.crisiswatch.expected_edition names: the previous month
@@ -1024,6 +1034,15 @@ jobs:
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
 
+      # The final stage uploads canonical days later from a staged copy;
+      # it reads this row to ask whether another run uploaded a newer
+      # canonical DB in between (scripts/ci/canonical_guard.py).
+      - name: Record which canonical DB this pipeline forked from
+        env:
+          DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          DOWNLOAD_SOURCE: ${{ steps.canonical_download.outputs.source }}
+        run: python -m scripts.ci.canonical_guard record --db data/resolver.duckdb
+
       - name: Run Horizon Scanner (sync)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -1574,6 +1593,13 @@ jobs:
             diagnostics/post_run__*.txt
           # error, not warn: see the HS stages' upload.
           if-no-files-found: error
+
+      - name: Refuse to upload over a newer canonical DB
+        if: success() && steps.signature_after.outputs.signature_ok == 'true'
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          db: data/resolver.duckdb
 
       - name: Upload canonical resolver DB
         if: success() && steps.signature_after.outputs.signature_ok == 'true'

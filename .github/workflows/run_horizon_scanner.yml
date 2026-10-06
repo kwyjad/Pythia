@@ -496,6 +496,13 @@ jobs:
             cp "$SRC" data/resolver.duckdb
           fi
           rm -f data/resolver.duckdb.wal
+          # Which canonical run this DB came from, for the upload guard.
+          echo "CANONICAL_DOWNLOADED_RUN_ID=${DB_RUN_ID}" >> "$GITHUB_ENV"
+          if [ -n "$OVERRIDE_RUN_ID" ]; then
+            echo "CANONICAL_DOWNLOAD_SOURCE=forced" >> "$GITHUB_ENV"
+          else
+            echo "CANONICAL_DOWNLOAD_SOURCE=discovery" >> "$GITHUB_ENV"
+          fi
 
           # Bootstrap-only: if we're starting from a fresh reset DB, ensure Pythia schema tables exist before signature check.
           if [ "${DB_ARTIFACT_NAME:-pythia-resolver-db}" = "pythia-resolver-db-reset" ]; then
@@ -1012,6 +1019,14 @@ jobs:
           retention-days: 14
           path: debug/eval/*
           if-no-files-found: warn
+
+      - name: Refuse to upload over a newer canonical DB
+        if: success() && env.CANONICAL_DB_READY == 'true' && steps.signature_after.outputs.signature_ok == 'true'
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ env.CANONICAL_DOWNLOADED_RUN_ID }}
+          source: ${{ env.CANONICAL_DOWNLOAD_SOURCE }}
 
       - name: Upload canonical resolver DB
         if: success() && env.CANONICAL_DB_READY == 'true' && steps.signature_after.outputs.signature_ok == 'true'

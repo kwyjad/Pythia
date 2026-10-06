@@ -76,6 +76,12 @@ jobs:
             --db "duckdb:///data/resolver.duckdb" \
             --run-ids "${IN_RUN_IDS}"
 
+      - name: Refuse to upload over a newer canonical DB
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ inputs.db_artifact_run_id }}
+
       - name: Upload modified DB
         uses: actions/upload-artifact@v4
         with:

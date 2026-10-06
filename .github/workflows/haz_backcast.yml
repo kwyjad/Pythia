@@ -365,6 +365,14 @@ jobs:
             --optional "${SIGNATURE_OPTIONAL_TABLES}" \
             --out diagnostics/db_signature_after.json
 
+      - name: Refuse to upload over a newer canonical DB
+        if: success()
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
+
       - name: Upload canonical resolver DB
         if: success()
         uses: actions/upload-artifact@v4

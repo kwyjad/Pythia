@@ -94,6 +94,8 @@ on:
       - "pythia/api/routes/costs.py"
       - "scripts/ci/poll_llm_batches.py"
       - "scripts/ci/check_pipeline_active.py"
+      - "scripts/ci/canonical_guard.py"
+      - ".github/actions/guard-canonical-upload/**"
       - "scripts/ci/batch_economics.py"
       - "scripts/ci/batch_canary.py"
       - "scripts/ci/tests/test_batch_canary.py"
@@ -128,8 +130,20 @@ on:
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
       # editing this workflow's own test list never runs the list it edited.
       - ".github/workflows/forecaster-ci.yml"
+      - ".github/workflows/compute_resolutions.yml"
+      - ".github/workflows/compute_scores.yml"
+      - ".github/workflows/compute_calibration_pythia.yml"
+      - ".github/workflows/compact_resolver_db.yml"
+      - ".github/workflows/haz_backcast.yml"
+      - ".github/workflows/ingest-structured-data.yml"
+      - ".github/workflows/interpreter_backfill.yml"
+      - ".github/workflows/mark_test_runs.yml"
+      - ".github/workflows/purge_hs_run.yml"
+      - ".github/workflows/resolver_update.yml"
+      - ".github/workflows/inspect_resolver_duckdb.yml"
       - "tests/test_poll_llm_batches_guard.py"
       - "tests/test_check_pipeline_active.py"
+      - "tests/test_canonical_guard.py"
       # Question creation: a test run must change nothing on a production
       # question. This file ran in no workflow until Oct 2026.
       - "scripts/create_questions_from_triage.py"
@@ -354,6 +368,7 @@ jobs:
             forecaster/tests/test_gemini_multipart.py \
             tests/test_poll_llm_batches_guard.py \
             tests/test_check_pipeline_active.py \
+            tests/test_canonical_guard.py \
             tests/test_create_questions_from_triage.py \
             scripts/ci/tests/test_batch_economics.py \
             scripts/ci/tests/test_batch_canary.py \

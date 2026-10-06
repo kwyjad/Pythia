@@ -17,17 +17,42 @@ on:
   # Optional manual trigger
   workflow_dispatch: {}
 
-concurrency:
-  group: pythia-resolver-db
-  cancel-in-progress: false
-
 permissions:
   contents: read
   actions: read
 
 jobs:
-  compute-scores:
+  # A triggering run that concluded "success" may still have done nothing:
+  # a run its pipeline gate skipped uploads no canonical DB, and on
+  # 5 October 2026 such a skipped Resolver Update started this whole chain
+  # on whatever DB discovery found. Ask whether the trigger uploaded one.
+  trigger:
+    name: Did the triggering run upload a canonical DB?
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
+    runs-on: ubuntu-latest
+    outputs:
+      did_work: ${{ steps.check.outputs.did_work }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check the triggering run's artifacts
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: python3 -m scripts.ci.canonical_guard trigger-did-work
+
+  compute-scores:
+    needs: trigger
+    if: needs.trigger.outputs.did_work == 'true'
+    # On the writing job, not the workflow: the trigger check above must
+    # never take the group's one pending slot (CLAUDE.md, CI wiring).
+    concurrency:
+      group: pythia-resolver-db
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -51,6 +76,7 @@ jobs:
       # expired artifact): canonical discovery — previously manual dispatch
       # always failed here because workflow_run.id is empty on dispatch.
       - name: Download canonical resolver DB
+        id: canonical_download
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -84,6 +110,14 @@ jobs:
           echo "=== Running pythia.tools.score_baselines ==="
           python -m pythia.tools.score_baselines --db-url "${RESOLVER_DB_URL}"
           echo "=== score_baselines completed ==="
+
+      - name: Refuse to upload over a newer canonical DB
+        if: success()
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
         if: success()

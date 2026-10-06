@@ -288,6 +288,14 @@ jobs:
             --db data/resolver.duckdb \
             >> "${GITHUB_STEP_SUMMARY}" || true
 
+      - name: Refuse to upload over a newer canonical DB
+        if: inputs.dry_run != true
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
+
       - name: Upload canonical resolver DB
         if: inputs.dry_run != true
         uses: actions/upload-artifact@v4
