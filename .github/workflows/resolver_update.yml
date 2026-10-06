@@ -135,7 +135,9 @@ jobs:
   # normally two days clear of the 13th-of-month pipeline, but this cron has been
   # delivered 11h late and dropped for 44 days, and a hand-dispatched recovery
   # run is by definition off-schedule. This was the only canonical-DB writer
-  # without the guard. It fails OPEN.
+  # without the guard. It answers in flight, idle or unknown: unknown
+  # proceeds with a warning on the schedule and stops RED on a manual
+  # dispatch (scripts/ci/check_pipeline_active.py).
   gate:
     name: Skip if a staged pipeline is in flight
     runs-on: ubuntu-latest
@@ -1276,6 +1278,14 @@ jobs:
             --run-log-dir diagnostics/run_log \
             2>&1 | tee diagnostics/issue_register.log \
             || echo "::warning::issue register failed (non-fatal)"
+
+      - name: Refuse to upload over a newer canonical DB
+        if: success()
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
         if: success()

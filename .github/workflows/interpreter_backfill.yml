@@ -149,6 +149,7 @@ jobs:
       # nightly backcast: without it a second backfill would start from an
       # older producer's DB and discard the first one's reports.
       - name: Download canonical resolver DB
+        id: canonical_download
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -429,6 +430,14 @@ jobs:
             diagnostics/
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Refuse to upload over a newer canonical DB
+        if: ${{ success() && (inputs.upload_canonical == true || inputs.upload_canonical == 'true') }}
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
         if: ${{ success() && (inputs.upload_canonical == true || inputs.upload_canonical == 'true') }}

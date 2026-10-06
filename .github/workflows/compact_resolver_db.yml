@@ -116,6 +116,7 @@ jobs:
           pip install -r python_library_requirements.txt
 
       - name: Download canonical resolver DB
+        id: canonical_download
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -364,6 +365,14 @@ jobs:
       # or a no-op run would displace the real one in discovery.
       # A step's `if:` already implies success(), so naming it as well would
       # only trip the A && B || C shell lint for no behavioural gain.
+      - name: Refuse to upload over a newer canonical DB
+        if: inputs.apply == true || inputs.apply == 'true'
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
+
       - name: Upload compacted canonical DB
         if: inputs.apply == true || inputs.apply == 'true'
         uses: actions/upload-artifact@v4

@@ -65,6 +65,7 @@ jobs:
       # Otherwise canonical discovery via the shared composite action, with
       # this workflow's own prior runs included as extra candidates.
       - name: Download canonical resolver DB
+        id: canonical_download
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -152,6 +153,14 @@ jobs:
             diagnostics/db_signature_before.json
             diagnostics/db_signature_after.json
           if-no-files-found: warn
+
+      - name: Refuse to upload over a newer canonical DB
+        if: success()
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload purged canonical DB
         if: success()

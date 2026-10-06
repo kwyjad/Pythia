@@ -1,0 +1,46 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+name: Refuse to upload over a newer canonical DB
+description: >
+  Run immediately before uploading pythia-resolver-db. Fails the job when
+  another run uploaded a canonical DB after the one this run downloaded:
+  uploading would discard that run's rows (5 October 2026: Compute SPD
+  Scores published a DB downloaded before an NMME refetch landed). The
+  pythia-resolver-db concurrency group runs producers one at a time and says
+  nothing about what each one downloaded. An unreadable API warns and lets
+  the upload go ahead.
+
+inputs:
+  github-token:
+    description: Token for the gh CLI (usually secrets.GITHUB_TOKEN)
+    required: true
+  downloaded-run-id:
+    description: The run the canonical DB was downloaded from (download-canonical-db's run-id output)
+    default: ""
+  source:
+    description: download-canonical-db's source output ("forced" skips the comparison)
+    default: ""
+  db:
+    description: Read the downloaded run from the DB's canonical_lineage table instead (staged pipeline)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Compare with the newest canonical DB
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        DOWNLOADED_RUN_ID: ${{ inputs.downloaded-run-id }}
+        DOWNLOAD_SOURCE: ${{ inputs.source }}
+        GUARD_DB: ${{ inputs.db }}
+      run: |
+        set -euo pipefail
+        if [ -n "${GUARD_DB}" ]; then
+          python3 -m scripts.ci.canonical_guard upload-guard --db "${GUARD_DB}"
+        else
+          python3 -m scripts.ci.canonical_guard upload-guard
+        fi

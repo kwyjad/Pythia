@@ -281,7 +281,7 @@ def test_publish_diagnostics_after_the_release_upload_are_non_fatal() -> None:
     """A crash in the inspection after `gh release upload` turned a completed
     publish red, skipped the API sync poke, and aged Publish in the watchdog."""
     data = _load_yaml(WF_PUBLISH)
-    job = next(iter(data["jobs"].values()))
+    job = data["jobs"]["publish"]
     names = [s.get("name") for s in job["steps"]]
     upload_idx = next(i for i, n in enumerate(names) if n and n.startswith("Upload resolver.duckdb"))
     for step in job["steps"][upload_idx + 1:]:

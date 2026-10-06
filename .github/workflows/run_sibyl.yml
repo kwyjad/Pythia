@@ -109,6 +109,7 @@ jobs:
       # Path A: triggering HS Triage run. Path B: canonical discovery.
       # Shared logic + candidate list live in .github/actions/download-canonical-db.
       - name: Download canonical resolver DB
+        id: canonical_download
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -650,6 +651,14 @@ jobs:
             sibyl_stdout.txt
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Refuse to upload over a newer canonical DB
+        if: success()
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
         if: success()
