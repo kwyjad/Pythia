@@ -340,3 +340,86 @@ def test_hazard_loop_survives_a_connection_death_after_the_spd_reopen(
             f"{hz} was skipped as 'no data' after the connection died in a "
             "previous hazard's scenario block"
         )
+
+
+# ---------------------------------------------------------------------------
+# The artifact renders what production sends (Oct 2026)
+#
+# The 6 October rehearsal could not confirm the conflict displacement block,
+# the Phase 3+ block or the NMME line from this artifact: it passed a stub
+# history and no NMME outlook, rendered every question as Track 1, and ran
+# without the prompt-shaping flags the forecaster runs under.
+# ---------------------------------------------------------------------------
+
+
+def test_every_spd_prompt_is_rendered_with_the_production_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import forecaster.cli as cli
+    from scripts.ci import snapshot_prompt_artifact as spa
+
+    db_path = tmp_path / "artifact.duckdb"
+    _make_triage_db(db_path)
+    seen: list[tuple] = []
+    monkeypatch.setattr(spa, "_load_structured_data_for_artifact", lambda *a: None)
+    monkeypatch.setattr(
+        cli, "_build_history_summary",
+        lambda iso3, hz, metric: {"type": "marker", "who": (iso3, hz, metric)},
+    )
+
+    def _capture(q, history_summary, *a, **k):
+        seen.append(history_summary.get("who"))
+        return "rendered"
+
+    monkeypatch.setattr(spa, "_render_spd_prompt", _capture)
+    spa.build_artifact(f"duckdb:///{db_path}")
+    assert sorted(seen) == [("SOM", hz, "PA") for hz in sorted(_ARTIFACT_HAZARDS)]
+
+
+def test_a_failing_history_builder_falls_back_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    import forecaster.cli as cli
+    from scripts.ci import snapshot_prompt_artifact as spa
+
+    def _boom(*a):
+        raise RuntimeError("no db")
+
+    monkeypatch.setattr(cli, "_build_history_summary", _boom)
+    out = spa._history_summary_for("SOM", "ACE", "PA", {"source": "resolver"})
+    assert out["source"] == "resolver" and "no db" in out["note"]
+
+
+def test_the_question_track_reaches_the_prompt_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    import forecaster.prompts as prompts
+    from scripts.ci import snapshot_prompt_artifact as spa
+
+    got: dict = {}
+    monkeypatch.setattr(prompts, "build_spd_prompt_v2", lambda **k: got.update(k) or "x")
+    spa._render_spd_prompt({"question_id": "q", "track": 2}, {}, {}, {})
+    assert got["track"] == 2
+
+
+def test_climate_hazards_get_the_nmme_outlook(monkeypatch: pytest.MonkeyPatch) -> None:
+    import forecaster.cli as cli
+    from scripts.ci import snapshot_prompt_artifact as spa
+
+    monkeypatch.setattr(cli, "load_seasonal_forecasts", lambda iso3: {"iso3": iso3})
+    assert spa._nmme_outlook_for("SOM", "DR") == {"iso3": "SOM"}
+    assert spa._nmme_outlook_for("SOM", "ACE") is None
+
+
+def test_the_artifact_step_runs_under_the_pipeline_prompt_flags() -> None:
+    import yaml
+
+    root = Path(__file__).resolve().parents[3] / ".github" / "workflows"
+    pipeline = yaml.safe_load((root / "pythia_pipeline_stage.yml").read_text())["env"]
+    sibyl = yaml.safe_load((root / "run_sibyl.yml").read_text())
+    step = next(
+        s for s in sibyl["jobs"]["sibyl"]["steps"] if s.get("name") == "Snapshot LLM prompt artifact"
+    )
+    keys = (
+        "PYTHIA_RC_SHIFT_GUIDANCE", "PYTHIA_RC_SHIFT_SHARE", "PYTHIA_PRIOR_ANCHOR_SPD",
+        "PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION", "PYTHIA_ADVICE_FAMILY_CARRYOVER",
+        "PYTHIA_ADVICE_EXPERIMENT_SHARE", "PYTHIA_FAMILY_RECALIBRATION_MODE",
+    )
+    for key in keys:
+        assert str(step["env"][key]) == str(pipeline[key]), key
