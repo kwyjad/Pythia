@@ -371,6 +371,12 @@ def _format_base_rate_for_prompt(
         data_quality = history_summary.get("data_quality", "unknown")
         last_6m = history_summary.get("last_6m_values", [])
 
+        def _rng(value: Any, high: Any) -> str:
+            """A FEWS NET figure is the lower bound of a published range."""
+            if high is not None and value is not None and float(high) > float(value):
+                return f"{_fmt(value)} to {_fmt(high)}"
+            return _fmt(value)
+
         label = history_summary.get("source_label") or "FEWS NET IPC"
         window = history_summary.get("window")
         window_txt = f" ({window})" if window else ""
@@ -379,6 +385,13 @@ def _format_base_rate_for_prompt(
             f"Phase 3+ population reported in {observed} of the last {total} months"
             f"{window_txt} ({coverage:.0f}% coverage).",
         ]
+        if history_summary.get("values_are_range_lower_bounds"):
+            lines.append(
+                "Each FEWS NET figure is the LOWER bound of the population range FEWS NET "
+                "publishes (for example \"1.0 - 2.49 million\" is stored as 1,000,000); "
+                "the upper bound is shown after \"to\" where FEWS NET gave one. The "
+                "question resolves on the lower bound."
+            )
 
         # The newest observation, with its month and age. The six-month
         # table below can be all null while an older figure stands.
@@ -392,7 +405,8 @@ def _format_base_rate_for_prompt(
             )
             pub = f", {last_obs['publisher']}" if last_obs.get("publisher") else ""
             lines.append(
-                f"Last observed value: {last_obs['ym']}: {_fmt(last_obs['value'])}{age_txt}{pub}"
+                f"Last observed value: {last_obs['ym']}: "
+                f"{_rng(last_obs['value'], last_obs.get('value_high'))}{age_txt}{pub}"
             )
         else:
             latest = None
@@ -401,7 +415,9 @@ def _format_base_rate_for_prompt(
                     latest = entry
                     break
             if latest:
-                lines.append(f"Latest value: {latest['ym']}: {_fmt(latest['value'])}")
+                lines.append(
+                    f"Latest value: {latest['ym']}: {_rng(latest['value'], latest.get('value_high'))}"
+                )
 
         if recent_mean is not None:
             lines.append(f"Recent 6-month average (observed only): {_fmt(recent_mean)}")
@@ -425,7 +441,10 @@ def _format_base_rate_for_prompt(
             chunk = last_6m[i:i+3]
             parts = []
             for entry in chunk:
-                val = "null" if entry.get("value") is None else _fmt(entry["value"])
+                val = (
+                    "null" if entry.get("value") is None
+                    else _rng(entry["value"], entry.get("value_high"))
+                )
                 parts.append(f"  {entry['ym']}: {val:<12}")
             lines.append(" | ".join(parts))
 
@@ -437,7 +456,9 @@ def _format_base_rate_for_prompt(
                 "observation; the question resolves on the Current Situation figure):"
             )
             lines.append(
-                "  " + " | ".join(f"{p['ym']}: {_fmt(p['value'])}" for p in projections[:6])
+                "  " + " | ".join(
+                    f"{p['ym']}: {_rng(p['value'], p.get('value_high'))}" for p in projections[:6]
+                )
             )
             lines.append("")
         lines.append(

@@ -200,7 +200,7 @@ class TestFewsnetIpcConnector:
             df = connector.fetch_and_normalize()
 
         # Should have correct columns
-        assert list(df.columns) == CANONICAL_COLUMNS
+        assert list(df.columns) == [*CANONICAL_COLUMNS, "value_high"]
 
         # Should only have Current Situation and Most Likely rows
         assert set(df["metric"].unique()) == {
@@ -222,7 +222,7 @@ class TestFewsnetIpcConnector:
         assert (df["publisher"] == "FEWS NET").all()
 
         # Validate canonical schema
-        validate_canonical(df, source="test_fewsnet_ipc")
+        validate_canonical(df, source="test_fewsnet_ipc", extra_columns=["value_high"])
 
         # Country list should have been written
         mock_write_countries.assert_called_once()

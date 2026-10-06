@@ -1580,6 +1580,7 @@ def init_schema(
                     provenance_rank INTEGER,
                     series TEXT,
                     alertlevel TEXT,
+                    value_high DOUBLE,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
@@ -1721,6 +1722,16 @@ def init_schema(
         )
     except _SCHEMA_EXC_TUPLE:
         pass  # Column already exists or table doesn't exist yet
+
+    # --- Migration: value_high (FEWS NET range upper bound, NULL elsewhere) ---
+    try:
+        _run_ddl_batch(
+            conn,
+            ["ALTER TABLE facts_resolved ADD COLUMN IF NOT EXISTS value_high DOUBLE"],
+            label="schema:add_value_high",
+        )
+    except _SCHEMA_EXC_TUPLE:
+        pass
 
     if diag_enabled():
         try:
