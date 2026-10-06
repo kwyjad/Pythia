@@ -44,6 +44,7 @@ on:
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
       # The INFORM Warning probe lives under tools/ but its tests live here.
       - "tools/probe_inform_warning.py"
+      - "tools/probe_idmc_conflict.py"
       # Guards resolver/hazard_resolution/emdat.py the same way.
       - "scripts/ci/diagnose_emdat.py"
       - "scripts/ci/tests/test_diagnose_emdat.py"
@@ -121,6 +122,7 @@ on:
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
       # The INFORM Warning probe lives under tools/ but its tests live here.
       - "tools/probe_inform_warning.py"
+      - "tools/probe_idmc_conflict.py"
       # Guards resolver/hazard_resolution/emdat.py the same way.
       - "scripts/ci/diagnose_emdat.py"
       - "scripts/ci/tests/test_diagnose_emdat.py"

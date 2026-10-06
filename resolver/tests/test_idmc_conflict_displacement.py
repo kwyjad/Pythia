@@ -55,8 +55,8 @@ def test_only_conflict_is_summed_and_every_other_cause_is_counted():
     first, last = ic.month_window(dt.date(2026, 10, 5), 36)
     flows, report = ic.conflict_monthly_flows(RECORDS, first, last)
     assert flows.to_dict("records") == [
-        {"iso3": "SDN", "ym": "2026-08", "value": 10000.0},
-        {"iso3": "SDN", "ym": "2026-09", "value": 500.0},
+        {"iso3": "SDN", "ym": "2026-08", "value": 10000.0, "metric": ic.METRIC},
+        {"iso3": "SDN", "ym": "2026-09", "value": 500.0, "metric": ic.METRIC},
     ]
     assert report["excluded_people"] == {
         "disaster": 7_305_385 + 1_743_994, "other": 40.0, "untyped": 12.0,
@@ -71,7 +71,9 @@ def test_a_figure_is_attributed_to_the_month_its_displacement_started():
     rec = _rec("SDN", "Conflict", 800, "2026-07-29", "x")
     rec["displacement_end_date"] = "2026-08-04"
     flows, _ = ic.conflict_monthly_flows([rec], "2026-01", "2026-09")
-    assert flows.to_dict("records") == [{"iso3": "SDN", "ym": "2026-07", "value": 800.0}]
+    assert flows.to_dict("records") == [
+        {"iso3": "SDN", "ym": "2026-07", "value": 800.0, "metric": ic.METRIC}
+    ]
 
 
 def test_run_writes_a_typed_staging_file_the_adapter_turns_into_ace_rows(tmp_path, monkeypatch):
@@ -114,3 +116,103 @@ def test_an_unreadable_source_is_not_an_empty_series(tmp_path, monkeypatch):
                   staging_dir=tmp_path / "s", diagnostics_dir=tmp_path / "d") == 1
     summary = json.loads((tmp_path / "d" / "summary.json").read_text())
     assert "abc123" not in json.dumps(summary)
+
+
+# --- Oct 2026: figures that cannot be monthly counts of people -------------
+
+
+def test_a_figure_idmc_does_not_recommend_for_totals_is_dropped_and_counted():
+    keep = _rec("PSE", "Conflict", 1000, "2026-03-02", "a")
+    keep["role"] = "Recommended figure"
+    tri = _rec("PSE", "Conflict", 50_000_000, "2026-03-03", "b")
+    tri["role"] = "Triangulation"
+    flows, report = ic.conflict_monthly_flows([keep, tri], "2026-01", "2026-09")
+    assert flows.to_dict("records") == [
+        {"iso3": "PSE", "ym": "2026-03", "value": 1000.0, "metric": ic.METRIC}
+    ]
+    assert report["conflict_records_dropped"] == {"conflict_not_recommended_role": 1}
+    assert report["conflict_people_not_recommended"] == 50_000_000
+
+
+def test_a_record_spanning_more_than_a_month_is_held_out_of_every_month_it_touches():
+    rec = _rec("IRN", "Conflict", 6_000_000, "2025-06-13", "war")
+    rec["displacement_end_date"] = "2025-08-20"
+    short = _rec("IRN", "Conflict", 300, "2025-07-02", "x")
+    flows, report = ic.conflict_monthly_flows([rec, short], "2025-01", "2025-12")
+    by_metric = {(r["ym"], r["metric"]): r["value"] for r in flows.to_dict("records")}
+    assert by_metric == {
+        ("2025-06", ic.METRIC_HELD): 6_000_000.0,
+        ("2025-07", ic.METRIC_HELD): 6_000_000.0,
+        ("2025-08", ic.METRIC_HELD): 6_000_000.0,
+    }
+    assert report["conflict_records_dropped"]["conflict_long_span_held"] == 1
+    assert report["rows"] == 0 and report["rows_held"] == 3
+
+
+def test_a_country_month_above_the_population_is_held_out_and_named():
+    big = _rec("PSE", "Conflict", 54_037_759, "2023-10-07", "x")
+    flows, report = ic.conflict_monthly_flows(
+        [big], "2023-01", "2023-12", population={"PSE": 5_000_000.0},
+    )
+    assert flows.to_dict("records") == [
+        {"iso3": "PSE", "ym": "2023-10", "value": 54_037_759.0, "metric": ic.METRIC_HELD}
+    ]
+    assert report["over_population"] == [
+        {"iso3": "PSE", "ym": "2023-10", "total": 54_037_759.0, "population": 5_000_000.0}
+    ]
+
+
+def test_held_rows_reach_the_staging_file_under_their_own_metric():
+    frame = pd.DataFrame([
+        {"iso3": "PSE", "ym": "2023-10", "value": 9.0, "metric": ic.METRIC_HELD},
+        {"iso3": "PSE", "ym": "2023-11", "value": 4.0, "metric": ic.METRIC},
+    ])
+    out = ic.staging_frame(frame)
+    assert list(out["metric"]) == [ic.METRIC_HELD, ic.METRIC]
+
+
+def test_the_population_table_loads():
+    pop = ic.load_population()
+    assert pop.get("PSE", 0) > 1_000_000
+
+
+def test_the_load_replaces_the_staged_window_so_a_held_month_loses_its_old_figure():
+    import duckdb
+
+    from resolver.tools.load_and_derive import replace_conflict_displacement_window
+
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE facts_resolved (ym VARCHAR, iso3 VARCHAR, hazard_code VARCHAR, "
+        "metric VARCHAR, value DOUBLE, publisher VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO facts_resolved VALUES "
+        "('2023-10','PSE','ACE','new_displacements',54037759,'IDMC'),"
+        "('2022-01','PSE','ACE','new_displacements',5,'IDMC'),"
+        "('2023-10','PSE','ACE','fatalities',9,'ACLED')"
+    )
+    canonical = pd.DataFrame([{
+        "hazard_code": "ACE", "metric": "new_displacements_held", "source": "idmc",
+        "as_of_date": "2023-10-31",
+    }, {
+        "hazard_code": "ACE", "metric": "new_displacements", "source": "idmc",
+        "as_of_date": "2026-09-30",
+    }])
+    counts = replace_conflict_displacement_window(con, canonical)
+    assert counts["facts_resolved"] == 1
+    left = con.execute("SELECT ym, metric FROM facts_resolved ORDER BY ym, metric").fetchall()
+    assert left == [("2022-01", "new_displacements"), ("2023-10", "fatalities")]
+
+
+def test_an_unread_idmc_replaces_nothing():
+    import duckdb
+
+    from resolver.tools.load_and_derive import replace_conflict_displacement_window
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE facts_resolved (ym VARCHAR, hazard_code VARCHAR, metric VARCHAR, publisher VARCHAR)")
+    con.execute("INSERT INTO facts_resolved VALUES ('2026-01','ACE','new_displacements','IDMC')")
+    empty = pd.DataFrame(columns=["hazard_code", "metric", "source", "as_of_date"])
+    assert replace_conflict_displacement_window(con, empty) == {"facts_resolved": 0, "facts_deltas": 0}
+    assert con.execute("SELECT COUNT(*) FROM facts_resolved").fetchone()[0] == 1

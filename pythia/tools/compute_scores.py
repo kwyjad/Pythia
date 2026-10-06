@@ -609,6 +609,29 @@ def _compute_eiv_for_question(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def purge_orphan_scores(conn) -> dict:
+    """Delete ``scores`` and ``eiv_scores`` rows whose (question, horizon)
+    has no resolution row. Idempotent; never raises."""
+    counts: dict = {}
+    for table in ("scores", "eiv_scores"):
+        try:
+            if not _table_exists(conn, table) or not _table_exists(conn, "resolutions"):
+                continue
+            where = (
+                f"NOT EXISTS (SELECT 1 FROM resolutions r WHERE r.question_id = {table}.question_id "
+                f"AND r.horizon_m = {table}.horizon_m)"
+            )
+            n = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0])
+            if n:
+                conn.execute(f"DELETE FROM {table} WHERE {where}")
+            counts[table] = n
+        except Exception as exc:  # noqa: BLE001 - a clean-up never stops scoring
+            LOGGER.warning("orphan score purge on %s skipped: %r", table, exc)
+    if any(counts.values()):
+        LOGGER.info("compute_scores: removed scores with no resolution behind them: %s", counts)
+    return counts
+
+
 def compute_scores(db_url: str) -> None:
     conn = _open_db(db_url)
 
@@ -649,6 +672,11 @@ def compute_scores(db_url: str) -> None:
         if not _table_exists(conn, "resolutions"):
             LOGGER.info("compute_scores: resolutions table not found; nothing to do.")
             return
+
+        # A score whose resolution was withdrawn (compute_resolutions now
+        # deletes an ACE/PA row a later rule no longer supports) is a score
+        # against an outcome nobody holds. Remove it before anything reads it.
+        purge_orphan_scores(conn)
 
         r_count = _row_count(conn, "resolutions")
         if r_count == 0:

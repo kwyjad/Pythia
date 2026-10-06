@@ -38,6 +38,17 @@
 # and (3) deletes the hazard-specific ACE/FATALITIES bucket centroids so EIV
 # falls back to the seeds (the EMA only moves a wrong centroid a tenth of the
 # way per run). The compaction steps do not run in this mode.
+#
+# maintenance=conflict_displacement_reset (Oct 2026) does the same for
+# ACE/PA: IDMC conflict displacement had been zero-defaulted for months IDMC
+# simply had not reported yet (60 of 64 zeros on the 5 October release were
+# trailing). It (1) exports an audit copy of every ACE/PA row in the
+# resolution, score and learned tables as pythia-audit-conflict-displacement
+# (always, even on a dry run), (2) on apply deletes them all, including the
+# ACE/PA family_recalibration factors, calibration weights and advice and
+# the hazard-specific centroids, and (3) after the canonical upload
+# dispatches Compute Resolutions, whose workflow_run chain re-resolves under
+# the settled rule and rebuilds scores, calibration and the release.
 
 ---
 name: Compact Resolver DB
@@ -55,13 +66,14 @@ concurrency:
         default: false
         type: boolean
       maintenance:
-        description: "What to do: compact (the raw-cache compaction) or conflict_resolution_reset (audit + relabel + centroid reset before the ACE/FATALITIES rerun)"
+        description: "What to do: compact (the raw-cache compaction), conflict_resolution_reset (ACE/FATALITIES audit + relabel + centroid reset) or conflict_displacement_reset (ACE/PA audit + delete + re-resolve)"
         required: false
         default: compact
         type: choice
         options:
           - compact
           - conflict_resolution_reset
+          - conflict_displacement_reset
       db_run_id:
         description: "Optional: force canonical DB from an Actions run ID. Blank = latest successful producer."
         required: false
@@ -70,7 +82,8 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
+  # write: the conflict_displacement_reset mode dispatches Compute Resolutions.
+  actions: write
 
 jobs:
   compact:
@@ -158,7 +171,7 @@ jobs:
       # Always runs, apply or not: the plan is what a human reads before
       # authorising the write.
       - name: "Dry run: the compaction plan"
-        if: inputs.maintenance != 'conflict_resolution_reset'
+        if: inputs.maintenance == 'compact'
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.retention \
@@ -171,7 +184,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collapse the raw caches
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance != 'conflict_resolution_reset'
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'compact'
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.retention \
@@ -190,7 +203,7 @@ jobs:
       # publish_latest_data.yml's own "~14 GB runner disk" note is stale. A
       # copy that dies for want of space otherwise looks like a DuckDB error.
       - name: Reclaim the file
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance != 'conflict_resolution_reset'
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'compact'
         run: |
           set -euo pipefail
           echo "disk before: $(df -h . | tail -1)"
@@ -270,6 +283,46 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # --- maintenance=conflict_displacement_reset ----------------------
+      - name: "Conflict displacement reset: export the audit copy"
+        if: inputs.maintenance == 'conflict_displacement_reset'
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m scripts.reset_conflict_displacement \
+            --db data/resolver.duckdb \
+            --audit-dir audit/conflict_displacement --audit-only \
+            --summary-out diagnostics/conflict_displacement_plan.json
+          {
+            echo "#### ACE/PA reset plan (rows that will be deleted)"
+            echo '```'
+            cat diagnostics/conflict_displacement_plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Conflict displacement reset: upload the audit copy"
+        if: inputs.maintenance == 'conflict_displacement_reset'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-audit-conflict-displacement
+          path: audit/conflict_displacement/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: "Conflict displacement reset: delete the ACE/PA rows"
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'conflict_displacement_reset'
+        run: |
+          set -euo pipefail
+          python -m scripts.reset_conflict_displacement \
+            --db data/resolver.duckdb \
+            --summary-out diagnostics/conflict_displacement_applied.json
+          {
+            echo "#### ACE/PA reset applied"
+            echo '```'
+            cat diagnostics/conflict_displacement_applied.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # The proof that the resume ledger and the verdicts survived. A
       # required-table regression fails the job BEFORE the upload, so a
       # damaged DB never becomes the canonical artifact.
@@ -318,3 +371,15 @@ jobs:
           name: pythia-resolver-db
           retention-days: 90
           path: data/resolver.duckdb
+
+      # After the upload, so the chain starts from this run's DB: Compute
+      # Resolutions re-resolves ACE/PA under the settled rule, and its
+      # workflow_run chain rebuilds scores, calibration and the release.
+      - name: "Conflict displacement reset: start the resolution chain"
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'conflict_displacement_reset'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run compute_resolutions.yml --ref main --repo "${GITHUB_REPOSITORY}"
+          echo "Dispatched Compute Resolutions; it chains to scores, calibration and publish." >> "$GITHUB_STEP_SUMMARY"

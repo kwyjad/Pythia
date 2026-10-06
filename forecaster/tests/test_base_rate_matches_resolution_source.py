@@ -24,6 +24,8 @@ See docs/montandon_assessment.md.
 
 from __future__ import annotations
 
+from datetime import date
+
 import re
 
 import duckdb
@@ -214,21 +216,26 @@ def test_prompt_anchor_references_and_resolver_read_one_conflict_series():
     # Prompt block reader.
     rows, _neg = brs.conflict_displacement_rows(con, "PHL", "2026-10", limit=6)
     assert rows == [("2026-05", 12000.0), ("2026-07", 3000.0)]
-    # Anchor: built from the same rows plus quiet months behind the gates.
-    probs, source, detail = brs.base_rate_spd(con, "PHL", "ACE", "PA", "2026-10")
+    # Anchor: the same rows, read as the resolver reads them on the day a
+    # forecast for a December window was made (13 November): May and July
+    # are settled; PHL reports too rarely for a missing month to be zero.
+    probs, source, detail = brs.base_rate_spd(con, "PHL", "ACE", "PA", "2026-12")
     assert source.startswith("idmc_conflict")
     assert 1_743_994.0 not in detail["values"]
-    assert 12000.0 in detail["values"] and 3000.0 in detail["values"]
-    # Resolver: a reported month, a quiet live month, a month nobody reported.
-    assert brs.conflict_displacement_value(con, "PHL", "2026-07")[0] == 3000.0
-    assert brs.conflict_displacement_value(con, "PHL", "2026-06") == (0.0, "zero_default")
-    assert brs.conflict_displacement_value(con, "PHL", "2026-09") is None
-    # China's typhoon rows put it in no conflict universe at all.
-    assert brs.conflict_displacement_value(con, "CHN", "2026-07") is None
-    probs_chn, source_chn, _ = brs.base_rate_spd(con, "CHN", "ACE", "PA", "2026-10")
+    assert detail["values"] == [12000.0, 3000.0]
+    # Resolver, once the months have settled: a reported month resolves, a
+    # missing month of an irregular reporter stays unknown, never zero.
+    later = date(2027, 6, 1)
+    assert brs.conflict_displacement_value(con, "PHL", "2026-07", today=later)[0] == 3000.0
+    assert brs.conflict_displacement_value(con, "PHL", "2026-06", today=later) is None
+    # ...and before it has settled, even a reported month waits.
+    assert brs.conflict_displacement_value(con, "PHL", "2026-07", today=date(2026, 9, 1)) is None
+    # China's typhoon rows put it in no conflict series at all.
+    assert brs.conflict_displacement_value(con, "CHN", "2026-07", today=later) is None
+    probs_chn, source_chn, _ = brs.base_rate_spd(con, "CHN", "ACE", "PA", "2026-12")
     assert probs_chn == [] and source_chn == brs.NO_BASE_RATE_SOURCE
-    # Persistence.
-    assert brs.last_observed_value(con, "PHL", "ACE", "PA", "2026-08")[:2] == (3000.0, "2026-07")
+    # Persistence: the newest month settled when the forecast was made.
+    assert brs.last_observed_value(con, "PHL", "ACE", "PA", "2026-12")[:2] == (3000.0, "2026-07")
     # Writer and reader agree on what the series is.
     assert (ic.HAZARD_CODE, ic.METRIC, ic.SOURCE) == (
         brs.CONFLICT_DISPLACEMENT_HAZARD,

@@ -2442,6 +2442,7 @@ class BundleBuilder:
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
             self._check_ace_fatalities_resolve_from_the_base_rate_series,
+            self._check_no_resolution_group_is_mostly_zero_defaults,
             self._check_no_stale_partial_acled_month,
             self._check_declared_active_tables_hold_rows,
             self._check_emdat_read_when_enabled,
@@ -4720,6 +4721,54 @@ class BundleBuilder:
             or f"Every ACE/FATALITIES resolution is drawn from {series} (all event types), "
             "the series the prompt base rate and the climatology reference use, and no "
             "battles-only ACLED row is named 'fatalities'.",
+        )
+
+    def _check_no_resolution_group_is_mostly_zero_defaults(self) -> None:
+        """No (hazard, metric) group resolves mostly to zero-defaults.
+
+        On the 5 October 2026 release 64 of 96 ACE/PA resolutions were
+        zero-defaults and 60 of them were months IDMC had not reported YET;
+        the zeros were scored and learned from (CLAUDE.md, the 2026-10-06
+        conflict displacement entry). A group whose outcomes are mostly the
+        resolver's inference is named here. EVENT_OCCURRENCE is exempt.
+        """
+
+        name = "no_resolution_group_is_mostly_zero_defaults"
+        if not {"resolutions", "questions"}.issubset(self.tables()):
+            return self._check(name, "SKIP", "", "", "no resolutions or questions table")
+        q_cols = {c for c, _t in self.columns_of("questions")}
+        not_test = "WHERE COALESCE(q.is_test, FALSE) = FALSE " if "is_test" in q_cols else ""
+        result = self.query(
+            "SELECT upper(q.hazard_code) || '/' || upper(q.metric), "
+            "COUNT(*) FILTER (WHERE COALESCE(r.source_desc, '') <> 'zero_default'), "
+            "COUNT(*) FILTER (WHERE r.source_desc = 'zero_default') "
+            "FROM resolutions r JOIN questions q ON q.question_id = r.question_id "
+            f"{not_test}GROUP BY 1"
+        )
+        rows = result[1] if result and result[1] else []
+        counts = {str(g): (int(s or 0), int(z or 0)) for g, s, z in rows}
+        try:
+            from pythia.tools.compute_resolutions import (
+                ZERO_DEFAULT_SHARE_LIMIT as limit,
+                mostly_zero_default_groups,
+            )
+        except Exception:  # noqa: BLE001 - the literal rule is the fallback
+            limit = 0.5
+
+            def mostly_zero_default_groups(c):
+                return [
+                    g for g, (s, z) in sorted(c.items())
+                    if not g.endswith("/EVENT_OCCURRENCE") and s + z and z / (s + z) > limit
+                ]
+        flagged = mostly_zero_default_groups(counts)
+        table = ", ".join(f"{g} {z} of {s + z}" for g, (s, z) in sorted(counts.items()))
+        self._check(
+            name, "FAIL" if flagged else "PASS",
+            ", ".join(flagged) or f"{len(counts)} group(s) checked", f"limit {limit:.0%}",
+            (
+                f"zero-defaults exceed {limit:.0%} of resolutions in: {', '.join(flagged)}. "
+                f"Zero-defaults by group: {table}"
+            ) if flagged else f"Zero-defaults by group: {table or 'none'}",
         )
 
     def _check_no_stale_partial_acled_month(self) -> None:

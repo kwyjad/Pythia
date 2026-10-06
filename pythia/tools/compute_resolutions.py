@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
 from typing import Optional
 
@@ -124,8 +126,13 @@ from pythia.tools._db_utils import (
     table_exists as _table_exists,
 )
 from pythia.tools.base_rate_spd import (
+    CONFLICT_DISPLACEMENT_SERIES,
+    CONFLICT_STATUS_QUIET,
+    CONFLICT_STATUS_REPORTED,
+    CONFLICT_STATUS_UNSETTLED,
     conflict_displacement_coverage,
-    conflict_displacement_value,
+    conflict_displacement_series,
+    resolve_conflict_month,
 )
 from pythia.tools.source_coverage import (
     acled_complete_clause as _acled_complete_clause,
@@ -844,7 +851,7 @@ def _ensure_resolutions_table(conn) -> None:
             pass
 
 
-def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
+def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
     """
     Compute and upsert resolutions for eligible questions.
 
@@ -945,9 +952,15 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         skipped_outside_source_universe = 0
         skipped_partial_month = 0
         skipped_conflict_displacement_gate = 0
-        # The IDMC conflict displacement gates (live months, universe), read
-        # once per run on the first ACE/PA horizon.
-        conflict_coverage = None
+        # The IDMC conflict displacement series (reported and held-out
+        # months per country), read once per run on the first ACE/PA horizon.
+        conflict_series = None
+        conflict_status_counts: Counter = Counter()
+        # Per (hazard, metric): how many horizon-months resolved from a
+        # source, defaulted to zero, or stayed unresolved and why. A group
+        # resolved mostly by zero-defaults is a group whose outcomes are
+        # mostly the resolver's inference (CLAUDE.md, the 2026-10-06 entry).
+        outcome_counts: dict[tuple[str, str], Counter] = defaultdict(Counter)
 
         # A production question a same-epoch test scan re-pointed goes back
         # to its production scan before anything is resolved from it.
@@ -1052,42 +1065,66 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
 
             for horizon_m in range(1, NUM_HORIZONS + 1):
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
+                group = (hazard_norm, metric_norm)
+
+                if hazard_norm == "ACE" and metric_norm == "PA":
+                    # ACE/PA resolves from the IDMC conflict displacement
+                    # series alone, under the one rule the prompt, the anchor
+                    # and the references read (base_rate_spd.
+                    # resolve_conflict_month): a month resolves once SETTLED;
+                    # a missing month is zero only for a regular reporter
+                    # with a later report. Anything else is unknown, and a
+                    # row an earlier rule wrote for it is deleted, because
+                    # IDMC reports late and a trailing month is not quiet.
+                    if cal_month > cal_cutoff:
+                        skipped_no_data_coverage += 1
+                        outcome_counts[group]["unresolved_future"] += 1
+                        continue
+                    if conflict_series is None:
+                        conflict_series = conflict_displacement_series(conn)
+                    reported_all, held_all = conflict_series
+                    value_cd, status = resolve_conflict_month(
+                        reported_all.get(iso3_norm, {}), cal_month, today,
+                        held=held_all.get(iso3_norm, set()),
+                    )
+                    conflict_status_counts[status] += 1
+                    if status not in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
+                        skipped_conflict_displacement_gate += 1
+                        outcome_counts[group][
+                            "unresolved_for_lag" if status == CONFLICT_STATUS_UNSETTLED
+                            else status
+                        ] += 1
+                        conn.execute(
+                            "DELETE FROM resolutions WHERE question_id = ? AND horizon_m = ?",
+                            [question_id, horizon_m],
+                        )
+                        continue
+                    if status == CONFLICT_STATUS_QUIET:
+                        resolved_as_zero += 1
+                        outcome_counts[group]["zero_default"] += 1
+                        resolved = (0.0, None, "zero_default")
+                    else:
+                        resolved_from_source += 1
+                        outcome_counts[group]["sourced"] += 1
+                        resolved = (float(value_cd), None, CONFLICT_DISPLACEMENT_SERIES)
 
                 # A FATALITIES cell whose only row was written before its
                 # month ended stays unresolved and is counted as such, not
                 # filed under "no data coverage yet" — the reader should see
                 # that the row exists and was refused.
-                if metric_norm == "FATALITIES" and (
+                elif metric_norm == "FATALITIES" and (
                     data_cutoff is None or cal_month > data_cutoff
                 ) and _acled_partial_row_exists(conn, iso3_norm, cal_month):
                     skipped_partial_month += 1
+                    outcome_counts[group]["unresolved_partial_month"] += 1
                     continue
 
                 # Only resolve months for which source data exists.
-                if data_cutoff is None or cal_month > data_cutoff:
+                elif data_cutoff is None or cal_month > data_cutoff:
                     skipped_no_data_coverage += 1
+                    outcome_counts[group]["unresolved_no_coverage"] += 1
                     continue
 
-                if hazard_norm == "ACE" and metric_norm == "PA":
-                    # ACE/PA resolves from the IDMC conflict displacement
-                    # series alone, through the reader the prompt and the
-                    # anchor use; a quiet month is zero only behind both
-                    # coverage gates (base_rate_spd.conflict_displacement_value).
-                    if conflict_coverage is None:
-                        conflict_coverage = conflict_displacement_coverage(conn)
-                    got = conflict_displacement_value(
-                        conn, iso3_norm, cal_month, coverage=conflict_coverage,
-                    )
-                    if got is None:
-                        skipped_conflict_displacement_gate += 1
-                        continue
-                    value, source_desc = got
-                    source_ts = None
-                    if source_desc == "zero_default":
-                        resolved_as_zero += 1
-                    else:
-                        resolved_from_source += 1
-                    resolved = (value, source_ts, source_desc)
                 else:
                     resolved = _resolve_value(
                         conn, iso3_norm, hazard_norm, cal_month, metric_norm,
@@ -1098,6 +1135,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     # A row exists but was written before its month ended:
                     # unresolved, never zero (CLAUDE.md, Invariants).
                     skipped_partial_month += 1
+                    outcome_counts[group]["unresolved_partial_month"] += 1
                     continue
                 if resolved is None:
                     # Source-aware null handling: only default to zero for
@@ -1108,24 +1146,31 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         covered = zero_default_coverage.get(metric_norm) or set()
                         if cal_month not in covered:
                             skipped_no_data_coverage += 1
+                            outcome_counts[group]["unresolved_no_coverage"] += 1
                             continue
                         universe = zero_default_universe.get(metric_norm)
                         if universe is not None and iso3_norm not in universe:
                             skipped_outside_source_universe += 1
+                            outcome_counts[group]["unresolved_outside_universe"] += 1
                             continue
                         value: float = 0.0
                         source_ts: Optional[str] = None
                         source_desc = "zero_default"
                         resolved_as_zero += 1
+                        outcome_counts[group]["zero_default"] += 1
                     else:
                         # All other sources: no record = unresolvable.
                         # Do NOT write a resolution row — leave this
                         # horizon unresolved so scoring skips it.
                         skipped_null_resolution += 1
+                        outcome_counts[group]["unresolved_no_data"] += 1
                         continue
-                elif not (hazard_norm == "ACE" and metric_norm == "PA"):
+                elif hazard_norm == "ACE" and metric_norm == "PA":
+                    value, source_ts, source_desc = resolved
+                else:
                     value, source_ts, source_desc = resolved
                     resolved_from_source += 1
+                    outcome_counts[group]["sourced"] += 1
 
                 conn.execute(
                     """
@@ -1211,8 +1256,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "%d horizon-months skipped (no data coverage yet), "
             "%d horizon-months skipped (country outside source universe), "
             "%d horizon-months skipped (only a partial-month ACLED row), "
-            "%d ACE/PA horizon-months unresolved (IDMC conflict displacement "
-            "not live that month, or the country outside its universe), "
+            "%d ACE/PA horizon-months unresolved (unsettled, trailing, held "
+            "out, or an irregular reporter's missing month), "
             "%d questions skipped (unresolvable hazard); "
             "%d new FATALITIES resolution vintage(s) recorded.",
             len(rows),
@@ -1227,8 +1272,72 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             skipped_unresolvable_hazard,
             vintages_written,
         )
+        if conflict_status_counts:
+            LOGGER.info("ACE/PA horizon-months by conflict displacement status: %s",
+                        dict(conflict_status_counts))
+        report_outcome_counts(outcome_counts)
+        return {f"{hz}/{m}": dict(c) for (hz, m), c in sorted(outcome_counts.items())}
     finally:
         _close_db(conn)
+
+
+#: Above this share of zero-defaults among a group's resolutions, the group's
+#: outcomes are mostly the resolver's inference rather than a source's figure,
+#: and every report that reads them says so (CLAUDE.md, the 2026-10-06
+#: conflict displacement entry: 64 of 96 ACE/PA resolutions were zeros, 60 of
+#: them months IDMC had simply not reported yet).
+ZERO_DEFAULT_SHARE_LIMIT = 0.5
+
+
+def mostly_zero_default_groups(counts) -> list[str]:
+    """Groups (``"HAZ/METRIC"`` keys mapping to ``(sourced, zero_default)``)
+    whose zero-defaults exceed ``ZERO_DEFAULT_SHARE_LIMIT`` of their
+    resolutions. EVENT_OCCURRENCE is exempt: a binary event resolves "no
+    event" in most months by design, and the limit is about magnitudes."""
+    out: list[str] = []
+    for group, (sourced, zeros) in sorted(counts.items()):
+        if str(group).upper().endswith("/EVENT_OCCURRENCE"):
+            continue
+        total = int(sourced) + int(zeros)
+        if total and int(zeros) / total > ZERO_DEFAULT_SHARE_LIMIT:
+            out.append(str(group))
+    return out
+
+
+def report_outcome_counts(outcome_counts) -> list[str]:
+    """Log, and append to the step summary, how each (hazard, metric)
+    resolved this run: sourced, zero-default, and unresolved by reason.
+    Returns the groups whose zero-defaults exceed half their resolutions."""
+    lines = [
+        "| hazard/metric | sourced | zero-default | unresolved (lag) | unresolved (other) |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    pairs: dict[str, tuple[int, int]] = {}
+    for (hz, m), counts in sorted(outcome_counts.items()):
+        sourced = int(counts.get("sourced", 0))
+        zeros = int(counts.get("zero_default", 0))
+        lag = int(counts.get("unresolved_for_lag", 0))
+        other = sum(
+            int(v) for k, v in counts.items()
+            if k.startswith("unresolved") and k != "unresolved_for_lag"
+        )
+        lines.append(f"| {hz}/{m} | {sourced} | {zeros} | {lag} | {other} |")
+        pairs[f"{hz}/{m}"] = (sourced, zeros)
+    flagged = mostly_zero_default_groups(pairs)
+    LOGGER.info("Resolution outcomes this run:\n%s", "\n".join(lines))
+    for group in flagged:
+        print(
+            f"::warning title=Resolutions mostly zero-defaults::{group}: more than "
+            f"{int(ZERO_DEFAULT_SHARE_LIMIT * 100)}% of this run's resolutions are zero-defaults"
+        )
+    summary = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary:
+        try:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write("### Resolution outcomes\n\n" + "\n".join(lines) + "\n\n")
+        except OSError:
+            pass
+    return flagged
 
 
 def main() -> None:

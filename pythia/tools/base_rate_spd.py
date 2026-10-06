@@ -49,8 +49,8 @@ labels, or centroid lists here.
 from __future__ import annotations
 
 import logging
-from datetime import date
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import date, timedelta
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pythia.buckets import get_bucket_specs, n_buckets_for
 
@@ -371,34 +371,213 @@ def conflict_displacement_coverage(con) -> Tuple[set[str], set[str]]:
     return live, universe
 
 
+#: How long after a month ends before IDMC conflict displacement for it is
+#: read at all. IDMC's update feed reports late and irregularly: on the
+#: 5 October 2026 release 14 countries had a 2026-09 row against 27 for
+#: 2026-03, and 60 of the 64 ACE/PA zero-defaults were months whose first
+#: report had not arrived yet. Measured from the feed's own ``created_at``
+#: stamps (``tools/probe_idmc_conflict.py``, run 37429579956: recommended
+#: figures for 543 country-months, 2024-01 to 2026-03), the share of a
+#: month's eventual people that had arrived N days after it ended was 37% at
+#: 30, 49% at 60, 63% at 75, 68% at 90, 73% at 120 and 90% at 180; the share
+#: of country-months with a first report was 61%, 76%, 81%, 83%, 89% and 94%.
+#: 60 days is short of half the people. 90 is the first point where most of
+#: a month's total and five in six of its reports have arrived; a later
+#: revision still overwrites the resolution on the next run.
+CONFLICT_SETTLE_DAYS = 90
+#: A country is a REGULAR reporter for a month when IDMC reported conflict
+#: displacement for it in at least this many of the twelve months before.
+#: Only a regular reporter's missing month can be a quiet month: for a
+#: country IDMC reports twice a year a missing month says nothing.
+CONFLICT_REGULAR_WINDOW_MONTHS = 12
+CONFLICT_REGULAR_MIN_MONTHS = 8
+#: The day of the month the forecast runs (the 13th since 2026-10-05). A
+#: reference built months later reads the series as it stood that day.
+CONFLICT_FORECAST_DAY = 13
+
+#: The metric a held-out IDMC record is written under (a record spanning more
+#: than a month, or a country-month above the country's population). A
+#: country-month carrying one is neither a value nor a quiet month.
+CONFLICT_DISPLACEMENT_HELD_METRIC = "new_displacements_held"
+
+# How a conflict displacement month resolves. Only the first two write a
+# resolution; every other is unknown and is looked at again on the next run.
+CONFLICT_STATUS_REPORTED = "reported"
+CONFLICT_STATUS_QUIET = "zero_default"
+CONFLICT_STATUS_UNSETTLED = "unresolved_for_lag"
+CONFLICT_STATUS_TRAILING = "unresolved_trailing"
+CONFLICT_STATUS_IRREGULAR = "unresolved_irregular_reporter"
+CONFLICT_STATUS_HELD = "unresolved_held_out"
+CONFLICT_STATUS_NO_SERIES = "unresolved_no_series"
+
+
+def _month_end(ym: str) -> date:
+    year, month = int(ym[:4]), int(ym[5:7])
+    nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    return nxt - timedelta(days=1)
+
+
+def conflict_month_settled(ym: str, today: date) -> bool:
+    """True once ``CONFLICT_SETTLE_DAYS`` have passed since ``ym`` ended."""
+    return _month_end(ym) + timedelta(days=CONFLICT_SETTLE_DAYS) <= today
+
+
+def conflict_forecast_date(before_ym: str) -> date:
+    """The day a forecast whose window starts in ``before_ym`` was made."""
+    prev = _add_months(before_ym, -1)
+    return date(int(prev[:4]), int(prev[5:7]), CONFLICT_FORECAST_DAY)
+
+
+def conflict_regular_reporter(reported: Mapping[str, Any], ym: str) -> bool:
+    """Reported in at least ``CONFLICT_REGULAR_MIN_MONTHS`` of the twelve
+    months before ``ym``."""
+    months = _window_months(ym, CONFLICT_REGULAR_WINDOW_MONTHS)
+    return sum(1 for m in months if m in reported) >= CONFLICT_REGULAR_MIN_MONTHS
+
+
+def resolve_conflict_month(
+    reported: Mapping[str, float], ym: str, today: date,
+    *, held: Optional[set] = None,
+) -> Tuple[Optional[float], str]:
+    """``(value, status)`` for one country-month of conflict displacement.
+
+    Pure: ``reported`` is the country's reported months and values, ``held``
+    its held-out months. A month resolves only once it is settled; a
+    reported figure then resolves it; a missing month is zero only for a
+    regular reporter with a reported figure in a LATER month (the gap is
+    bracketed). A trailing month, a held-out month and an irregular
+    reporter's missing month are unknown, never quiet.
+    """
+    if not conflict_month_settled(ym, today):
+        return None, CONFLICT_STATUS_UNSETTLED
+    if held and ym in held:
+        return None, CONFLICT_STATUS_HELD
+    if ym in reported:
+        return float(reported[ym]), CONFLICT_STATUS_REPORTED
+    if not conflict_regular_reporter(reported, ym):
+        return None, CONFLICT_STATUS_IRREGULAR
+    if not any(m > ym for m in reported):
+        return None, CONFLICT_STATUS_TRAILING
+    return 0.0, CONFLICT_STATUS_QUIET
+
+
+def conflict_displacement_series(
+    con, *, before_ym: Optional[str] = None,
+) -> Tuple[Dict[str, Dict[str, float]], Dict[str, set]]:
+    """``(reported, held)`` for every country: reported months and values,
+    and held-out months. ``before_ym`` keeps months strictly before it."""
+    reported: Dict[str, Dict[str, float]] = {}
+    held: Dict[str, set] = {}
+    if not _conflict_displacement_table_ok(con):
+        return reported, held
+    bound = " AND substr(CAST(ym AS VARCHAR), 1, 7) < ?" if before_ym else ""
+    params = [before_ym] if before_ym else []
+    rows = con.execute(
+        f"""
+        SELECT upper(iso3), substr(CAST(ym AS VARCHAR), 1, 7), SUM(value)
+        FROM {CONFLICT_DISPLACEMENT_TABLE}
+        WHERE {CONFLICT_DISPLACEMENT_WHERE} AND value IS NOT NULL{bound}
+        GROUP BY 1, 2
+        """,
+        params,
+    ).fetchall()
+    for iso, ym, value in rows:
+        if iso and ym and value is not None and float(value) >= 0:
+            reported.setdefault(str(iso), {})[str(ym)] = float(value)
+    held_where = CONFLICT_DISPLACEMENT_WHERE.replace(
+        f"lower(metric) = '{CONFLICT_DISPLACEMENT_METRIC}'",
+        f"lower(metric) = '{CONFLICT_DISPLACEMENT_HELD_METRIC}'",
+    )
+    try:
+        for iso, ym in con.execute(
+            f"""
+            SELECT DISTINCT upper(iso3), substr(CAST(ym AS VARCHAR), 1, 7)
+            FROM {CONFLICT_DISPLACEMENT_TABLE} WHERE {held_where}{bound}
+            """,
+            params,
+        ).fetchall():
+            if iso and ym:
+                held.setdefault(str(iso), set()).add(str(ym))
+    except Exception:  # noqa: BLE001 - no held rows is the pre-Oct-2026 table
+        pass
+    return reported, held
+
+
+def conflict_displacement_status(
+    con, iso3: str, ym: str, *, today: Optional[date] = None,
+    series: Optional[Tuple[Dict[str, Dict[str, float]], Dict[str, set]]] = None,
+) -> Tuple[Optional[float], str]:
+    """:func:`resolve_conflict_month` for one country-month read from the DB."""
+    if not _conflict_displacement_table_ok(con):
+        return None, CONFLICT_STATUS_NO_SERIES
+    reported, held = series if series is not None else conflict_displacement_series(con)
+    iso = (iso3 or "").upper()
+    return resolve_conflict_month(
+        reported.get(iso, {}), ym, today or date.today(), held=held.get(iso, set()),
+    )
+
+
 def conflict_displacement_value(
     con, iso3: str, ym: str, *,
-    coverage: Optional[Tuple[set[str], set[str]]] = None,
+    coverage: Any = None,
+    today: Optional[date] = None,
+    series: Optional[Tuple[Dict[str, Dict[str, float]], Dict[str, set]]] = None,
 ) -> Optional[Tuple[float, str]]:
     """The resolved conflict displacement for one country-month, or None.
 
-    ``(value, source_desc)`` when IDMC reported the month; ``(0.0,
-    'zero_default')`` when the month is live and the country is in the
-    universe but has no row (an observed quiet month); None when either gate
-    fails, so an ingestion gap never resolves as zero.
+    ``(value, CONFLICT_DISPLACEMENT_SERIES)`` for a settled reported month,
+    ``(0.0, 'zero_default')`` for a settled, bracketed quiet month of a
+    regular reporter, None otherwise (see :func:`resolve_conflict_month`).
+    ``coverage`` is accepted for old callers and ignored.
     """
-    iso = (iso3 or "").upper()
-    if not _conflict_displacement_table_ok(con):
-        return None
-    row = con.execute(
-        f"""
-        SELECT SUM(value) FROM {CONFLICT_DISPLACEMENT_TABLE}
-        WHERE upper(iso3) = ? AND substr(CAST(ym AS VARCHAR), 1, 7) = ?
-          AND {CONFLICT_DISPLACEMENT_WHERE} AND value IS NOT NULL
-        """,
-        [iso, ym],
-    ).fetchone()
-    if row and row[0] is not None and float(row[0]) >= 0:
-        return float(row[0]), CONFLICT_DISPLACEMENT_SERIES
-    live, universe = coverage if coverage is not None else conflict_displacement_coverage(con)
-    if ym in live and iso in universe:
+    del coverage
+    value, status = conflict_displacement_status(con, iso3, ym, today=today, series=series)
+    if status == CONFLICT_STATUS_REPORTED:
+        return float(value), CONFLICT_DISPLACEMENT_SERIES
+    if status == CONFLICT_STATUS_QUIET:
         return 0.0, "zero_default"
     return None
+
+
+def conflict_displacement_settled_rows(
+    con, iso3: str, today: date, *, before_ym: Optional[str] = None,
+) -> Dict[str, Any]:
+    """What the prompt's displacement block shows, under the resolution rule.
+
+    ``rows``: settled months resolved as reported or quiet, ascending (an
+    irregular reporter's rows are its reported months alone);
+    ``latest_settled_month``; ``regular_reporter`` (as of the month after the
+    latest settled one) with ``n_reported_12m``.
+    """
+    reported_all, held_all = conflict_displacement_series(con, before_ym=before_ym)
+    iso = (iso3 or "").upper()
+    reported = reported_all.get(iso, {})
+    held = held_all.get(iso, set())
+    # The newest settled month: walk back from the month before today.
+    probe = _add_months(today.strftime("%Y-%m"), -1)
+    for _ in range(6):
+        if conflict_month_settled(probe, today):
+            break
+        probe = _add_months(probe, -1)
+    latest_settled = probe
+    regular = conflict_regular_reporter(reported, _add_months(latest_settled, 1))
+    n_12 = sum(1 for m in _window_months(_add_months(latest_settled, 1), 12) if m in reported)
+    rows: List[Tuple[str, float]] = []
+    first = min(reported) if reported else None
+    if first:
+        ym = first
+        while ym <= latest_settled:
+            value, status = resolve_conflict_month(reported, ym, today, held=held)
+            if status in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
+                rows.append((ym, float(value)))
+            ym = _add_months(ym, 1)
+    return {
+        "rows": rows,
+        "latest_settled_month": latest_settled,
+        "regular_reporter": regular,
+        "n_reported_12m": n_12,
+        "n_unsettled_reported": sum(1 for m in reported if m > latest_settled),
+    }
 
 
 def _fill_quiet_months(
@@ -510,33 +689,42 @@ def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], s
     return probs, f"acled_monthly_fatalities:{len(values)}m", detail
 
 
-def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
+def _conflict_displacement(
+    con, iso3: str, hazard_code: str, before_ym: str, *, known_at: Optional[date] = None,
+) -> Tuple[List[float], str, Dict[str, Any]]:
     """ACE/PA: IDMC monthly CONFLICT displacement, the series an ACE/PA
     question resolves on and the prompt marks THIS QUESTION'S SERIES.
 
-    A quiet month counts as an observed zero behind the same two gates the
-    resolver applies (:func:`conflict_displacement_coverage`), so the anchor
-    and the resolution read one series under one rule."""
+    Each month of the window is read as the resolver reads it on the day the
+    forecast was made (:func:`resolve_conflict_month` at ``known_at``,
+    default :func:`conflict_forecast_date`): a settled reported month is its
+    figure, a settled bracketed quiet month of a regular reporter is zero,
+    and every other month (unsettled, trailing, held out, or a missing month
+    of an irregular reporter) is unknown and left out, never counted quiet."""
     del hazard_code
     if not _table_exists(con, CONFLICT_DISPLACEMENT_TABLE):
         return [], NO_BASE_RATE_SOURCE, {"reason": f"{CONFLICT_DISPLACEMENT_TABLE} missing"}
+    when = known_at or conflict_forecast_date(before_ym)
     months = _window_months(before_ym, CONFLICT_WINDOW_MONTHS)
-    rows, n_negative = conflict_displacement_rows(con, iso3, before_ym, since_ym=months[0])
-    observed = {ym: v for ym, v in rows}
-    live, universe = conflict_displacement_coverage(con)
-    n_quiet = 0
-    if COUNT_QUIET_MONTHS_AS_ZERO and (iso3 or "").upper() in universe:
-        # IDMC reports a country only when it records displacement, so an
-        # anchor built from present rows alone said displacement happens every
-        # month in a country IDMC reported twice a year. The window's quiet
-        # months are observations, and leaving them out inflated the anchor.
-        values, n_reported, n_quiet = _fill_quiet_months(observed, months, live)
-    else:
-        values = [observed[k] for k in sorted(observed)]
-        n_reported = len(values)
+    reported_all, held_all = conflict_displacement_series(con, before_ym=before_ym)
+    iso = (iso3 or "").upper()
+    reported = reported_all.get(iso, {})
+    held = held_all.get(iso, set())
+    values: List[float] = []
+    n_reported = n_quiet = n_unknown = 0
+    for ym in months:
+        value, status = resolve_conflict_month(reported, ym, when, held=held)
+        if status == CONFLICT_STATUS_REPORTED:
+            values.append(float(value))
+            n_reported += 1
+        elif status == CONFLICT_STATUS_QUIET:
+            values.append(0.0)
+            n_quiet += 1
+        else:
+            n_unknown += 1
     probs = _empirical_bucket_probs(values, "PA")
     if probs is None:
-        return [], NO_BASE_RATE_SOURCE, {"reason": "no IDMC conflict displacement history before window"}
+        return [], NO_BASE_RATE_SOURCE, {"reason": "no settled IDMC conflict displacement before window"}
     detail = {
         "score_family": "spd",
         "method": "empirical_monthly_buckets",
@@ -544,7 +732,8 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
         "n_months_used": len(values),
         "n_months_reported": n_reported,
         "n_months_quiet": n_quiet,
-        "n_negative_dropped": n_negative,
+        "n_months_unknown": n_unknown,
+        "known_at": when.isoformat(),
         "values": values,
     }
     return probs, f"idmc_conflict:{len(values)}m", detail
@@ -633,19 +822,21 @@ def last_observed_value(
                 return float(row[1] or 0), str(row[0]), CONFLICT_FATALITIES_TABLE
             return None
         if hz == "ACE" and m == "PA":
-            # The month before the window, as the resolver would resolve it:
-            # a reported value, an observed quiet month (0), or unknown.
-            prev = _add_months(before, -1)
-            got = conflict_displacement_value(con, iso, prev)
-            if got is not None:
-                value, src = got
-                if src == "zero_default":
-                    return 0.0, prev, f"{CONFLICT_DISPLACEMENT_SERIES}:quiet_month"
-                return value, prev, src
-            rows, _neg = conflict_displacement_rows(con, iso, before, limit=1)
-            if rows:
-                ym, value = rows[-1]
-                return value, ym, CONFLICT_DISPLACEMENT_SERIES
+            # The newest month before the window that resolves (a settled
+            # reported figure or a settled bracketed quiet month) on the day
+            # the forecast was made; unsettled and trailing months are unknown.
+            when = conflict_forecast_date(before)
+            reported_all, held_all = conflict_displacement_series(con, before_ym=before)
+            reported = reported_all.get(iso, {})
+            held = held_all.get(iso, set())
+            ym = _add_months(before, -1)
+            for _ in range(CONFLICT_WINDOW_MONTHS):
+                value, status = resolve_conflict_month(reported, ym, when, held=held)
+                if status == CONFLICT_STATUS_REPORTED:
+                    return float(value), ym, CONFLICT_DISPLACEMENT_SERIES
+                if status == CONFLICT_STATUS_QUIET:
+                    return 0.0, ym, f"{CONFLICT_DISPLACEMENT_SERIES}:quiet_month"
+                ym = _add_months(ym, -1)
             return None
         if hz == "DR" and m == "PHASE3PLUS_IN_NEED":
             if not _table_exists(con, "facts_resolved"):

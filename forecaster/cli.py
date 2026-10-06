@@ -869,21 +869,33 @@ def _build_conflict_base_rate(
             }
 
         # --- Conflict displacements from IDMC ---
-        # One reader, shared with the ACE/PA anchor, the reference
-        # forecasters and compute_resolutions (base_rate_spd): IDMC CONFLICT
-        # displacement only, never the all-cause sum the prompt showed until
-        # Oct 2026; a negative figure is dropped and counted.
+        # One rule, shared with the ACE/PA anchor, the reference forecasters
+        # and compute_resolutions (base_rate_spd.resolve_conflict_month):
+        # only SETTLED months are shown, a missing month is zero only for a
+        # regular reporter with a later report, and every other month is
+        # unknown. IDMC reports late and irregularly, so a month with no row
+        # yet is not a quiet month.
         displacements_data: Dict[str, Any]
         try:
-            from pythia.tools.base_rate_spd import conflict_displacement_rows
+            from pythia.tools.base_rate_spd import conflict_displacement_settled_rows
 
-            disp_rows, n_negative = conflict_displacement_rows(
-                con, iso3_up, current_ym, limit=6,
-            )
+            settled = conflict_displacement_settled_rows(con, iso3_up, date.today())
+            disp_rows = settled["rows"][-6:]
             logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(disp_rows))
             displacements_data = _compute_trajectory(disp_rows, "IDMC")
-            if n_negative:
-                displacements_data["n_negative_dropped"] = n_negative
+            displacements_data["latest_settled_month"] = settled["latest_settled_month"]
+            displacements_data["regular_reporter"] = settled["regular_reporter"]
+            displacements_data["n_reported_12m"] = settled["n_reported_12m"]
+            displacements_data["n_unsettled_reported"] = settled["n_unsettled_reported"]
+            if not settled["regular_reporter"]:
+                # A percentage across three reports spread over a year is not
+                # a trend (Afghanistan read "+4616.6%", Oct 2026).
+                displacements_data["trend_pct"] = None
+                displacements_data["trend_direction"] = None
+                displacements_data["trend_note"] = (
+                    f"no trend: IDMC reported this country in {settled['n_reported_12m']} "
+                    "of the last 12 months, too irregularly for one"
+                )
         except Exception as exc:
             logging.warning("IDMC displacement query failed for %s/%s: %s", iso3_up, hz_up, exc)
             displacements_data = {

@@ -1,0 +1,52 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: how late IDMC conflict displacement records arrive, which of
+# them IDMC recommends for totals, and what the largest country-months are
+# made of. Downloads no canonical DB and writes nothing back, so it is not in
+# the pythia-resolver-db concurrency group.
+name: Probe IDMC conflict displacement
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/probe_idmc_conflict.py"
+      - "resolver/ingestion/idmc_conflict.py"
+      - ".github/workflows/probe_idmc_conflict.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pandas
+
+      - name: Probe IDMC conflict displacement
+        env:
+          IDMC_API_KEY: ${{ secrets.IDMC_API_KEY }}
+          IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
+        run: python -m tools.probe_idmc_conflict --out-dir diagnostics/idmc_conflict_probe
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-idmc-conflict
+          path: diagnostics/idmc_conflict_probe/
+          retention-days: 14

@@ -134,22 +134,31 @@ class TestConflictDisplacement:
         probs, source, detail = base_rate_spd(con, "CHN", "ACE", "PA", "2026-08")
         assert probs == [] and source == "NONE"
 
-    def test_a_quiet_month_is_zero_only_behind_both_gates(self, con):
+    def test_a_quiet_month_is_zero_only_when_settled_regular_and_bracketed(self, con):
+        """Oct 2026: a month IDMC had not reported YET was zero-defaulted
+        (60 of 64 zeros on the 5 October release); the full rule is pinned in
+        test_conflict_displacement_settle.py."""
+        from datetime import date
+
         from pythia.tools.base_rate_spd import conflict_displacement_value
 
         self._series(con)
-        self._row(con, "2026-06", "SOM", "ACE", 4000)
-        self._row(con, "2026-07", "SDN", "ACE", 9000)
-        # Reported month: its value.
-        assert conflict_displacement_value(con, "SOM", "2026-06") == (
+        for year in (2024, 2025):
+            for m in range(1, 13):
+                if (year, m) != (2025, 7):
+                    self._row(con, f"{year}-{m:02d}", "SOM", "ACE", 4000)
+        later = date(2026, 6, 1)
+        assert conflict_displacement_value(con, "SOM", "2025-06", today=later) == (
             4000.0, "facts_resolved:IDMC:conflict_new_displacements"
         )
-        # Live month, country in the universe, no row: an observed zero.
-        assert conflict_displacement_value(con, "SOM", "2026-07") == (0.0, "zero_default")
-        # A month nobody reported for is a gap, never a zero.
-        assert conflict_displacement_value(con, "SOM", "2026-08") is None
+        # A regular reporter's missing month, bracketed by a later report.
+        assert conflict_displacement_value(con, "SOM", "2025-07", today=later) == (0.0, "zero_default")
+        # A trailing month (no later report) is unknown, never zero.
+        assert conflict_displacement_value(con, "SOM", "2026-01", today=later) is None
+        # A month not yet settled is unknown, reported or not.
+        assert conflict_displacement_value(con, "SOM", "2025-12", today=date(2026, 1, 15)) is None
         # A country IDMC never reported for is outside its sight.
-        assert conflict_displacement_value(con, "ISL", "2026-07") is None
+        assert conflict_displacement_value(con, "ISL", "2025-07", today=later) is None
 
 
 class TestPhase3History:
