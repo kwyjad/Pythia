@@ -219,18 +219,53 @@ def inter_trial_divergence(
     return float(np.mean(pair_vals))
 
 
-def find_standard_run_id(con: Any, question_id: str) -> Optional[str]:
-    """The forecaster run_id of the question's latest standard forecast."""
-    row = con.execute(
-        """
-        SELECT run_id
-        FROM forecasts_ensemble
-        WHERE question_id = ? AND model_name <> ?
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        [question_id, SIBYL_MODEL_NAME],
-    ).fetchone()
+def find_standard_run_id(
+    con: Any, question_id: str, hs_run_id: Optional[str] = None
+) -> Optional[str]:
+    """The forecaster run_id of the standard forecast Sibyl is paired with.
+
+    The forecaster run that served *hs_run_id* for this question
+    (``run_questions.forecaster_run_id``) when there is one. Otherwise the
+    question's latest standard forecast of the SAME kind as this run: a test
+    run in an epoch production has already opened forecasts production
+    questions, so "latest" alone pairs a production Sibyl run with a test
+    forecast, or the other way round (Oct 2026).
+    """
+    if hs_run_id:
+        try:
+            row = con.execute(
+                "SELECT forecaster_run_id FROM run_questions "
+                "WHERE hs_run_id = ? AND question_id = ? AND forecaster_run_id IS NOT NULL",
+                [hs_run_id, question_id],
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:  # noqa: BLE001 - an older DB has no run_questions
+            pass
+    want_test = is_test_mode()
+    try:
+        row = con.execute(
+            """
+            SELECT run_id
+            FROM forecasts_ensemble
+            WHERE question_id = ? AND model_name <> ?
+              AND COALESCE(is_test, FALSE) = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [question_id, SIBYL_MODEL_NAME, want_test],
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - an older table has no is_test
+        row = con.execute(
+            """
+            SELECT run_id
+            FROM forecasts_ensemble
+            WHERE question_id = ? AND model_name <> ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            [question_id, SIBYL_MODEL_NAME],
+        ).fetchone()
     return str(row[0]) if row and row[0] else None
 
 

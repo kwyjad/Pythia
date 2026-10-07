@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from pythia.db.schema import connect
 from pythia.test_mode import is_test_mode
+from pythia.run_questions import in_run_clause, latest_hs_run_with_questions
 
 from sibyl.config import (
     ELIGIBLE_HAZARD_METRICS,
@@ -118,23 +119,17 @@ def _eligibility_sql() -> str:
 
 
 def latest_hs_run_id(con: Any = None) -> Optional[str]:
-    """The most recent HS run that produced active questions."""
+    """The most recent HS run that asked for active questions.
+
+    Read through run_questions as well as the questions' origin: a test run
+    in an epoch production has already opened owns none of its questions'
+    rows, and the origin alone would name the production scan (Oct 2026).
+    """
     own = con is None
     if own:
         con = connect(read_only=False)
     try:
-        row = con.execute(
-            """
-            SELECT q.hs_run_id
-            FROM questions q
-            LEFT JOIN hs_runs r ON r.hs_run_id = q.hs_run_id
-            WHERE q.status = 'active' AND q.hs_run_id IS NOT NULL
-            GROUP BY q.hs_run_id, r.generated_at
-            ORDER BY r.generated_at DESC NULLS LAST, q.hs_run_id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        return str(row[0]) if row and row[0] else None
+        return latest_hs_run_with_questions(con)
     finally:
         if own:
             con.close()
@@ -327,9 +322,12 @@ def load_candidates(
                 "is_test (see sibyl.run).",
                 run_id,
             )
+        # The run's own question set and its own triage (run_questions): a
+        # test run's questions may name a production scan as their origin.
+        in_run, n_bind = in_run_clause(con, "q")
         sql = f"""
             SELECT
-                q.question_id, q.hs_run_id, q.iso3,
+                q.question_id, ? AS hs_run_id, q.iso3,
                 upper(q.hazard_code) AS hazard_code,
                 upper(q.metric) AS metric,
                 q.window_start_date, q.target_month, q.wording,
@@ -338,16 +336,16 @@ def load_candidates(
                 t.regime_change_level AS rc_level
             FROM questions q
             LEFT JOIN hs_triage t
-              ON t.run_id = q.hs_run_id
+              ON t.run_id = ?
              AND upper(t.iso3) = upper(q.iso3)
              AND upper(t.hazard_code) = upper(q.hazard_code)
             WHERE q.status = 'active'
-              AND q.hs_run_id = ?
+              AND {in_run}
               AND {_eligibility_sql()}
               {test_filter}
             ORDER BY volatility_score DESC, q.question_id
         """
-        rows = con.execute(sql, [run_id]).fetchall()
+        rows = con.execute(sql, [run_id, run_id] + [run_id] * n_bind).fetchall()
     finally:
         if own:
             con.close()
@@ -464,17 +462,18 @@ def eligibility_breakdown(
             return {"hs_run_id": None, "note": "no HS run with active questions"}
 
         run_is_test = hs_run_is_test(run_id, con)
+        in_run, n_bind = in_run_clause(con, "q")
         rows = con.execute(
-            """
+            f"""
             SELECT upper(q.hazard_code), upper(q.metric),
                    COUNT(*),
                    SUM(CASE WHEN COALESCE(q.is_test, FALSE) THEN 1 ELSE 0 END)
             FROM questions q
-            WHERE q.status = 'active' AND q.hs_run_id = ?
+            WHERE q.status = 'active' AND {in_run}
             GROUP BY 1, 2
             ORDER BY 1, 2
             """,
-            [run_id],
+            [run_id] * n_bind,
         ).fetchall()
         pairs = {
             f"{hz}/{m}": {

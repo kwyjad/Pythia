@@ -113,20 +113,31 @@ def resolve_identifiers(
     if not out["forecaster_run_id"] and _table_exists(con, "forecasts_raw"):
         try:
             row = None
-            if out["hs_run_id"] and _table_exists(con, "questions"):
+            if out["hs_run_id"] and _table_exists(con, "run_questions"):
+                # The forecaster run that served this HS run (Oct 2026): a
+                # test run's production questions name the production scan
+                # as their origin, so the origin join would pick production.
+                row = con.execute(
+                    "SELECT MAX(forecaster_run_id) FROM run_questions "
+                    "WHERE hs_run_id = ? AND forecaster_run_id IS NOT NULL",
+                    [out["hs_run_id"]],
+                ).fetchone()
+                if row and row[0]:
+                    out["resolved_from"]["forecaster_run_id"] = "run_questions.forecaster_run_id"
+            if not (row and row[0]) and out["hs_run_id"] and _table_exists(con, "questions"):
                 row = con.execute(
                     "SELECT MAX(fr.run_id) FROM forecasts_raw fr "
                     "JOIN questions q ON q.question_id = fr.question_id "
                     "WHERE q.hs_run_id = ? AND fr.run_id IS NOT NULL AND fr.run_id <> ''",
                     [out["hs_run_id"]],
                 ).fetchone()
+                if row and row[0]:
+                    out["resolved_from"]["forecaster_run_id"] = "forecasts_raw joined on the HS run's questions"
             if not (row and row[0]):
                 row = con.execute(
                     "SELECT MAX(run_id) FROM forecasts_raw WHERE run_id IS NOT NULL AND run_id <> ''"
                 ).fetchone()
                 out["resolved_from"]["forecaster_run_id"] = "forecasts_raw (latest run, any epoch)"
-            else:
-                out["resolved_from"]["forecaster_run_id"] = "forecasts_raw joined on the HS run's questions"
             out["forecaster_run_id"] = str(row[0]) if row and row[0] else None
         except Exception as exc:  # noqa: BLE001
             out["resolved_from"]["forecaster_run_id"] = f"failed: {type(exc).__name__}: {exc}"

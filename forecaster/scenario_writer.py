@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pythia.buckets import labels_for
 from pythia.db.schema import connect
+from pythia.run_questions import link_overlay
 from pythia.test_mode import is_test_mode
 
 from .hs_utils import load_hs_triage_entry
@@ -492,11 +493,16 @@ async def _run_scenario_for_question(
 def run_scenarios_for_run(run_id: str) -> None:
     con = connect()
     try:
+        # The HS run and track as THIS forecaster run saw them (run_questions):
+        # a test run forecasting a production question must read its own
+        # triage, not the production scan the question row names.
+        join, hs_expr, track_expr = link_overlay(con, "q", "rq")
+        params = [run_id, run_id] if join else [run_id]
         rows = con.execute(
-            """
+            f"""
             SELECT
                 q.question_id,
-                q.hs_run_id,
+                {hs_expr} AS hs_run_id,
                 q.iso3,
                 q.hazard_code,
                 q.metric,
@@ -504,25 +510,16 @@ def run_scenarios_for_run(run_id: str) -> None:
                 q.window_start_date,
                 q.window_end_date,
                 q.wording,
-                q.track
+                {track_expr} AS track
             FROM questions q
+            {join}
             JOIN forecasts_ensemble fe
               ON fe.question_id = q.question_id
              AND fe.run_id = ?
             WHERE q.status = 'active'
-            GROUP BY
-                q.question_id,
-                q.hs_run_id,
-                q.iso3,
-                q.hazard_code,
-                q.metric,
-                q.target_month,
-                q.window_start_date,
-                q.window_end_date,
-                q.wording,
-                q.track
+            GROUP BY ALL
             """,
-            [run_id],
+            params,
         ).fetchall()
     finally:
         con.close()

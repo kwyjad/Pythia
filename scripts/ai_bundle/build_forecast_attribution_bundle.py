@@ -66,6 +66,7 @@ from scripts.ai_bundle.build_current_run_bundle import (
     _questions_for_run,
     _resolve_run_id,
     _run_cost,
+    _run_is_test,
 )
 from scripts.ai_bundle.build_scored_forecast_bundle import (
     _score_family,
@@ -1692,6 +1693,8 @@ def build_bundle(
         if not run_id:
             LOGGER.warning("No forecaster run found — nothing to bundle")
             return None
+        if not include_test and _run_is_test(con, run_id):
+            include_test = True  # a test run's bundle describes the test run
         questions = _questions_for_run(con, run_id, include_test)
         if not questions:
             LOGGER.warning("Run %s has no questions — nothing to bundle", run_id)

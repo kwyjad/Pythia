@@ -73,6 +73,7 @@ from scripts.ai_bundle.common import (
     triage_view,
 )
 from scripts.ai_bundle.guides import build_current_run_guide
+from pythia.run_questions import link_overlay
 
 # The pack is what the model sees, so the names and the section assignment
 # have to be decided HERE, not left to the prose. Both modules are pure
@@ -136,12 +137,15 @@ def _resolve_run_id(con, include_test: bool) -> str | None:
     time: fc_<epoch>)."""
     if not table_exists(con, "forecasts_raw"):
         return None
+    # A run is a test run by its OWN forecast rows (a same-epoch test run
+    # forecasts production questions), so the forecast rows are filtered too.
     rows = rows_as_dicts(
         con,
         "SELECT MAX(fr.run_id) AS run_id FROM forecasts_raw fr "
         "JOIN questions q ON q.question_id = fr.question_id "
         "WHERE fr.run_id IS NOT NULL AND fr.run_id <> ''"
-        + _test_clause(con, "questions", "q", include_test),
+        + _test_clause(con, "questions", "q", include_test)
+        + _test_clause(con, "forecasts_raw", "fr", include_test),
     )
     return str(rows[0]["run_id"]) if rows and rows[0].get("run_id") else None
 
@@ -185,17 +189,32 @@ def _previous_run_id(con, run_id: str, include_test: bool) -> str | None:
     return None
 
 
+def _run_is_test(con, run_id: str) -> bool:
+    """A run is a test run by its OWN forecast rows."""
+    if not column_exists(con, "forecasts_raw", "is_test"):
+        return False
+    rows = rows_as_dicts(
+        con,
+        "SELECT BOOL_OR(COALESCE(is_test, FALSE)) AS t FROM forecasts_raw WHERE run_id = ?",
+        [run_id],
+    )
+    return bool(rows and rows[0].get("t"))
+
+
 def _questions_for_run(con, run_id: str, include_test: bool) -> list[dict[str, Any]]:
+    # hs_run_id and track as THIS forecaster run saw them (run_questions): a
+    # test run's production questions name the production scan as origin.
+    join, hs_expr, track_expr = link_overlay(con, "q", "rq")
     return rows_as_dicts(
         con,
-        "SELECT DISTINCT q.question_id, q.hs_run_id, q.iso3, q.hazard_code, "
+        f"SELECT DISTINCT q.question_id, {hs_expr} AS hs_run_id, q.iso3, q.hazard_code, "
         "q.metric, q.target_month, q.window_start_date, q.window_end_date, "
-        "q.wording, q.status, q.track, q.pythia_metadata_json "
-        "FROM questions q JOIN forecasts_raw fr ON fr.question_id = q.question_id "
+        f"q.wording, q.status, {track_expr} AS track, q.pythia_metadata_json "
+        f"FROM questions q {join} JOIN forecasts_raw fr ON fr.question_id = q.question_id "
         "WHERE fr.run_id = ?"
         + _test_clause(con, "questions", "q", include_test)
         + " ORDER BY q.question_id",
-        [run_id],
+        [run_id, run_id] if join else [run_id],
     )
 
 
@@ -1634,6 +1653,12 @@ def build_bundle(
         if not run_id:
             LOGGER.warning("No forecaster run found — nothing to bundle")
             return None
+        if not include_test and _run_is_test(con, run_id):
+            # A test run's bundle describes the test run: its own new
+            # questions are is_test, and leaving them out would bundle only
+            # the production questions it re-forecast.
+            LOGGER.info("Run %s is a test run (its forecast rows are is_test) — including test rows", run_id)
+            include_test = True
         questions = _questions_for_run(con, run_id, include_test)
         if not questions:
             LOGGER.warning("Run %s has no questions — nothing to bundle", run_id)

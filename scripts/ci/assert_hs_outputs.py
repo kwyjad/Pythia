@@ -254,8 +254,13 @@ def run_assertion(db_url: str, hs_run_id: str, stage: str) -> int:
             triage_count = 0
 
         try:
+            # The run's question SET (run_questions), not the questions whose
+            # origin names it: a same-epoch test run owns none of the rows.
+            from pythia.run_questions import in_run_clause  # noqa: PLC0415
+
+            _clause, _n = in_run_clause(con, "q")
             question_count_row = con.execute(
-                "SELECT COUNT(*) FROM questions WHERE hs_run_id = ?", [hs_run_id]
+                f"SELECT COUNT(*) FROM questions q WHERE {_clause}", [hs_run_id] * _n
             ).fetchone()
             question_count = question_count_row[0] if question_count_row else 0
         except Exception:

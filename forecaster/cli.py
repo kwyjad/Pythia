@@ -58,6 +58,8 @@ from pythia.db.schema import connect, ensure_schema
 from pythia.tools._db_utils import column_exists
 from pythia.db.schema import connect as pythia_connect
 from pythia.test_mode import is_test_mode
+from pythia.run_questions import stamp_forecaster_run
+from pythia.run_questions import table_exists as run_questions_table_exists
 from pythia.web_research import fetch_evidence_pack
 from forecaster.hs_utils import load_hs_triage_entry
 from forecaster.self_search import (
@@ -1529,6 +1531,68 @@ def _sanitize_markdown_chunks(chunks: List[Any]) -> List[str]:
             # happened, and failing to write the human log is worse.
             continue
     return sanitized
+
+
+def _select_run_question_rows(
+    con: duckdb.DuckDBPyConnection,
+    hs_run_id: str,
+    allowed_iso3s: Set[str],
+    limit: Optional[int] = None,
+) -> List[tuple]:
+    """The active questions an HS run asked for, as (question_id, hs_run_id,
+    iso3, hazard_code, metric, target_month, window_start_date,
+    window_end_date, wording, track) rows.
+
+    Read through ``run_questions`` (Oct 2026), so a test run in an epoch
+    production has already opened finds the production questions it asked
+    for; ``hs_run_id`` and ``track`` are the run's own.
+    """
+    placeholders = ",".join(["?"] * len(allowed_iso3s))
+    # Check if track column exists (backward compat with older DBs)
+    q_cols = {r[0] for r in con.execute("DESCRIBE questions").fetchall()}
+    q_track = "q.track" if "track" in q_cols else "NULL"
+    # A run's questions are the ones IT asked for (run_questions),
+    # not the ones whose origin names it: a test run in an epoch
+    # production has already opened changes nothing on those rows,
+    # and the 6 Oct 2026 rehearsal found 2 of its 21 questions that
+    # way. hs_run_id and track are the run's own, so the evidence
+    # loaders read this run's triage and grounding.
+    if run_questions_table_exists(con):
+        sql = f"""
+            SELECT
+                q.question_id, ? AS hs_run_id, q.iso3, q.hazard_code, q.metric,
+                q.target_month, q.window_start_date, q.window_end_date, q.wording,
+                COALESCE(rq.track, {q_track}) AS track
+            FROM questions q
+            LEFT JOIN run_questions rq
+              ON rq.question_id = q.question_id AND rq.hs_run_id = ?
+            WHERE q.status = 'active'
+              AND (rq.question_id IS NOT NULL OR q.hs_run_id = ?)
+              AND q.iso3 IN ({placeholders})
+              AND UPPER(COALESCE(q.hazard_code, '')) <> 'ACO'
+            ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, q.question_id
+        """
+        params: List[Any] = [hs_run_id, hs_run_id, hs_run_id] + list(allowed_iso3s)
+    else:
+        sql = f"""
+            SELECT
+                q.question_id, q.hs_run_id, q.iso3, q.hazard_code, q.metric,
+                q.target_month, q.window_start_date, q.window_end_date, q.wording,
+                {q_track} AS track
+            FROM questions q
+            WHERE q.status = 'active'
+              AND q.hs_run_id = ?
+              AND q.iso3 IN ({placeholders})
+              AND UPPER(COALESCE(q.hazard_code, '')) <> 'ACO'
+            ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, q.question_id
+        """
+        params = [hs_run_id] + list(allowed_iso3s)
+
+    if limit and limit > 0:
+        sql += "\n                LIMIT ?"
+        params.append(limit)
+
+    return con.execute(sql, params).fetchall()
 
 
 def _select_hs_run_id_for_forecast(
@@ -6764,29 +6828,9 @@ def main() -> None:
                 )
                 return
 
-            placeholders = ",".join(["?"] * len(allowed_iso3s))
-            # Check if track column exists (backward compat with older DBs)
-            q_cols = {r[0] for r in con.execute("DESCRIBE questions").fetchall()}
-            track_expr = "track" if "track" in q_cols else "NULL AS track"
-            sql = f"""
-                SELECT
-                    question_id, hs_run_id, iso3, hazard_code, metric,
-                    target_month, window_start_date, window_end_date, wording,
-                    {track_expr}
-                FROM questions
-                WHERE status = 'active'
-                  AND hs_run_id = ?
-                  AND iso3 IN ({placeholders})
-                  AND UPPER(COALESCE(hazard_code, '')) <> 'ACO'
-                ORDER BY iso3, hazard_code, metric, target_month, question_id
-            """
-            params: List[Any] = [hs_run_id] + list(allowed_iso3s)
-
-            if args.limit and args.limit > 0:
-                sql += "\n                LIMIT ?"
-                params.append(args.limit)
-
-            raw_rows = con.execute(sql, params).fetchall()
+            raw_rows = _select_run_question_rows(
+                con, hs_run_id, allowed_iso3s, limit=args.limit
+            )
         finally:
             con.close()
 
@@ -6825,6 +6869,21 @@ def main() -> None:
             )
         os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
         reset_provider_failures_for_run(run_id)
+        # Which HS run this forecaster run served: the bundles, Sibyl and the
+        # interpreter map a forecaster run back to its HS run through this.
+        try:
+            _link_con = connect()
+            try:
+                stamp_forecaster_run(
+                    _link_con,
+                    hs_run_id=hs_run_id,
+                    forecaster_run_id=run_id,
+                    question_ids=[q["question_id"] for q in questions],
+                )
+            finally:
+                _link_con.close()
+        except Exception as exc:  # noqa: BLE001 - a link must never stop a forecast
+            print(f"[warn] run_questions: forecaster run not stamped: {exc}")
         n_track1 = sum(1 for q in questions if q.get("track") == 1)
         n_track2 = sum(1 for q in questions if q.get("track") == 2)
         print(f"[v2] run_id={run_id} | questions={len(questions)} (track1={n_track1}, track2={n_track2})")

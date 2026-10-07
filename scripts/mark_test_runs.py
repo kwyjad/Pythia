@@ -31,6 +31,7 @@ HS_RUN_ID_TABLES = [
     "hs_hazard_tail_packs",
     "hs_adversarial_checks",
     "questions",
+    "run_questions",
 ]
 
 # Tables keyed by either run_id or hs_run_id

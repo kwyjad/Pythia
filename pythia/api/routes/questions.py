@@ -33,6 +33,7 @@ from pythia.api.core import (
     _table_exists,
     _table_has_columns,
     _test_filter,
+    _test_filter_for,
 )
 from pythia.api.models import (
     ContextBundle,
@@ -528,7 +529,9 @@ def _question_bundle_impl(
         order = {sid: idx for idx, sid in enumerate(scenario_ids)}
         scenarios = sorted(scenario_rows, key=lambda r: order.get(r.get("scenario_id"), len(order)))
 
-    resolved_forecaster_run_id = _resolve_forecaster_run_id(con, question_id, forecaster_run_id)
+    resolved_forecaster_run_id = _resolve_forecaster_run_id(
+        con, question_id, forecaster_run_id, include_test=include_test
+    )
 
     research = None
     ensemble_spd: List[Dict[str, Any]] = []
@@ -661,13 +664,16 @@ def _question_bundle_impl(
 
     scores: List[Dict[str, Any]] = []
     if _table_exists(con, "scores") and _table_has_columns(con, "scores", ["question_id", "score_type", "value"]):
+        # Scores of a test run's forecast on a production question are
+        # test-stamped; a production page must not show them.
+        scores_test = _test_filter_for(con, "scores", include_test)
         try:
             scores = _rows_from_cursor(_execute(
                 con,
-                """
+                f"""
                 SELECT *
                 FROM scores
-                WHERE question_id = :question_id
+                WHERE question_id = :question_id{scores_test}
                 ORDER BY created_at DESC NULLS LAST, horizon_m ASC NULLS LAST, score_type ASC, model_name ASC NULLS LAST
                 """,
                 {"question_id": question_id},

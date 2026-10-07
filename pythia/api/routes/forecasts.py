@@ -97,6 +97,12 @@ def get_forecasts_ensemble(
         """
         where_bits = []
         where_bits.append("q.rn = 1")
+        # latest_q filters the QUESTION only; a same-epoch test run forecasts
+        # the production question row itself, so its test-stamped forecast
+        # rows must be excluded here too.
+        fe_test = _test_filter(include_test, "fe")
+        if fe_test:
+            where_bits.append(fe_test.replace(" AND ", "", 1))
         if horizon_m is not None:
             where_bits.append("fe.horizon_m = :horizon_m")
         if where_bits:
