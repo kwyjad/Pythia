@@ -143,6 +143,7 @@ def format_rainfall_block(
     leads = sorted(set(below) | set(above) | set(anomaly))
     climatology = _pct(_CLIMATOLOGY_SHARE)
 
+    missing_leads = [lead for lead in leads if lead not in below and lead not in above]
     if not below and not above:
         outlook = f"Rainfall tercile probabilities {RAINFALL_PROBABILITY_MISSING}."
     else:
@@ -161,11 +162,17 @@ def format_rainfall_block(
             f"{_pct(sum(a) / len(a) if a else None)}, averaged over {span}; "
             f"an ordinary month is {climatology} for each"
         )
+        if missing_leads:
+            names = ", ".join(str(lead) for lead in missing_leads)
+            subject = f"Lead {names} carries" if len(missing_leads) == 1 else f"Leads {names} carry"
+            outlook += f". {subject} no probability (CPC publishes none over a dry-season or arid mask)"
 
     parts = []
     for lead in leads:
         if lead not in below and lead not in above:
-            prob = f"tercile probabilities {RAINFALL_PROBABILITY_MISSING}"
+            # The reason is stated once in the outlook line; repeating it on
+            # every lead put seven copies of one sentence in the prompt.
+            prob = "no tercile probability"
         else:
             prob = f"dry {_pct(below.get(lead))}, wet {_pct(above.get(lead))} (ordinary {climatology} each)"
         if lead in anomaly:
