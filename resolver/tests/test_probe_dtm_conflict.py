@@ -145,3 +145,43 @@ def test_hdx_summary_reads_groups_and_dates():
 def test_the_key_never_survives_in_a_recorded_text():
     assert "sekret123" not in scrub("401 for key sekret123", "sekret123")
     assert scrub("nothing to hide", "") == "nothing to hide"
+
+
+def test_a_spent_budget_stops_asking_and_names_what_was_skipped(monkeypatch):
+    """The first run made ~85 requests at a 90-second timeout, was killed at
+    the step's 30-minute cap, and wrote no report at all."""
+    import datetime as dt
+
+    from tools import probe_dtm_conflict as probe
+
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        url = "https://example.test"
+        headers = {"Content-Type": "application/json"}
+        text = "{}"
+
+        def json(self):
+            return {"result": []}
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return _Resp()
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    now = [0.0]
+    rec = probe.Recorder("", delay=0.0, budget_sec=10.0, clock=lambda: now[0])
+
+    def tick(url, **kw):
+        now[0] += 4.0  # each request costs 4 seconds of the 10-second budget
+        return fake_get(url, **kw)
+
+    monkeypatch.setattr(requests, "get", tick)
+    out = probe.probe_dtm(rec, ["AFG", "SDN", "SOM", "ETH"], today=dt.date(2026, 10, 7),
+                          months=12, sample_admin_levels=0)
+    assert len(calls) == 3  # the two catalogue routes, then one country
+    assert out["skipped_for_budget"] == ["SDN", "SOM", "ETH"]
+    assert probe.REQUEST_TIMEOUT_SEC <= 30

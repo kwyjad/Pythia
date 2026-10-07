@@ -471,15 +471,32 @@ def hdx_summary(packages: list[Mapping[str, Any]]) -> dict[str, Any]:
 # Network (not unit-tested; the workflow runs it)
 # --------------------------------------------------------------------------
 
+REQUEST_TIMEOUT_SEC = 30.0
+# The step's cap is 30 minutes and the report is written at the end, so the
+# probe stops asking well inside it and says what it did not reach. Its first
+# run made ~85 requests at a 90-second timeout and was killed with nothing
+# written.
+BUDGET_MIN = 20.0
+
+
 class Recorder:
-    def __init__(self, key: str, delay: float = 0.5) -> None:
+    def __init__(self, key: str, delay: float = 0.5, *, budget_sec: float | None = None,
+                 clock: Any = time.monotonic) -> None:
         self.key = key
         self.delay = delay
         self.log: list[dict[str, Any]] = []
+        self.clock = clock
+        self.deadline = None if budget_sec is None else clock() + float(budget_sec)
+
+    def out_of_time(self) -> bool:
+        return self.deadline is not None and self.clock() >= self.deadline
 
     def get(self, url: str, *, params: Mapping[str, Any] | None = None,
-            auth: bool = False, timeout: float = 90.0) -> Any:
+            auth: bool = False, timeout: float = REQUEST_TIMEOUT_SEC) -> Any:
         """GET and parse JSON; record the call; return None on any failure."""
+        if self.out_of_time():
+            self.log.append({"url": url, "params": dict(params or {}), "skipped": "budget spent"})
+            return None
         import requests
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -504,6 +521,7 @@ class Recorder:
             return None
         finally:
             self.log.append(entry)
+            print(f"[probe] {entry.get('status', 'ERR')} {url} {entry.get('error', '')}"[:200], flush=True)
             time.sleep(self.delay)
 
 
@@ -522,6 +540,9 @@ def probe_dtm(rec: Recorder, countries: list[str], *, today: dt.date, months: in
         }
     per_country_records: dict[str, list[dict]] = {}
     for iso3 in countries:
+        if rec.out_of_time():
+            out.setdefault("skipped_for_budget", []).append(iso3)
+            continue
         payload = rec.get(
             f"{DTM_BASE}/admin0",
             params={"Admin0Pcode": iso3, "FromReportingDate": start.isoformat(),
@@ -567,6 +588,9 @@ def probe_hdx(rec: Recorder, countries: list[str]) -> dict[str, Any]:
     out["search"] = hdx_summary(pkgs)
     per_country: dict[str, Any] = {}
     for iso3 in countries:
+        if rec.out_of_time():
+            out.setdefault("skipped_for_budget", []).append(iso3)
+            continue
         payload = rec.get(HDX_SEARCH, params={
             "q": "dtm",
             "fq": f"organization:{IOM_ORG} groups:{iso3.lower()}",
@@ -590,6 +614,9 @@ def probe_hdx(rec: Recorder, countries: list[str]) -> dict[str, Any]:
 def _markdown(report: dict[str, Any]) -> str:
     lines = ["# DTM conflict displacement probe", ""]
     lines.append(f"Run: {report['today']}; key present: {report['key_present']}")
+    skipped = report.get("skipped_for_budget") or {}
+    if any(skipped.values()):
+        lines.append(f"Budget spent before these were asked: {skipped}")
     dtm = report.get("dtm") or {}
     summ = dtm.get("summary") or {}
     lines.append("")
@@ -639,6 +666,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--months", type=int, default=36)
     parser.add_argument("--sample-admin-levels", type=int, default=3,
                         help="countries whose admin1/admin2 routes are also asked")
+    parser.add_argument("--budget-min", type=float, default=BUDGET_MIN,
+                        help="stop asking after this many minutes and report what was skipped")
     args = parser.parse_args(argv)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -654,7 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     if not key:
         print("::warning::no DTM_API_KEY; asking the DTM routes unauthenticated and HDX")
-    rec = Recorder(key)
+    rec = Recorder(key, budget_sec=args.budget_min * 60.0)
     try:
         report["dtm"] = probe_dtm(rec, countries, today=today, months=args.months,
                                   sample_admin_levels=args.sample_admin_levels)
@@ -664,6 +693,10 @@ def main(argv: list[str] | None = None) -> int:
         report["hdx"] = probe_hdx(rec, countries)
     except Exception as exc:  # noqa: BLE001
         report["hdx"] = {"error": scrub(f"{type(exc).__name__}: {exc}", key)}
+    report["skipped_for_budget"] = {
+        "dtm": (report.get("dtm") or {}).get("skipped_for_budget", []),
+        "hdx": (report.get("hdx") or {}).get("skipped_for_budget", []),
+    }
     report["requests"] = rec.log
     report["request_status_counts"] = dict(Counter(str(e.get("status")) for e in rec.log))
     text_json = scrub(json.dumps(report, indent=2, default=str), key)
