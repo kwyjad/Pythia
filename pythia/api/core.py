@@ -753,6 +753,9 @@ def _count_distinct_active_questions(
     if "question_id" not in _table_columns(con, table):
         return 0
     test_clause = "" if include_test else " AND COALESCE(q.is_test, FALSE) = FALSE"
+    # The row's own is_test too: a test run forecasting a production question
+    # writes test-stamped rows against a production question id.
+    test_clause += _test_filter_for(con, table, include_test, "t")
     try:
         row = con.execute(
             f"""
@@ -799,17 +802,30 @@ def _fetch_one(con: duckdb.DuckDBPyConnection, sql: str, params: Dict[str, Any])
 
 
 def _resolve_forecaster_run_id(
-    con: duckdb.DuckDBPyConnection, question_id: str, forecaster_run_id: Optional[str]
+    con: duckdb.DuckDBPyConnection,
+    question_id: str,
+    forecaster_run_id: Optional[str],
+    include_test: bool = False,
 ) -> Optional[str]:
+    """The forecaster run a question page shows.
+
+    An explicit *forecaster_run_id* is an operator override and is returned
+    as is. Otherwise the latest run that forecast the question — and with
+    ``include_test=False`` the latest PRODUCTION run: question ids are
+    epoch-keyed, so a same-month test run forecasts the production question
+    row itself (its forecast rows carry ``is_test = TRUE``), and choosing by
+    recency alone would put the test forecast on a production page.
+    """
     if forecaster_run_id:
         return forecaster_run_id
     if not _table_exists(con, "forecasts_ensemble"):
         return None
+    test_clause = _test_filter_for(con, "forecasts_ensemble", include_test)
     row = con.execute(
-        """
+        f"""
         SELECT run_id
         FROM forecasts_ensemble
-        WHERE question_id = ?
+        WHERE question_id = ?{test_clause}
         ORDER BY COALESCE(created_at, '1970-01-01'::TIMESTAMP) DESC, run_id DESC
         LIMIT 1
         """,
@@ -961,6 +977,10 @@ def _latest_forecasted_target_month(
     if forecaster_run_id:
         run_clause = " AND fe.run_id = :run_id"
         params["run_id"] = forecaster_run_id
+    else:
+        # A test run's forecast rows on a production question must not move
+        # the default target month (the explicit run id is an override).
+        _tf += _test_filter_for(con, "forecasts_ensemble", include_test, "fe")
     row = _execute(
         con,
         f"""

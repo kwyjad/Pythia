@@ -129,7 +129,7 @@ def _load_triage_models(con) -> dict[str, str]:
     return dict(zip(top["hs_run_id"], top["model"]))
 
 
-def _standardize_forecasts(conn, table: str) -> pd.DataFrame:
+def _standardize_forecasts(conn, table: str, include_test: bool = False) -> pd.DataFrame:
     if not _table_exists(conn, table):
         return pd.DataFrame()
 
@@ -161,6 +161,11 @@ def _standardize_forecasts(conn, table: str) -> pd.DataFrame:
     ]
     if status_col:
         filter_bits.append(f"LOWER(CAST({status_col} AS VARCHAR)) = 'ok'")
+    # The forecast row's own is_test, before the latest-run pick below: a
+    # same-epoch test run forecasts the production question row itself, and
+    # a production export must keep showing the production forecast.
+    if not include_test and "is_test" in cols:
+        filter_bits.append("COALESCE(is_test, FALSE) = FALSE")
     filter_expr = " AND ".join(filter_bits)
 
     sql = f"""
@@ -319,7 +324,7 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
 
     forecasts = []
     for table in ("forecasts_ensemble", "forecasts_raw"):
-        df = _standardize_forecasts(con, table)
+        df = _standardize_forecasts(con, table, include_test=include_test)
         if not df.empty:
             forecasts.append(df)
 
@@ -757,7 +762,7 @@ def build_ensemble_scores_export(con, model_filter: str, include_test: bool = Fa
     _add_triage_columns(con, base)
 
     # ── 5. Forecasts → month×bin columns + EIV ────────────────────────
-    _add_forecast_columns(con, base, model_filter)
+    _add_forecast_columns(con, base, model_filter, include_test=include_test)
 
     # ── 6. Resolutions per horizon ────────────────────────────────────
     _add_resolution_columns(con, base)
@@ -880,7 +885,9 @@ def _add_triage_columns(con, df: pd.DataFrame) -> None:
     return
 
 
-def _add_forecast_columns(con, df: pd.DataFrame, model_filter: str) -> None:
+def _add_forecast_columns(
+    con, df: pd.DataFrame, model_filter: str, include_test: bool = False
+) -> None:
     """Add month×bin forecast columns and EIV columns to *df* in-place."""
 
     # initialise columns
@@ -916,6 +923,10 @@ def _add_forecast_columns(con, df: pd.DataFrame, model_filter: str) -> None:
     status_filter = (
         f"AND LOWER(CAST({status_col} AS VARCHAR)) = 'ok'" if status_col else ""
     )
+    # Test-run forecasts on a production question must not reach a
+    # production export; the drop_duplicates below keeps an arbitrary row.
+    if not include_test and "is_test" in fe_cols:
+        status_filter += " AND COALESCE(is_test, FALSE) = FALSE"
 
     fc = con.execute(
         f"""
@@ -1097,6 +1108,15 @@ def build_model_scores_export(con, include_test: bool = False) -> pd.DataFrame:
     track_select = "q.track AS track," if has_track else ""
     track_group = ", q.track" if has_track else ""
     track_order = ", track" if has_track else ""
+    # include_test was accepted and never applied: test questions and the
+    # test-stamped scores of a test run's forecast on a production question
+    # both reached the production export.
+    scores_test = ""
+    if not include_test:
+        if "is_test" in _table_columns(con, "scores"):
+            scores_test += " AND COALESCE(s.is_test, FALSE) = FALSE"
+        if "is_test" in q_cols:
+            scores_test += " AND COALESCE(q.is_test, FALSE) = FALSE"
 
     df = con.execute(
         f"""
@@ -1120,6 +1140,7 @@ def build_model_scores_export(con, include_test: bool = False) -> pd.DataFrame:
             MAX(   CASE WHEN s.score_type = 'crps'  THEN s.value END) AS max_crps
         FROM scores s
         JOIN questions q ON s.question_id = q.question_id
+        WHERE 1=1{scores_test}
         GROUP BY s.model_name, q.hazard_code, UPPER(q.metric){track_group}
         ORDER BY forecast_model, hazard, metric{track_order}
         """
@@ -1162,6 +1183,23 @@ def build_model_scores_export(con, include_test: bool = False) -> pd.DataFrame:
                 )
 
     return df[columns].reset_index(drop=True)
+
+
+def _rationale_test_clause(con, table: str, alias: str, include_test: bool) -> str:
+    """Exclude test questions AND test forecast rows (column-guarded).
+
+    The rationale export took ``include_test`` and never applied it; a
+    same-epoch test run forecasts the production question row itself, so
+    the forecast row's own ``is_test`` must be filtered as well.
+    """
+    if include_test:
+        return ""
+    clause = ""
+    if "is_test" in _table_columns(con, "questions"):
+        clause += " AND COALESCE(q.is_test, FALSE) = FALSE"
+    if "is_test" in _table_columns(con, table):
+        clause += f" AND COALESCE({alias}.is_test, FALSE) = FALSE"
+    return clause
 
 
 def build_rationale_export(
@@ -1220,6 +1258,7 @@ def build_rationale_export(
                 " WHERE UPPER(q.hazard_code) = ?"
                 "  AND fr.human_explanation IS NOT NULL"
                 "  AND TRIM(CAST(fr.human_explanation AS VARCHAR)) != ''"
+                + _rationale_test_clause(con, "forecasts_raw", "fr", include_test)
             )
             params.append(hazard_upper)
             if model_name:
@@ -1247,6 +1286,7 @@ def build_rationale_export(
                 " WHERE UPPER(fe.hazard_code) = ?"
                 "  AND fe.human_explanation IS NOT NULL"
                 "  AND TRIM(CAST(fe.human_explanation AS VARCHAR)) != ''"
+                + _rationale_test_clause(con, "forecasts_ensemble", "fe", include_test)
             )
             params.append(hazard_upper)
             if model_name:

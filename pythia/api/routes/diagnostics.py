@@ -699,6 +699,7 @@ def diagnostics_kpi_scopes(
                 forecast_ids_sql = (
                     f"SELECT DISTINCT question_id FROM {forecast_source_table} "
                     f"WHERE {forecast_source_ts} >= ? AND {forecast_source_ts} < ?"
+                    f"{_test_filter_for(con, forecast_source_table, include_test)}"
                 )
                 forecast_params = list(question_ids_params[:2])
                 if forecast_source_phase:
@@ -745,6 +746,7 @@ def diagnostics_kpi_scopes(
                 forecast_ids_sql = (
                     f"SELECT DISTINCT question_id FROM {forecast_source_table} "
                     f"WHERE {forecast_source_ts} >= ? AND {forecast_source_ts} < ?"
+                    f"{_test_filter_for(con, forecast_source_table, include_test)}"
                 )
                 forecast_params = list(question_ids_params[:2])
                 if forecast_source_phase:
@@ -1023,6 +1025,7 @@ def diagnostics_kpi_scopes(
                 question_ids_sql = (
                     f"SELECT DISTINCT question_id FROM {question_source_table} "
                     f"WHERE {question_source_ts} >= ? AND {question_source_ts} < ?"
+                    f"{_test_filter_for(con, question_source_table, include_test)}"
                 )
                 question_ids_params = [start_iso, end_iso]
                 _fw_start = _shift_ym(parsed[0], parsed[1], 1)
@@ -1600,11 +1603,14 @@ def diagnostics_run_summary(
         ) or 0
 
     if _table_exists(con, "scores") and q_filter:
+        # The score rows' own is_test: a test run's forecast on a production
+        # question is scored as test data, and must not move this average.
+        tf_s = _test_filter_for(con, "scores", include_test, "s")
         for score_type in ["brier", "log", "crps"]:
             row = _q(
                 f"SELECT AVG(s.value), MEDIAN(s.value) FROM scores s "
                 f"JOIN questions q ON s.question_id = q.question_id "
-                f"WHERE {q_filter}{tf_q} AND s.score_type = ? "
+                f"WHERE {q_filter}{tf_q}{tf_s} AND s.score_type = ? "
                 f"AND s.model_name LIKE 'ensemble_%'",
                 q_params + [score_type],
             )

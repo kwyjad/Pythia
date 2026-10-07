@@ -1205,6 +1205,13 @@ def get_country_run_summary(conn, run_id: str, iso3: str, include_test: bool = F
                     LOGGER.exception("Failed to count forecasts (run_id join)")
                     summary["notes"].append("forecasts_count_failed")
             elif q_run_col and q_iso_col:
+                # Joined through the question's HS run, so a same-epoch test
+                # run's forecast rows on that question would count here.
+                fe_test = (
+                    " AND COALESCE(fe.is_test, FALSE) = FALSE"
+                    if not include_test and "is_test" in fe_cols
+                    else ""
+                )
                 summary["diagnostics"]["forecasts_source"] = "fallback_join_via_questions"
                 summary["diagnostics"]["forecasts_run_id_missing_fallback"] = True
                 LOGGER.info(
@@ -1219,7 +1226,7 @@ def get_country_run_summary(conn, run_id: str, iso3: str, include_test: bool = F
                         SELECT COUNT(DISTINCT fe.{question_col})
                         FROM forecasts_ensemble fe
                         JOIN questions q ON q.question_id = fe.{question_col}
-                        WHERE q.{q_run_col} = ? AND UPPER(q.{q_iso_col}) = ?
+                        WHERE q.{q_run_col} = ? AND UPPER(q.{q_iso_col}) = ?{fe_test}
                         """,
                         [run_id, iso3_upper],
                     ).fetchone()

@@ -155,6 +155,15 @@ on:
       # bundles) and the deviation is_test rule.
       - "pythia/run_questions.py"
       - "tests/test_run_questions_link.py"
+      # Production views ignore a test run's forecasts on a production
+      # question; the two toggle suites ran in no workflow before.
+      - "pythia/api/routes/**"
+      - "resolver/query/downloads.py"
+      - "resolver/query/debug_ui.py"
+      - "resolver/query/countries_index.py"
+      - "pythia/tests/test_api_test_run_on_production_question.py"
+      - "tests/test_api_test_toggle.py"
+      - "tests/test_api_is_test_run_selection.py"
       - "sibyl/select_questions.py"
       - "sibyl/spd.py"
       - "scripts/ci/sibyl_bundle_context.py"
@@ -383,6 +392,9 @@ jobs:
             tests/test_canonical_guard.py \
             tests/test_create_questions_from_triage.py \
             tests/test_run_questions_link.py \
+            pythia/tests/test_api_test_run_on_production_question.py \
+            tests/test_api_test_toggle.py \
+            tests/test_api_is_test_run_selection.py \
             scripts/ci/tests/test_batch_economics.py \
             scripts/ci/tests/test_batch_canary.py \
             scripts/ci/tests/test_stage_health.py \
