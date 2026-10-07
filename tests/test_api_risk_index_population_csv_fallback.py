@@ -43,6 +43,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
+            hazard_code TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE,
@@ -77,8 +78,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     )
     con.execute(
         """
-        INSERT INTO forecasts_ensemble (question_id, month_index, bucket_index, probability)
-        VALUES ('q1', 1, 2, 1.0);
+        INSERT INTO forecasts_ensemble (question_id, hazard_code, month_index, bucket_index, probability)
+        VALUES ('q1', 'FL', 1, 2, 1.0);
         """
     )
     con.execute(

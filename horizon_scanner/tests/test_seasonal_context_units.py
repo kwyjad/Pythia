@@ -34,7 +34,7 @@ def db(tmp_path):
 def test_units_are_printed_and_sigma_is_not(db):
     out = sc.load_seasonal_forecasts("SOM", db_url=db)
     assert "(+0.80 °C)" in out["nmme_temp_outlook"]
-    assert "(-1.20 mm/day)" in out["nmme_precip_outlook"]
+    assert "-1.20 mm/day" in out["nmme_precip_detail"]
     assert "σ" not in "".join(str(v) for v in out.values())
 
 

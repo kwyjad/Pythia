@@ -632,8 +632,11 @@ def test_fetch_via_gemini_retries_once_when_missing_grounding(monkeypatch):
     assert pack.error["type"] == "grounding_missing"
     assert pack.debug.get("retry_used") is True
     assert pack.debug.get("retry_success") is False
-    assert len(calls) == 2
-    assert "You must use Google Search" in calls[1]["body"]["contents"][0]["parts"][0]["text"]
+    # The override model is asked twice (the retry), then the backend falls
+    # back to the grounding_gemini role model, which is asked twice as well.
+    override = [c for c in calls if "gemini-test-model" in c["url"]]
+    assert len(override) == 2
+    assert "You must use Google Search" in override[1]["body"]["contents"][0]["parts"][0]["text"]
     assert pack.debug.get("grounding_metadata_present") is False
     assert pack.debug.get("response_has_candidates") is True
 

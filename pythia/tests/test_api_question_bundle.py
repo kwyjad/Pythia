@@ -275,10 +275,27 @@ def test_question_bundle_llm_calls_toggle(client: TestClient) -> None:
 def test_question_bundle_llm_calls_with_transcripts(client: TestClient) -> None:
     resp = client.get(
         "/v1/question_bundle",
-        params={"question_id": "Q1", "include_llm_calls": True, "include_transcripts": True},
+        params={
+            "question_id": "Q1", "include_llm_calls": True, "include_transcripts": True,
+            "transcript_phases": "hs_triage,hs_web_research",
+        },
     )
     assert resp.status_code == 200
     data = resp.json()
 
     assert data["llm_calls"]["transcripts_included"] is True
     assert any("prompt_text" in row for row in data["llm_calls"]["rows"])
+
+
+def test_question_bundle_says_no_transcripts_when_no_phase_is_named(client: TestClient) -> None:
+    # Transcripts are read per named phase only; asked for with no phase named,
+    # none are sent, and the flag used to claim otherwise.
+    resp = client.get(
+        "/v1/question_bundle",
+        params={"question_id": "Q1", "include_llm_calls": True, "include_transcripts": True},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["llm_calls"]["transcripts_included"] is False
+    assert all("prompt_text" not in row for row in data["llm_calls"]["rows"])

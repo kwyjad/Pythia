@@ -20,6 +20,15 @@ on:
   pull_request:
     paths:
       - "forecaster/**"
+      # Tests that ran in no workflow until Oct 2026 and had gone red unseen.
+      - "pythia/tests/test_api_question_bundle.py"
+      - "tests/test_acaps.py"
+      - "tests/test_adversarial_check.py"
+      - "tests/test_api_risk_index_latest_forecast.py"
+      - "tests/test_api_risk_index_population_csv_fallback.py"
+      - "tests/test_web_research.py"
+      - "pythia/acaps.py"
+      - "pythia/adversarial_check.py"
       - "horizon_scanner/**"
       - "pythia/db/**"
       # Indicative ACE/PA months stay out of calibration, advice, the Sibyl
@@ -297,7 +306,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
-          pip install pytest
+          pip install pytest pytest-asyncio
 
       - name: === Running Forecaster SPD unit tests ===
         env:
@@ -335,6 +344,7 @@ jobs:
             forecaster/tests/test_rc_shift_guidance.py \
             forecaster/tests/test_rc_shift_split.py \
             forecaster/tests/test_shared_advice_observations.py \
+            forecaster/tests/test_advice_db_url.py \
             scripts/ci/tests/test_rc_shift_diagnostic.py
 
       - name: Run family advice + recalibration tests
@@ -438,6 +448,22 @@ jobs:
             pythia/tests/test_api_forecasts_limit.py \
             tests/test_api_public_read_admin_only.py \
             pythia/tests/test_gdelt.py
+
+      - name: Run formerly orphaned tests
+        run: |
+          # These ran in no workflow and had drifted red: stale assertions
+          # after the INFORM 0-10 scale, the adversarial verdict enum and the
+          # FEWS NET value_high column; fixtures missing columns the schema
+          # carries; the async self-search tests had no pytest-asyncio.
+          pytest -vv \
+            forecaster/tests/test_dr_hazard_prompt.py \
+            forecaster/tests/test_self_search.py \
+            pythia/tests/test_api_question_bundle.py \
+            tests/test_acaps.py \
+            tests/test_adversarial_check.py \
+            tests/test_api_risk_index_latest_forecast.py \
+            tests/test_api_risk_index_population_csv_fallback.py \
+            tests/test_web_research.py
 
       - name: Run base-rate history + rendering tests
         run: |

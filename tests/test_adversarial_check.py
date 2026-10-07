@@ -254,7 +254,7 @@ class TestRunAdversarialCheck:
             run_id="test-run-001",
         )
         assert result is not None
-        assert result["net_assessment"] == "moderate"
+        assert result["net_assessment"] == "moderate_counter"
         assert len(result["counter_evidence"]) == 1
         assert result["counter_evidence"][0]["claim"] == "Peace talks resumed"
         assert result["grounded"] is True

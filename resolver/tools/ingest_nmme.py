@@ -185,10 +185,10 @@ def _earlier_issue_months(newest_issue: str, months: int) -> list[str]:
 
 #: The variables one NMME vintage carries. A vintage holding fewer is
 #: partial and is fetched again.
-#: tmp2m, prate and (since Oct 2026) prate_prob_below. A vintage holding
-#: only the first two is fetched again, which is how the backfill gives the
-#: last twelve issues their probability rows.
-_NMME_VARIABLES = 3
+#: tmp2m, prate, prate_prob_below and (since 7 Oct 2026) prate_prob_above.
+#: A vintage holding fewer is fetched again, which is how the backfill gives
+#: the last twelve issues their probability rows.
+_NMME_VARIABLES = 4
 
 
 def _vintage_is_held(con, year_month: str) -> bool:
