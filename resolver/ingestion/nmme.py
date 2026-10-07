@@ -70,6 +70,14 @@ PROB_BELOW_VARIABLE = "prate_prob_below"
 PROB_FTP_DIR = "/NMME/prob/netcdf"
 PROB_FILE_TEMPLATE = "prate.{ym}.prob.adj.mon.nc"
 UNITS[PROB_BELOW_VARIABLE] = "probability"
+#: The same file's chance of a TOP-tercile month (Oct 2026). The rainfall
+#: block in the prompts shows both beside the 1 in 3 climatology, because a
+#: forecast can move mass out of the middle tercile toward either end and the
+#: chance of a dry month alone cannot say which.
+PROB_ABOVE_VARIABLE = "prate_prob_above"
+UNITS[PROB_ABOVE_VARIABLE] = "probability"
+#: Which data variable in the CPC probability file each stored variable reads.
+PROB_FIELD_BY_VARIABLE = {PROB_BELOW_VARIABLE: "prob_below", PROB_ABOVE_VARIABLE: "prob_above"}
 #: A month is categorised ``below_normal`` when the chance of a bottom-tercile
 #: month is at least this. Climatology is 1/3, so 0.5 is a forecast that has
 #: moved half again above it; the drought gate's threshold lives in the
@@ -718,20 +726,26 @@ def _prob_as_fraction(da):
     return da
 
 
-def _aggregate_prob_nc(nc_path: Path, max_leads: int = MAX_LEAD_MONTHS) -> list[tuple[int, pd.DataFrame]]:
-    """Per-lead country means of the probability of below-normal precipitation.
+def _aggregate_prob_nc(
+    nc_path: Path,
+    max_leads: int = MAX_LEAD_MONTHS,
+    field: str = "prob_below",
+) -> list[tuple[int, pd.DataFrame]]:
+    """Per-lead country means of one tercile probability of precipitation.
 
-    Leads are numbered as the anomaly file's are (index + 1 on the target
-    axis), so the two variables of one issue speak for the same months.
+    ``field`` is ``prob_below`` (a bottom-tercile month) or ``prob_above``
+    (a top-tercile month). Leads are numbered as the anomaly file's are
+    (index + 1 on the target axis), so the variables of one issue speak for
+    the same months.
     """
     import xarray as xr
 
     ds = xr.open_dataset(nc_path, decode_times=False)
     try:
-        if "prob_below" not in ds.data_vars:
-            log.warning("NMME probability file %s has no prob_below: %s", nc_path.name, list(ds.data_vars))
+        if field not in ds.data_vars:
+            log.warning("NMME probability file %s has no %s: %s", nc_path.name, field, list(ds.data_vars))
             return []
-        da = _prepare_data_array(ds[["prob_below"]])
+        da = _prepare_data_array(ds[[field]])
         if da is None:
             return []
         da = _prob_as_fraction(da)
@@ -775,6 +789,8 @@ def _classify_tercile(anomaly: float, variable: Optional[str] = None) -> str:
     """Category from an anomaly in the variable's stored units (``UNITS``)."""
     if variable == PROB_BELOW_VARIABLE:
         return "below_normal" if anomaly >= PROB_BELOW_CATEGORY else "near_normal"
+    if variable == PROB_ABOVE_VARIABLE:
+        return "above_normal" if anomaly >= PROB_BELOW_CATEGORY else "near_normal"
     limit = CATEGORY_THRESHOLDS.get(variable or "", TERCILE_UPPER)
     if anomaly > limit:
         return "above_normal"
@@ -863,10 +879,11 @@ def fetch_and_process(
 
     prob_path = _download_prob_file(issue_ym, dest_dir)
     if prob_path is not None:
-        for lead_month, df in _aggregate_prob_nc(prob_path, max_leads=max_leads):
-            df["variable"] = PROB_BELOW_VARIABLE
-            df["lead_months"] = lead_month
-            all_rows.append(df)
+        for variable, field in PROB_FIELD_BY_VARIABLE.items():
+            for lead_month, df in _aggregate_prob_nc(prob_path, max_leads=max_leads, field=field):
+                df["variable"] = variable
+                df["lead_months"] = lead_month
+                all_rows.append(df)
 
     if not all_rows:
         log.warning("No country-level data produced from NMME files.")

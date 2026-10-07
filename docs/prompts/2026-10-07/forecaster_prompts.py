@@ -27,11 +27,9 @@ LOG = logging.getLogger(__name__)
 # NMME anomalies are stored in their own units (resolver.ingestion.nmme.UNITS).
 # Until Oct 2026 this note said "sigma", which they never were.
 NMME_UNITS_NOTE = (
-    "Note: Rainfall is read from CPC's tercile probabilities: the chance the month "
-    "falls in the driest or the wettest third of the model climatology, where an "
-    "ordinary month is 1 in 3 (33%) for each. The mm/day figure beside it is the "
-    "ensemble mean anomaly and carries no category: it is not standardised, so a dry "
-    "country's anomaly is small in absolute terms. Temperature anomalies are in °C."
+    "Note: Anomalies are departures from the model climatology: temperature in °C, "
+    "precipitation in mm/day (0.5 mm/day is about 15 mm a month). They are not "
+    "standardised, so a dry country's precipitation anomaly is small in absolute terms."
 )
 
 def _json_dumps_for_prompt(obj: Any, **kwargs: Any) -> str:
@@ -63,16 +61,6 @@ if importlib.util.find_spec("pythia.config") is not None:
 
 
 def _pythia_db_url_from_config() -> Optional[str]:
-    """The Pythia DB the prompt loaders read: ``PYTHIA_DB_URL``, then config.
-
-    Until Oct 2026 this read ``app.db_url`` alone, so a caller pointing
-    ``PYTHIA_DB_URL`` at another file (the advice-arm report, a local run)
-    had the advice loaders read ``data/resolver.duckdb`` behind its back.
-    The precedence is ``pythia.db.schema.get_db_url``'s.
-    """
-    env_url = os.getenv("PYTHIA_DB_URL", "").strip()
-    if env_url:
-        return env_url
     try:
         if _PYTHIA_CFG_LOAD is None:
             return None

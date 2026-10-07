@@ -231,14 +231,14 @@ class TestFormatInformSeverity:
 
     def test_prompt_contains_score(self):
         result = format_inform_severity_for_prompt(_sample_severity())
-        assert "4.2/5.0" in result
+        assert "4.2/10" in result
         assert "Very High" in result
 
     def test_prompt_contains_dimensions(self):
         result = format_inform_severity_for_prompt(_sample_severity())
-        assert "Impact 4.5/5" in result
-        assert "Conditions 4.0/5" in result
-        assert "Complexity 3.8/5" in result
+        assert "Impact 4.5/10" in result
+        assert "Conditions 4.0/10" in result
+        assert "Complexity 3.8/10" in result
 
     def test_prompt_contains_trend(self):
         result = format_inform_severity_for_prompt(_sample_severity())
@@ -251,7 +251,7 @@ class TestFormatInformSeverity:
 
     def test_prompt_contains_guidance(self):
         result = format_inform_severity_for_prompt(_sample_severity())
-        assert "severity benchmark" in result
+        assert "It runs 0 to 10" in result
 
     def test_spd_returns_empty_for_none(self):
         assert format_inform_severity_for_spd(None) == ""
@@ -259,7 +259,7 @@ class TestFormatInformSeverity:
     def test_spd_compact_format(self):
         result = format_inform_severity_for_spd(_sample_severity())
         assert "INFORM SEVERITY (SDN):" in result
-        assert "4.2/5.0" in result
+        assert "4.2/10" in result
         assert "D1m:" in result
 
     def test_spd_no_deltas(self):

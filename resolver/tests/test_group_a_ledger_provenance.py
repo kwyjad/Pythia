@@ -278,6 +278,7 @@ def test_a_vintage_already_held_is_not_fetched_again(monkeypatch):
         "('KEN','prate',1,DATE '2026-05-01',0.1,'mm/day'), "
         "('KEN','tmp2m',1,DATE '2026-05-01',0.2,'degC'), "
         "('KEN','prate_prob_below',1,DATE '2026-05-01',0.4,'probability'), "
+        "('KEN','prate_prob_above',1,DATE '2026-05-01',0.2,'probability'), "
         # A partial vintage (one variable) is fetched again.
         "('KEN','prate',1,DATE '2026-06-01',0.1,'mm/day')"
     )

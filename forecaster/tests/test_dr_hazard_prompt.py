@@ -132,8 +132,8 @@ class TestLoadFewsnetProjection:
 
         mock_con = MagicMock()
         mock_con.execute.return_value.fetchall.return_value = [
-            ("2026-04", 1_500_000, "2026-03-15"),
-            ("2026-05", 1_800_000, "2026-03-15"),
+            ("2026-04", 1_500_000, "2026-03-15", None),
+            ("2026-05", 1_800_000, "2026-03-15", None),
         ]
 
         with patch("forecaster.prompts._pythia_db_url_from_config", return_value=None), \

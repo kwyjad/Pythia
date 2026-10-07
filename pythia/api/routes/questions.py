@@ -179,7 +179,12 @@ def _build_llm_calls_bundle(
     filters: List[str] = []
     params: Dict[str, Any] = {"limit": limit_llm_calls}
     transcripts_available = {"prompt_text", "response_text"}.issubset(available_columns)
-    transcripts_included = include_transcripts and transcripts_available
+    # Transcripts are read only for the phases named in ``transcript_phases``
+    # (a whole-run transcript set is what put the API over its memory limit),
+    # so with none named nothing is sent and the flag must say so.
+    transcripts_included = (
+        include_transcripts and transcripts_available and bool(transcript_phases)
+    )
 
     if forecaster_run_id:
         if not _table_has_columns(con, "llm_calls", ["run_id", "question_id", "phase"]):

@@ -212,11 +212,10 @@ Key reasoning principles for flood forecasting:
 forecast months overlap with the country's wet/rainy season. During dry season months, \
 the prior should be heavily weighted toward the 0 and 1-<10k buckets. During peak rainy \
 season, the prior should shift substantially rightward based on historical flood impacts.
-- NMME seasonal outlook (if provided) is a key signal. Above-normal precipitation \
-anomalies (positive, in mm/day) during rainy season months are a moderate-to-strong signal for \
-rightward shift. Below-normal anomalies are a signal for leftward shift. The magnitude \
-matters relative to the season's normal rain: +0.5 mm/day is a modest signal in a wet \
-season, +2 mm/day a strong one.
+- NMME seasonal outlook (if provided) is a key signal. Read the chance of a wet month \
+(wettest third of the model climatology) against the 1 in 3 an ordinary month carries: \
+well above 33% during rainy season months is a moderate-to-strong signal for a \
+rightward shift, and a high chance of a dry month a signal for a leftward shift.
 - ENSO and IOD phases affect flood risk regionally. La Niña typically increases flood \
 risk in Southeast Asia, East Africa, and Australia. El Niño increases flood risk in \
 Peru, Ecuador, and parts of East Africa. If these teleconnection patterns are relevant \
@@ -261,8 +260,9 @@ is developing, later months should have more mass in higher buckets than earlier
 drought impacts. If the country has already experienced one or more poor rainy \
 seasons, the current forecast window starts from a weakened baseline — even \
 near-normal rainfall may not prevent significant drought impacts.
-- NMME seasonal outlook is especially important for drought. Below-normal \
-precipitation anomalies (negative, in mm/day) are a direct driver. Temperature anomalies \
+- NMME seasonal outlook is especially important for drought. A chance of a dry \
+month (driest third of the model climatology) well above the ordinary 1 in 3 is a \
+direct driver. Temperature anomalies \
 matter too: above-normal temperatures increase evapotranspiration and worsen \
 drought conditions even with near-normal rainfall.
 - IPC food insecurity phases (if provided in structured data) are one of the \

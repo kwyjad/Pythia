@@ -32,6 +32,20 @@ _VARIABLE_LABELS = {
 # never in, so they are not printed at all.
 _UNIT_SUFFIX = {"degC": " °C", "mm/day": " mm/day"}
 
+# CPC's tercile probabilities (resolver.ingestion.nmme): the chance the month
+# falls in the driest / wettest third of the model climatology. An ordinary
+# month is one in three for each, in every climate, which is why the rainfall
+# block reads these and not a category cut from the mm/day anomaly.
+_PROB_BELOW = "prate_prob_below"
+_PROB_ABOVE = "prate_prob_above"
+_CLIMATOLOGY_SHARE = 1.0 / 3.0
+
+RAINFALL_PROBABILITY_MISSING = (
+    "unavailable: CPC published no tercile probability for this country in "
+    "this issue (it publishes none over a dry-season or arid mask), so there "
+    "is no chance of a dry or wet month to give"
+)
+
 _TERCILE_LABELS = {
     "above_normal": "above-normal",
     "below_normal": "below-normal",
@@ -106,6 +120,62 @@ def _format_detail(variable: str, rows: list[dict]) -> str:
     return f"{label.capitalize()}: " + "; ".join(parts)
 
 
+def _pct(p: Optional[float]) -> str:
+    return "unavailable" if p is None else f"{round(p * 100):d}%"
+
+
+def format_rainfall_block(
+    prate_rows: list[dict],
+    below_rows: list[dict],
+    above_rows: list[dict],
+) -> tuple[str, str]:
+    """The rainfall outlook line and its per-lead detail.
+
+    Each lead shows the chance of a dry month (bottom third) and of a wet
+    month (top third) beside the one in three an ordinary month carries, and
+    the ensemble mean anomaly in mm/day with no category: a fixed +/-0.5
+    mm/day cut reads a different thing in the Sahel dry season and the
+    Central American wet season. A lead with no probability says so.
+    """
+    below = {int(r["lead_months"]): float(r["anomaly_value"]) for r in below_rows}
+    above = {int(r["lead_months"]): float(r["anomaly_value"]) for r in above_rows}
+    anomaly = {int(r["lead_months"]): float(r["anomaly_value"]) for r in prate_rows}
+    leads = sorted(set(below) | set(above) | set(anomaly))
+    climatology = _pct(_CLIMATOLOGY_SHARE)
+
+    if not below and not above:
+        outlook = f"Rainfall tercile probabilities {RAINFALL_PROBABILITY_MISSING}."
+    else:
+        short = [lead for lead in leads if lead in (1, 2, 3) and (lead in below or lead in above)]
+        b = [below[lead] for lead in short if lead in below]
+        a = [above[lead] for lead in short if lead in above]
+        if len(short) > 1:
+            span = f"leads {short[0]}-{short[-1]}"
+        elif short:
+            span = f"lead {short[0]}"
+        else:
+            span = "the first three leads (none carries a probability)"
+        outlook = (
+            f"Chance of a dry month (driest third of the model climatology) "
+            f"{_pct(sum(b) / len(b) if b else None)} and of a wet month (wettest third) "
+            f"{_pct(sum(a) / len(a) if a else None)}, averaged over {span}; "
+            f"an ordinary month is {climatology} for each"
+        )
+
+    parts = []
+    for lead in leads:
+        if lead not in below and lead not in above:
+            prob = f"tercile probabilities {RAINFALL_PROBABILITY_MISSING}"
+        else:
+            prob = f"dry {_pct(below.get(lead))}, wet {_pct(above.get(lead))} (ordinary {climatology} each)"
+        if lead in anomaly:
+            sign = "+" if anomaly[lead] >= 0 else ""
+            prob += f"; ensemble mean anomaly {sign}{anomaly[lead]:.2f} mm/day"
+        parts.append(f"Lead {lead}: {prob}")
+    detail = "Rainfall: " + "; ".join(parts) if parts else ""
+    return outlook, detail
+
+
 def load_seasonal_forecasts(
     iso3: str,
     db_url: Optional[str] = None,
@@ -118,9 +188,11 @@ def load_seasonal_forecasts(
 
     Keys returned:
         nmme_temp_outlook   – one-line temperature summary (leads 1-3)
-        nmme_precip_outlook – one-line precipitation summary (leads 1-3)
+        nmme_precip_outlook – chance of a dry and of a wet month (leads 1-3)
+                              beside the one in three an ordinary month carries
         nmme_temp_detail    – per-lead temperature breakdown
-        nmme_precip_detail  – per-lead precipitation breakdown
+        nmme_precip_detail  – per lead: dry and wet chance, then the mm/day
+                              anomaly with no category
         nmme_issue_date     – forecast issue date
     """
     try:
@@ -175,6 +247,7 @@ def load_seasonal_forecasts(
             FROM seasonal_forecasts
             WHERE iso3 = ? AND forecast_issue_date = ?
               AND units IS NOT NULL AND anomaly_value IS NOT NULL
+              AND variable IN ('tmp2m', 'prate', 'prate_prob_below', 'prate_prob_above')
             ORDER BY variable, lead_months
             """,
             [iso3.upper(), latest_date],
@@ -208,9 +281,14 @@ def load_seasonal_forecasts(
         climate_data["nmme_temp_outlook"] = _format_outlook_line("tmp2m", by_var["tmp2m"])
         climate_data["nmme_temp_detail"] = _format_detail("tmp2m", by_var["tmp2m"])
 
-    if "prate" in by_var:
-        climate_data["nmme_precip_outlook"] = _format_outlook_line("prate", by_var["prate"])
-        climate_data["nmme_precip_detail"] = _format_detail("prate", by_var["prate"])
+    rain_vars = ("prate", _PROB_BELOW, _PROB_ABOVE)
+    if any(v in by_var for v in rain_vars):
+        outlook, detail = format_rainfall_block(
+            by_var.get("prate", []), by_var.get(_PROB_BELOW, []), by_var.get(_PROB_ABOVE, []),
+        )
+        climate_data["nmme_precip_outlook"] = outlook
+        if detail:
+            climate_data["nmme_precip_detail"] = detail
     else:
         # Say so: a missing precipitation outlook printed nothing, and a
         # reader of the temperature line alone can take rain to be normal.

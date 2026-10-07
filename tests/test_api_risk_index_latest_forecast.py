@@ -31,6 +31,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         CREATE TABLE questions (
             question_id TEXT,
             iso3 TEXT,
+            hazard_code TEXT,
             target_month TEXT,
             metric TEXT,
             is_test BOOLEAN DEFAULT FALSE
@@ -41,6 +42,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
+            hazard_code TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE,
@@ -118,7 +120,10 @@ def test_risk_index_defaults_to_latest_forecasted_month(api_env: None) -> None:
     assert row["m1_pc"] == pytest.approx(row["m1"] / row["population"])
 
 
-def test_risk_index_fallbacks_from_empty_month(api_env: None) -> None:
+def test_risk_index_answers_for_the_month_asked_even_when_empty(api_env: None) -> None:
+    # The route never had a fallback for an EXPLICIT month: swapping in another
+    # month would answer a question the caller did not ask. 2025-12 has a
+    # question and no forecast, so it comes back named and empty.
     client = TestClient(app)
 
     resp = client.get(
@@ -127,11 +132,8 @@ def test_risk_index_fallbacks_from_empty_month(api_env: None) -> None:
     )
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["target_month"] == "2026-01"
-    assert payload["rows"]
-    row = payload["rows"][0]
-    assert row["population"] == 2000000
-    assert row["total_pc"] == pytest.approx(row["total"] / row["population"])
+    assert payload["target_month"] == "2025-12"
+    assert payload["rows"] == []
 
 
 @pytest.fixture()
@@ -145,6 +147,7 @@ def api_env_horizon_fallback(
         CREATE TABLE questions (
             question_id TEXT,
             iso3 TEXT,
+            hazard_code TEXT,
             target_month TEXT,
             metric TEXT,
             is_test BOOLEAN DEFAULT FALSE
@@ -155,6 +158,7 @@ def api_env_horizon_fallback(
         """
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
+            hazard_code TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE,

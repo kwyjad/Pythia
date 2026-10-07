@@ -443,9 +443,9 @@ Key reasoning principles:
 spatial extent. They are triggered by sustained below-normal rainfall, not \
 single dry months. An Orange/Red alert typically requires multi-month \
 drought conditions.
-- NMME precipitation anomalies are the strongest forward-looking signal. \
-Negative anomalies (below-normal rainfall forecasts) increase drought alert \
-probability, especially when combined with above-normal temperature forecasts.
+- NMME rainfall probabilities are the strongest forward-looking signal. \
+A chance of a dry month (driest third) well above the ordinary 1 in 3 increases \
+drought alert probability, especially when combined with above-normal temperature forecasts.
 - ENSO phase matters: La Ni\u00f1a increases drought risk in the Horn of Africa \
 and Central America. El Ni\u00f1o increases drought risk in Southeast Asia, \
 Southern Africa, and parts of South Asia.
@@ -471,9 +471,9 @@ Key reasoning principles:
 - Flood alerts in GDACS are triggered by significant flooding events with \
 potential humanitarian impact. They are highly seasonal \u2014 concentrated in \
 the wet/monsoon season for each country.
-- NMME precipitation anomalies are a key signal. Above-normal rainfall \
-forecasts during the wet season increase flood alert probability. The \
-magnitude matters: +0.5\u03c3 is a modest signal, +1.5\u03c3 is a strong signal.
+- NMME rainfall probabilities are a key signal. A chance of a wet month \
+(wettest third) above the ordinary 1 in 3 during the wet season increases \
+flood alert probability; the further above 33%, the stronger the signal.
 - ENSO phase affects regional flood risk. La Ni\u00f1a typically increases flood \
 risk in Southeast Asia, East Africa, and Australia. El Ni\u00f1o increases flood \
 risk in Peru, Ecuador, and parts of East Africa.

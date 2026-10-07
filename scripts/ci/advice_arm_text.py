@@ -64,13 +64,13 @@ def preview(groups=GROUPS, *, members: list[str] | None = None,
             db_url: str | None = None) -> list[dict]:
     """Per group: shared advice length, members with a note, and a verdict.
 
-    The forecaster's loaders read the DB named in ``pythia/config.yaml``
-    (``data/resolver.duckdb``), not ``PYTHIA_DB_URL``; ``db_url`` points them
-    at the DB this report was asked about."""
+    The forecaster's loaders read ``PYTHIA_DB_URL`` (since Oct 2026), so
+    ``db_url`` points them at the DB this report was asked about by setting
+    it."""
     from forecaster import prompts
 
     if db_url:
-        prompts._pythia_db_url_from_config = lambda: db_url  # type: ignore[assignment]
+        os.environ["PYTHIA_DB_URL"] = db_url
 
     members = members if members is not None else _member_names()
     out = []
