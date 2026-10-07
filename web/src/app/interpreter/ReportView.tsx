@@ -104,6 +104,9 @@ export default function ReportView({
                     ({REASON_LABELS[entry.reason_code] ?? entry.reason_code})
                   </span>
                 </h3>
+                {entry.scoring_note ? (
+                  <p className="mt-2 text-xs italic text-fred-muted">{entry.scoring_note}</p>
+                ) : null}
                 {entry.why_it_stands_out ? (
                   <p className="mt-2 text-sm text-fred-text">{entry.why_it_stands_out}</p>
                 ) : null}

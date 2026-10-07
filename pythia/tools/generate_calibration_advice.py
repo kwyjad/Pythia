@@ -24,6 +24,7 @@ import numpy as np
 from pythia.buckets import interior_thresholds_for, labels_for, n_buckets_for
 from pythia.config import load as load_cfg
 from pythia.tools.compute_calibration_pythia import AGGREGATE_MODEL_NAMES
+from pythia.tools.scoring_class import scored_only_clause
 from pythia.tools.compute_scores import (
     PA_THRESHOLDS,
     FATAL_THRESHOLDS,
@@ -157,6 +158,12 @@ def _latest_run_clause(conn: Any, table: str, alias: str) -> str:
         f"SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr "
         f"WHERE _lr.question_id = {alias}.question_id{not_test})){score_test}"
     )
+
+
+def _scored(conn: Any, alias: str) -> str:
+    """Leave out indicative ACE/PA months (``pythia/tools/scoring_class.py``):
+    a selected sample, never advice. '' on a DB predating the column."""
+    return scored_only_clause(conn, alias, prefix="\n          AND ")
 
 
 def _member_source_clause(names: Sequence[str] | str, alias: str = "fr") -> Tuple[str, List[Any]]:
@@ -336,12 +343,12 @@ def _discover_hazard_metric_pairs(
     conn: Any,
 ) -> List[Tuple[str, str]]:
     """Find all (hazard_code, metric) pairs with resolved questions."""
-    sql = """
+    sql = f"""
         SELECT DISTINCT upper(q.hazard_code) AS hc, upper(q.metric) AS m
         FROM questions q
         JOIN resolutions r ON r.question_id = q.question_id
         WHERE upper(q.metric) IN ('PA', 'FATALITIES')
-          AND COALESCE(q.is_test, FALSE) = FALSE
+          AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "r")}
         ORDER BY hc, m
     """
     rows = conn.execute(sql).fetchall()
@@ -350,12 +357,12 @@ def _discover_hazard_metric_pairs(
 
 def _count_resolved(conn: Any, hazard_code: str, metric: str) -> int:
     """Count distinct resolved questions for a hazard/metric pair."""
-    sql = """
+    sql = f"""
         SELECT COUNT(DISTINCT r.question_id)
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
         WHERE upper(q.hazard_code) = ? AND upper(q.metric) = ?
-          AND COALESCE(q.is_test, FALSE) = FALSE
+          AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "r")}
     """
     row = conn.execute(sql, [hazard_code.upper(), metric.upper()]).fetchone()
     return row[0] if row else 0
@@ -381,7 +388,7 @@ def _compute_tail_coverage(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
-              AND COALESCE(q.is_test, FALSE) = FALSE
+              AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "r")}
         ),
         ensemble_tail_probs AS (
             SELECT
@@ -446,7 +453,7 @@ def _compute_bucket_calibration(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
-              AND COALESCE(q.is_test, FALSE) = FALSE
+              AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "r")}
         )
         SELECT
             fe.class_bin,
@@ -515,7 +522,7 @@ def _compute_per_model_brier(
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
           AND COALESCE(s.model_name, '') NOT LIKE '{EXT_MODEL_PREFIX}%'
-          {_latest_run_clause(conn, "scores", "s")}
+          {_latest_run_clause(conn, "scores", "s")}{_scored(conn, "s")}
         GROUP BY mn
         ORDER BY avg_brier ASC
     """
@@ -695,7 +702,7 @@ def _compute_per_model_bucket_calibration(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
-              AND COALESCE(q.is_test, FALSE) = FALSE
+              AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "r")}
         )
         SELECT
             fr.bucket_index,
@@ -764,7 +771,7 @@ def _compute_per_model_tail_coverage(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
-              AND COALESCE(q.is_test, FALSE) = FALSE
+              AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "r")}
         ),
         model_tail_probs AS (
             SELECT
@@ -915,13 +922,13 @@ def _compute_advice_impact(
     first_advice_month = row[0]
 
     # Check we have enough months since first advice
-    sql_months = """
+    sql_months = f"""
         SELECT COUNT(DISTINCT r.observed_month)
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
         WHERE upper(q.hazard_code) = ? AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
-          AND r.observed_month >= ?
+          AND r.observed_month >= ?{_scored(conn, "r")}
     """
     try:
         row = conn.execute(sql_months, [hz, m, first_advice_month]).fetchone()
@@ -947,7 +954,7 @@ def _compute_advice_impact(
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
           AND s.model_name IS NOT NULL
-          AND s.model_name NOT LIKE '{EXT_MODEL_PREFIX}%'{_latest_run_clause(conn, "scores", "s")}
+          AND s.model_name NOT LIKE '{EXT_MODEL_PREFIX}%'{_latest_run_clause(conn, "scores", "s")}{_scored(conn, "s")}
         GROUP BY s.model_name
     """
     try:
@@ -1071,7 +1078,7 @@ def _compute_eiv_accuracy(
               AND COALESCE(q.is_test, FALSE) = FALSE
               AND e.model_name IN
                   ('ensemble_mean_v2', 'track2_flash', '__ensemble__')
-            """,
+            """ + _scored(conn, "e"),
             [hz, m],
         ).fetchone()
     except Exception as exc:
@@ -1168,7 +1175,7 @@ def _compute_views_benchmark(
     if hz != "ACE" or m != "FATALITIES":
         return None
 
-    sql = """
+    sql = f"""
         SELECT
             AVG(s.value) AS avg_brier,
             COUNT(*) AS n_scores
@@ -1178,7 +1185,7 @@ def _compute_views_benchmark(
           AND s.model_name = '__ext_views'
           AND upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
-          AND COALESCE(q.is_test, FALSE) = FALSE
+          AND COALESCE(q.is_test, FALSE) = FALSE{_scored(conn, "s")}
     """
     try:
         row = conn.execute(sql, [hz, m]).fetchone()
@@ -1338,7 +1345,7 @@ def _compute_actual_resolution_distribution(
         JOIN questions q ON q.question_id = r.question_id
         WHERE q.hazard_code = ?
           AND q.metric = ?
-          AND r.value IS NOT NULL
+          AND r.value IS NOT NULL{_scored(conn, "r")}
         GROUP BY bucket
     """
     try:
@@ -1818,7 +1825,7 @@ def _family_question_counts(
         WHERE s.score_type = 'brier'
           AND upper(q.hazard_code) = ? AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
-          AND s.model_name IN ({ph}){_latest_run_clause(conn, "scores", "s")}
+          AND s.model_name IN ({ph}){_latest_run_clause(conn, "scores", "s")}{_scored(conn, "s")}
     """
     params = [hazard_code.upper(), metric.upper(), *ids]
     try:
@@ -1867,7 +1874,7 @@ def compute_advice_arm_impact(conn: Any, hazard_code: str, metric: str) -> Dict[
         WHERE s.score_type = 'brier'
           AND s.model_name IN ('ensemble_mean_v2', 'track2_flash')
           AND upper(q.hazard_code) = ? AND upper(q.metric) = ?
-          AND COALESCE(q.is_test, FALSE) = FALSE{_latest_run_clause(conn, "scores", "s")}
+          AND COALESCE(q.is_test, FALSE) = FALSE{_latest_run_clause(conn, "scores", "s")}{_scored(conn, "s")}
         GROUP BY arm.arm, s.question_id
     """
     try:

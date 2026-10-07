@@ -131,3 +131,17 @@ export const SCORE_GLOSSARY: Array<{ term: string; text: string }> = [
   { term: "Direction (log EV ratio)", text: TOOLTIP_LOG_EV_RATIO },
   { term: "Attention rank", text: TOOLTIP_ATTENTION },
 ];
+
+// Conflict displacement (ACE/PA) questions IDMC cannot score fairly
+// (Oct 2026). A month resolves only when IDMC reports it for a country it
+// does not report every month, so those resolved months are a selected
+// sample. Keep in sync with pythia/tools/scoring_class.py INDICATIVE_REASON.
+export const ACE_PA_INDICATIVE_NOTE =
+  "Conflict displacement: the forecast stands, but for most countries it cannot be " +
+  "marked, because IDMC does not report them every month. Only countries IDMC " +
+  "reports in at least 8 of the 12 months before a month are scored; the rest are " +
+  "indicative and kept out of calibration and the skill figures.";
+
+export function isAcePa(hazard: string | null | undefined, metric: string | null | undefined): boolean {
+  return (hazard || "").toUpperCase() === "ACE" && (metric || "").toUpperCase() === "PA";
+}

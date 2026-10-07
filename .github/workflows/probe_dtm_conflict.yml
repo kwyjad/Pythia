@@ -1,0 +1,63 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: which ACE/PA countries IOM's Displacement Tracking Matrix covers
+# for conflict displacement, how often it reports, how late, whether its
+# figures are flows or stocks, and whether conflict can be told from disaster.
+# Downloads no canonical DB and writes nothing back, so it is not in the
+# pythia-resolver-db concurrency group.
+name: Probe DTM conflict displacement
+
+on:
+  workflow_dispatch:
+    inputs:
+      countries:
+        description: "ISO3 codes to ask about (space or comma separated)"
+        required: false
+        default: "AFG BDI BFA CAF CMR COD COL ETH HTI IND IRQ ISR LBN LBY MLI MMR MOZ NER NGA PAK PER PHL PSE RUS SDN SOM SSD SYR TCD UKR VEN YEM MEX KEN UGA ECU BGD IDN"
+      months:
+        description: "Months of history to ask for"
+        required: false
+        default: "36"
+  pull_request:
+    paths:
+      - "tools/probe_dtm_conflict.py"
+      - ".github/workflows/probe_dtm_conflict.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Probe DTM conflict displacement
+        env:
+          DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
+          DTM_API_PRIMARY_KEY: ${{ secrets.DTM_API_PRIMARY_KEY }}
+          DTM_PROBE_COUNTRIES: ${{ inputs.countries }}
+          DTM_PROBE_MONTHS: ${{ inputs.months || '36' }}
+        run: python -m tools.probe_dtm_conflict --out-dir diagnostics/dtm_conflict_probe --months "${DTM_PROBE_MONTHS}"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-dtm-conflict
+          path: diagnostics/dtm_conflict_probe/
+          retention-days: 14

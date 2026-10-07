@@ -102,6 +102,22 @@ def _name_attention_entries(content: Any) -> None:
         entry["metric_name"] = _names.metric_name(entry.get("metric"), short=True)
 
 
+def _stamp_scoring_notes(content: Any, figures: Dict[str, Any]) -> None:
+    """Copy the generated note for an indicative conflict displacement entry
+    (``extras.scoring_notes``, from the pack) onto the entry, so the page says
+    what the PDF says: the forecast stands but cannot be marked."""
+    notes = ((figures or {}).get("extras") or {}).get("scoring_notes") or {}
+    if not (notes and isinstance(content, dict)):
+        return
+    for entry in content.get("attention") or []:
+        if not isinstance(entry, dict):
+            continue
+        for qid in entry.get("question_ids") or []:
+            if str(qid) in notes:
+                entry["scoring_note"] = notes[str(qid)]
+                break
+
+
 def _shape_full(row: Dict[str, Any]) -> Dict[str, Any]:
     """One interpretation row -> API shape (content resolved server-side)."""
     content = _maybe_json(row.pop("content_json", None))
@@ -121,6 +137,7 @@ def _shape_full(row: Dict[str, Any]) -> Dict[str, Any]:
             content_resolved = resolve_content(content, resolver)
             unresolved = resolver.misses
             _name_attention_entries(content_resolved)
+            _stamp_scoring_notes(content_resolved, figures)
         except Exception:  # noqa: BLE001 - serve the raw content over a 500
             logger.exception("interpreter content resolution failed")
             content_resolved = content

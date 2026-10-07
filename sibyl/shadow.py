@@ -433,6 +433,10 @@ def shadow_comparison(con: Any, *, include_test: bool = False,
         series_diffs: Dict[str, Dict[str, float]] = {}
         model = None
         s_test = "" if include_test else " AND NOT COALESCE(a.is_test, FALSE)"
+        # Indicative ACE/PA months never enter a comparison (scoring_class.py).
+        from pythia.tools.scoring_class import scored_only_clause  # noqa: PLC0415
+
+        s_test += scored_only_clause(con, "a")
         for qid, run_id, sj in rows:
             payload = json.loads(sj) if sj else {}
             if payload.get("status") != "ok":
@@ -460,6 +464,7 @@ def shadow_comparison(con: Any, *, include_test: bool = False,
         if con.execute("SELECT 1 FROM information_schema.tables "
                        "WHERE table_name = 'sibyl_variant_scores'").fetchone():
             v_test = "" if include_test else " AND NOT COALESCE(a.is_test, FALSE)"
+            v_test += scored_only_clause(con, "a")
             for qid, st, v in con.execute(
                 f"""
                 SELECT a.question_id, a.score_type, AVG(a.value - b.value)

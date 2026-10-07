@@ -205,6 +205,14 @@ def _issue_line(pack: Pack) -> dict[str, Any]:
     return {"issued": issued, "covering": covering}
 
 
+#: What an indicative conflict displacement entry says under its heading.
+INDICATIVE_NOTE = (
+    "The forecast stands, but it cannot be marked: IDMC does not report this "
+    "country every month, so a month is resolved only when a figure happens "
+    "to be reported."
+)
+
+
 def report_extras(pack: Pack) -> dict[str, Any]:
     """The pieces the report states about ITSELF, generated not written.
 
@@ -251,6 +259,12 @@ def report_extras(pack: Pack) -> dict[str, Any]:
         "gates": {
             str(r.get("question_id")): str(r.get("gate"))
             for r in rows if r.get("gate")
+        },
+        # {question_id: plain-words note} for conflict displacement questions
+        # IDMC cannot score fairly (Oct 2026). Generated, never written.
+        "scoring_notes": {
+            str(r.get("question_id")): INDICATIVE_NOTE
+            for r in rows if str(r.get("scoring_class") or "") == "indicative"
         },
         # {question_id: what the second reader made of it}, same contract.
         "sibyl_tags": {

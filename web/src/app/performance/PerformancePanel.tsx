@@ -14,6 +14,8 @@ import {
   TOOLTIP_EXTERNAL_BENCHMARK,
   TOOLTIP_LOG,
   TOOLTIP_SAMPLES,
+  ACE_PA_INDICATIVE_NOTE,
+  isAcePa,
 } from "../../lib/score_glossary";
 import type {
   PerformanceRunRow,
@@ -917,6 +919,11 @@ export default function PerformancePanel({
                       </>
                     )}
                   </div>
+                  {isAcePa(row.hazard_code, row.metric) ? (
+                    <div className="mt-1 text-[11px] leading-snug text-fred-muted">
+                      {ACE_PA_INDICATIVE_NOTE}
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
@@ -939,6 +946,9 @@ export default function PerformancePanel({
             <span className="text-xs text-fred-muted">Loading…</span>
           ) : null}
         </div>
+        {data?.summary_rows?.some((r) => isAcePa(r.hazard_code, r.metric)) ? (
+          <p className="mb-3 text-xs text-fred-muted">{ACE_PA_INDICATIVE_NOTE}</p>
+        ) : null}
 
         {/* Controls — directly above the table they control */}
         <div className="mb-3 flex flex-wrap items-center gap-3">

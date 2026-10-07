@@ -189,6 +189,32 @@ def _previous_run_id(con, run_id: str, include_test: bool) -> str | None:
     return None
 
 
+def _ace_pa_scoring_classes(con, questions: list[dict[str, Any]]) -> dict[str, str]:
+    """{question_id: scored|indicative} for the run's ACE/PA questions, from
+    the regular-reporter rule as it stands for the window's first month."""
+    acepa = [q for q in questions
+             if str(q.get("hazard_code") or "").upper() == "ACE"
+             and str(q.get("metric") or "").upper() == "PA"]
+    if not acepa:
+        return {}
+    try:
+        from pythia.tools.base_rate_spd import conflict_displacement_series  # noqa: PLC0415
+        from pythia.tools.scoring_class import conflict_scoring_class  # noqa: PLC0415
+
+        reported, _held = conflict_displacement_series(con)
+    except Exception as exc:  # noqa: BLE001 - a missing series leaves the class unknown
+        LOGGER.warning("ACE/PA scoring class unavailable: %s", exc)
+        return {}
+    out: dict[str, str] = {}
+    for q in acepa:
+        ym = str(q.get("window_start_date") or "")[:7]
+        if len(ym) == 7:
+            out[str(q["question_id"])] = conflict_scoring_class(
+                reported.get(str(q.get("iso3") or "").upper(), {}), ym
+            )[0]
+    return out
+
+
 def _run_is_test(con, run_id: str) -> bool:
     """A run is a test run by its OWN forecast rows."""
     if not column_exists(con, "forecasts_raw", "is_test"):
@@ -388,6 +414,7 @@ def build_attention_rows(
     sibyl_qids: set[str],
     *,
     per_capita_floor: float,
+    scoring_classes: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """One attention row per question, with the four rank columns and the
     blended attention_rank the pack is ordered (and truncated) by."""
@@ -458,6 +485,9 @@ def build_attention_rows(
                 ),
                 "baserate_source": dev.get("baserate_source") if dev else None,
                 "sibyl_covered": qid in sibyl_qids,
+                # ACE/PA only: 'indicative' where IDMC does not report the
+                # country every month (pythia/tools/scoring_class.py).
+                "scoring_class": (scoring_classes or {}).get(qid),
                 "rc_deviation_disagreement": disagreement,
                 "rank_deviation": None,
                 "rank_impact_nominal": None,
@@ -1675,6 +1705,7 @@ def build_bundle(
         attention_rows = build_attention_rows(
             questions, deviation, triage, sibyl_qids,
             per_capita_floor=per_capita_floor,
+            scoring_classes=_ace_pa_scoring_classes(con, questions),
         )
 
         # The second reader runs before the deltas because it stamps each

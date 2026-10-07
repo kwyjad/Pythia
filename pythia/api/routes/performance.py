@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
+from pythia.tools.scoring_class import has_scoring_class, scored_only_clause, scored_only_sql
+
 from pythia.api.core import (
     _con,
     _execute,
@@ -240,6 +242,29 @@ def performance_scores(
 
     _tf = _test_filter(include_test, "s")
 
+    # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
+    # selected sample: it stays out of every average and question count,
+    # and each group says how many questions it left out
+    # (n_indicative_excluded) rather than dropping them silently.
+    _scored_tc = scored_only_clause(con, "s")
+    if has_scoring_class(con):
+        _sc = f"({scored_only_sql('s')})"
+        _agg = (
+            f"COUNT(*) FILTER (WHERE {_sc}) AS n_samples,\n"
+            f"          COUNT(DISTINCT s.question_id) FILTER (WHERE {_sc}) AS n_questions,\n"
+            f"          AVG(s.value) FILTER (WHERE {_sc}) AS avg_value,\n"
+            f"          MEDIAN(s.value) FILTER (WHERE {_sc}) AS median_value,\n"
+            f"          COUNT(DISTINCT s.question_id) FILTER (WHERE NOT {_sc}) AS n_indicative_excluded"
+        )
+    else:
+        _agg = (
+            "COUNT(*) AS n_samples,\n"
+            "          COUNT(DISTINCT s.question_id) AS n_questions,\n"
+            "          AVG(s.value) AS avg_value,\n"
+            "          MEDIAN(s.value) AS median_value,\n"
+            "          0 AS n_indicative_excluded"
+        )
+
     # Track counts for KPI cards (always unfiltered by track).
     # ``total`` counts every distinct scored question regardless of track
     # (including legacy questions that pre-date the Track 1/2 split, where
@@ -252,7 +277,7 @@ def performance_scores(
             SELECT COUNT(DISTINCT s.question_id) AS n
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
-            WHERE 1=1 {tc_filter}{_tf}
+            WHERE 1=1 {tc_filter}{_tf}{_scored_tc}
         """, {k: v for k, v in params.items() if k != "track"}).fetchone()
         if total_row and total_row[0] is not None:
             track_counts["total"] = int(total_row[0])
@@ -265,7 +290,7 @@ def performance_scores(
                 SELECT q.track, COUNT(DISTINCT s.question_id) AS n
                 FROM scores s
                 JOIN questions q ON q.question_id = s.question_id
-                WHERE q.track IS NOT NULL {tc_filter}{_tf}
+                WHERE q.track IS NOT NULL {tc_filter}{_tf}{_scored_tc}
                 GROUP BY q.track
             """, {k: v for k, v in params.items() if k != "track"}).fetchall()
             for t, n in tc_rows:
@@ -285,10 +310,7 @@ def performance_scores(
               (COALESCE(s.model_name, '') LIKE '%\\_\\_raw' ESCAPE '\\' OR COALESCE(s.model_name, '') LIKE '%\\_\\_recal' ESCAPE '\\') AS recalibration_copy,
           s.score_type,
           s.model_name,
-          COUNT(*) AS n_samples,
-          COUNT(DISTINCT s.question_id) AS n_questions,
-          AVG(s.value) AS avg_value,
-          MEDIAN(s.value) AS median_value
+          {_agg}
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
         WHERE 1=1 {metric_filter} {track_filter}{_tf}
@@ -320,10 +342,7 @@ def performance_scores(
               (COALESCE(s.model_name, '') LIKE '%\\_\\_raw' ESCAPE '\\' OR COALESCE(s.model_name, '') LIKE '%\\_\\_recal' ESCAPE '\\') AS recalibration_copy,
               s.score_type,
               s.model_name,
-              COUNT(*) AS n_samples,
-              COUNT(DISTINCT s.question_id) AS n_questions,
-              AVG(s.value) AS avg_value,
-              MEDIAN(s.value) AS median_value
+              {_agg}
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN run_provenance rp ON s.run_id = rp.forecaster_run_id
@@ -350,10 +369,7 @@ def performance_scores(
               (COALESCE(s.model_name, '') LIKE '%\\_\\_raw' ESCAPE '\\' OR COALESCE(s.model_name, '') LIKE '%\\_\\_recal' ESCAPE '\\') AS recalibration_copy,
               s.score_type,
               s.model_name,
-              COUNT(*) AS n_samples,
-              COUNT(DISTINCT s.question_id) AS n_questions,
-              AVG(s.value) AS avg_value,
-              MEDIAN(s.value) AS median_value
+              {_agg}
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
@@ -376,10 +392,7 @@ def performance_scores(
               (COALESCE(s.model_name, '') LIKE '%\\_\\_raw' ESCAPE '\\' OR COALESCE(s.model_name, '') LIKE '%\\_\\_recal' ESCAPE '\\') AS recalibration_copy,
               s.score_type,
               s.model_name,
-              COUNT(*) AS n_samples,
-              COUNT(DISTINCT s.question_id) AS n_questions,
-              AVG(s.value) AS avg_value,
-              MEDIAN(s.value) AS median_value
+              {_agg}
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             WHERE 1=1 {metric_filter} {track_filter}{_tf}
@@ -663,11 +676,15 @@ def sibyl_comparison(
             f"WHERE COALESCE(sf.evidence_ok, TRUE) {sf_run_filter}{_tf_sf}",
         )
 
+    # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
+    # selected sample and is never part of the head-to-head.
+    _scored = scored_only_clause(con, "s")
+
     sql = f"""
     WITH sib AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.value AS sibyl_value
       FROM scores s
-      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}{_latest}{_evidence}
+      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}{_latest}{_evidence}{_scored}
     ),
     std_ranked AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
@@ -766,7 +783,7 @@ def _sibyl_variant_comparison(con, include_test: bool) -> Dict[str, Any]:
             LEFT JOIN sib_latest l ON l.question_id = s.question_id
             WHERE ((s.model_name = '{_SIBYL_MODEL_NAME}' AND s.run_id = l.run_id)
                    OR (s.model_name IN ('__ext_sibyl_ref', '__ext_sibyl_raw',
-                                        '__ext_conflictology12') AND s.run_id IS NULL)){_tf_s}
+                                        '__ext_conflictology12') AND s.run_id IS NULL)){_tf_s}{scored_only_clause(con, "s")}
             """,
         ).fetchall()
     except Exception:
