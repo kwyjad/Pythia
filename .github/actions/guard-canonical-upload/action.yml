@@ -26,6 +26,9 @@ inputs:
   db:
     description: Read the downloaded run from the DB's canonical_lineage table instead (staged pipeline)
     default: ""
+  db-path:
+    description: The canonical DB about to be uploaded, for the disk and growth record
+    default: "data/resolver.duckdb"
 
 runs:
   using: composite
@@ -44,3 +47,15 @@ runs:
         else
           python3 -m scripts.ci.canonical_guard upload-guard
         fi
+
+    # How many bytes this run added, recorded in the DB itself (db_growth_log)
+    # so the history travels with the artifact. Never fails the upload.
+    - name: Disk and growth before upload
+      shell: bash
+      env:
+        DB_PATH: ${{ inputs.db-path }}
+      run: |
+        set +e
+        echo "Disk before upload: $(df -h . | tail -1)"
+        python3 -m scripts.ci.db_growth before-upload --db "${DB_PATH}"
+        exit 0

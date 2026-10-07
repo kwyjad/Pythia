@@ -170,7 +170,8 @@ class TestResilience:
 
     def test_compact_all_covers_every_compactable_source(self, con):
         results = retention.compact_all(con)
-        assert set(results) == set(retention.COMPACTABLE_SOURCES)
+        # The raw caches plus the revision audit log (Oct 2026).
+        assert set(results) == set(retention.COMPACTABLE_SOURCES) | {"haz_revisions"}
 
     def test_summarize_says_a_copy_is_what_reclaims_space(self, con):
         text = "\n".join(retention.summarize(retention.compact_all(con)))

@@ -639,3 +639,92 @@ def test_one_countrys_exception_does_not_kill_the_month(con, rulebook, monkeypat
         for row in con.execute("SELECT iso3 FROM haz_resolutions").fetchall()
     }
     assert resolved == {"AAA", "CCC"}, "the failed cell writes nothing; the others stand"
+
+
+def test_an_unchanged_post_freeze_attempt_writes_no_revision(con, rulebook):
+    """The nightly backcast and every Resolver Update re-decide the same
+    frozen cells; an unconditional insert made haz_revisions 40% of a
+    30.6 GB canonical DB (Oct 2026). Only a DIFFERENT attempt is logged."""
+    original = _reconcile([make_candidate("emdat", 4_000)], rulebook, today=AFTER_FREEZE)
+    res_mod.write_reconciliation(con, original, rulebook, today=AFTER_FREEZE)
+    revised = _reconcile([make_candidate("emdat", 99_000)], rulebook, today=AFTER_FREEZE)
+    later = dt.date(2025, 1, 1)
+    for _ in range(5):
+        assert res_mod.write_reconciliation(con, revised, rulebook, today=later) == (
+            res_mod.WRITE_FROZEN_SKIP
+        )
+    assert con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0] == 1
+    # A different value is a new revision; going back to the first is too.
+    other = _reconcile([make_candidate("emdat", 120_000)], rulebook, today=AFTER_FREEZE)
+    res_mod.write_reconciliation(con, other, rulebook, today=later)
+    res_mod.write_reconciliation(con, revised, rulebook, today=later)
+    assert con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0] == 3
+    assert con.execute(
+        "SELECT COUNT(*) FROM haz_revisions WHERE rule_fired IS NOT NULL"
+    ).fetchone()[0] == 3
+
+
+def test_collapse_keeps_only_changes_and_is_idempotent(con, rulebook):
+    from resolver.hazard_resolution import retention
+
+    rows = [
+        # cell A, source emdat: 5 identical, then a change, then 2 identical
+        *[("PHL", 2024, 3, "FL", "emdat", "ref1", 99.0, "r1")] * 5,
+        ("PHL", 2024, 3, "FL", "emdat", "ref1", 120.0, "r1"),
+        *[("PHL", 2024, 3, "FL", "emdat", "ref1", 120.0, "r1")] * 2,
+        # same cell, other source: kept apart
+        ("PHL", 2024, 3, "FL", "detection:absence", "post-freeze re-run", 0.0, "zero"),
+        # rule only in the provenance JSON (pre-column rows)
+        ("VNM", 2024, 3, "FL", "emdat", "ref9", 5.0, None),
+        ("VNM", 2024, 3, "FL", "emdat", "ref9", 5.0, None),
+    ]
+    for i, (iso3, y, m, hz, src, ref, val, rule) in enumerate(rows):
+        con.execute(
+            "INSERT INTO haz_revisions (iso3, year, month, hazard, source, source_ref, "
+            "old_value, new_value, detail_json, rule_fired, observed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1.0, ?, ?, ?, TIMESTAMP '2025-01-01' + to_seconds(?))",
+            [iso3, y, m, hz, src, ref, val, json.dumps({"observed_rule_fired": "jr"}), rule, i],
+        )
+    plan = retention.collapse_revisions(con, apply=False)
+    assert (plan["rows_before"], plan["removed"]) == (11, 7)
+    assert con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0] == 11
+    done = retention.collapse_revisions(con, apply=True)
+    assert (done["rows_after"], done["removed"]) == (4, 7)
+    assert retention.collapse_revisions(con, apply=True)["removed"] == 0
+    log = con.execute(
+        "SELECT rows_before, rows_after, rows_removed FROM haz_revision_collapse_log ORDER BY collapsed_at"
+    ).fetchall()
+    assert log[0] == (11, 4, 7)
+    # The rule now sits in its column for every kept row.
+    assert con.execute("SELECT COUNT(*) FROM haz_revisions WHERE rule_fired IS NULL").fetchone()[0] == 0
+
+
+def test_a_revision_keeps_the_audit_and_hashes_the_provenance(con, rulebook):
+    original = _reconcile([make_candidate("emdat", 4_000)], rulebook, today=AFTER_FREEZE)
+    res_mod.write_reconciliation(con, original, rulebook, today=AFTER_FREEZE)
+    revised = _reconcile([make_candidate("emdat", 99_000)], rulebook, today=AFTER_FREEZE)
+    res_mod.write_reconciliation(con, revised, rulebook, today=dt.date(2025, 1, 1))
+    detail = json.loads(con.execute("SELECT detail_json FROM haz_revisions").fetchone()[0])
+    assert "provenance" not in detail
+    assert len(detail["provenance_sha256"]) == 64 and detail["provenance_bytes"] > 0
+    assert detail["observed_rule_fired"] == revised.rule_fired
+
+
+def test_collapse_slims_the_old_rows_and_keeps_value_source_rule(con, rulebook):
+    from resolver.hazard_resolution import retention
+
+    big = {"note": "re-run", "observed_rule_fired": "ladder:emdat",
+           "provenance": {"decision": {"flags": ["ceiling_exceeded"]}, "blob": "x" * 5000}}
+    con.execute(
+        "INSERT INTO haz_revisions (iso3, year, month, hazard, source, source_ref, old_value, "
+        "new_value, detail_json) VALUES ('PHL', 2024, 3, 'FL', 'emdat', 'r', 1, 2, ?)",
+        [json.dumps(big)],
+    )
+    out = retention.collapse_revisions(con, apply=True)
+    assert out["slimmed"] == 1
+    row = con.execute("SELECT new_value, source, rule_fired, detail_json FROM haz_revisions").fetchone()
+    detail = json.loads(row[3])
+    assert row[:3] == (2.0, "emdat", "ladder:emdat")
+    assert "provenance" not in detail and detail["flags"] == ["ceiling_exceeded"]
+    assert detail["note"] == "re-run" and detail["provenance_bytes"] > 5000
+    assert len(row[3]) < 600

@@ -89,6 +89,11 @@ WATCHED: tuple[Watched, ...] = (
     # repo are delivered hours and sometimes a day late, and this producer
     # can legitimately go a month without a new upstream release.
     Watched("SPEI-3 Feed Refresh", 40, "monthly, 8th"),
+    # Scheduled compaction (Oct 2026, the 4th and the 20th). Its silence
+    # costs disk: the canonical DB went 18 GB -> 30.6 GB in nine days, and a
+    # runner that fills mid-upload loses the run. The longest ordinary gap is
+    # 16 days; 20 leaves room for a late tick.
+    Watched("Compact Resolver DB", 20, "the 4th and the 20th"),
 )
 
 UNKNOWN = "unknown"

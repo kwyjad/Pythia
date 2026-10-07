@@ -23,6 +23,7 @@ Hard rules enforced here:
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -78,6 +79,47 @@ def _today() -> dt.date:
     return dt.datetime.now(dt.timezone.utc).date()
 
 
+def _revision_rule(detail: dict[str, Any] | None) -> str | None:
+    if not detail:
+        return None
+    rule = detail.get("observed_rule_fired") or detail.get("observed_status")
+    return str(rule) if rule is not None else None
+
+
+#: Keys of a revision's detail too large to keep per row. A post-freeze
+#: attempt is an audit of an answer NOT applied: its value, source, rule and
+#: flags stay on the row, and the full provenance it would have written is
+#: kept as a SHA-256 and a byte count. Kept whole, it was ~75 KB a row and
+#: 12.5 GB of a 29.2 GB canonical DB on 7 Oct 2026.
+_BULKY_REVISION_KEYS = ("provenance", "evidence_of_absence")
+
+
+def slim_revision_detail(detail: dict[str, Any] | None) -> dict[str, Any] | None:
+    if detail is None:
+        return None
+    out: dict[str, Any] = {}
+    for key, value in detail.items():
+        if key not in _BULKY_REVISION_KEYS:
+            out[key] = value
+            continue
+        text = json.dumps(value, sort_keys=True, default=str)
+        out[f"{key}_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        out[f"{key}_bytes"] = len(text)
+        if key == "provenance" and isinstance(value, dict):
+            decision = value.get("decision") if isinstance(value.get("decision"), dict) else {}
+            if decision.get("flags") is not None:
+                out["flags"] = decision.get("flags")
+            if value.get("rule_fired") is not None:
+                out["provenance_rule_fired"] = value.get("rule_fired")
+    return out
+
+
+def _same_value(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(float(a) - float(b)) <= 1e-9 * max(1.0, abs(float(a)), abs(float(b)))
+
+
 def _log_revision(
     con,
     *,
@@ -90,13 +132,43 @@ def _log_revision(
     old_value: float | None,
     new_value: float | None,
     detail: dict[str, Any] | None,
-) -> None:
+    rule_fired: str | None = None,
+) -> bool:
+    """Record a post-freeze attempt that would have changed the cell.
+
+    Written only when it DIFFERS from the last revision recorded for that
+    cell and source (value, source reference, or the rule that fired). The
+    nightly backcast and every Resolver Update re-decide the same frozen
+    cells, and an unconditional insert, each with the full provenance in
+    ``detail_json``, made this table 40% of a 30.6 GB canonical DB by
+    October 2026. Returns whether a row was written.
+    """
+    rule = rule_fired if rule_fired is not None else _revision_rule(detail)
+    last = con.execute(
+        """
+        SELECT new_value, source_ref,
+               COALESCE(rule_fired, json_extract_string(detail_json, '$.observed_rule_fired'),
+                        json_extract_string(detail_json, '$.observed_status'))
+        FROM haz_revisions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ? AND source = ?
+        ORDER BY observed_at DESC
+        LIMIT 1
+        """,
+        [iso3, year, month, hazard, source],
+    ).fetchone()
+    if (
+        last is not None
+        and _same_value(last[0], new_value)
+        and (last[1] or None) == (source_ref or None)
+        and (last[2] or None) == (rule or None)
+    ):
+        return False
     con.execute(
         """
         INSERT INTO haz_revisions
             (iso3, year, month, hazard, source, source_ref,
-             old_value, new_value, detail_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             old_value, new_value, detail_json, rule_fired)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             iso3,
@@ -107,9 +179,11 @@ def _log_revision(
             source_ref,
             old_value,
             new_value,
-            json.dumps(detail) if detail is not None else None,
+            json.dumps(slim_revision_detail(detail), default=str) if detail is not None else None,
+            rule,
         ],
     )
+    return True
 
 
 def _collect_urls(evidence: dict[str, Any]) -> list[str]:
@@ -380,6 +454,7 @@ def write_zero_resolution(
             source_ref="post-freeze re-run",
             old_value=existing[1] if existing else None,
             new_value=0.0,
+            rule_fired=STATUS_RESOLVED_ZERO,
             detail={
                 "note": "re-run after freeze; resolved value not altered",
                 "observed_status": STATUS_RESOLVED_ZERO,

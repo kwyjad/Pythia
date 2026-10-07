@@ -64,9 +64,15 @@ jobs:
             echo "ERROR: resolver.duckdb not found in downloaded artifact"
             exit 1
           fi
-          cp "$SRC" data/resolver.duckdb
+          mv -f "$SRC" data/resolver.duckdb
           rm -f data/resolver.duckdb.wal
           echo "DB downloaded: $(ls -lh data/resolver.duckdb)"
+
+      - name: Is there room to work on the canonical DB
+        run: |
+          set -euo pipefail
+          echo "Disk after download: $(df -h . | tail -1)"
+          python3 -m scripts.ci.db_growth downloaded --db data/resolver.duckdb
 
       - name: Run mark script
         env:

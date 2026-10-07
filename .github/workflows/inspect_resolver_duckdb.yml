@@ -135,6 +135,12 @@ jobs:
           DB_SIZE=$(du -h data/resolver.duckdb | cut -f1)
           echo "Database size: ${DB_SIZE}"
 
+      - name: Is there room to work on the canonical DB
+        run: |
+          set -euo pipefail
+          echo "Disk after download: $(df -h . | tail -1)"
+          python3 -m scripts.ci.db_growth downloaded --db data/resolver.duckdb
+
       - name: Inspect data/resolver.duckdb
         run: |
           python -m scripts.ci.inspect_resolver_db \

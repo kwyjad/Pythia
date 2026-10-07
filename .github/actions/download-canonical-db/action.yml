@@ -70,6 +70,20 @@ inputs:
   per-workflow-limit:
     description: How many recent successful runs to consider per workflow
     default: "10"
+  room-factor:
+    description: >
+      Working room the job needs on top of the DB, as a multiple of its size
+      (plus 2 GB headroom). The job fails straight after the download when
+      free disk is below that, rather than dying of a full disk mid-write or
+      mid-upload (Oct 2026: the DB had reached 30.6 GB). 1.0 for a writer;
+      a compaction, which copies the whole file, passes more.
+    default: "1.0"
+  free-runner-space:
+    description: >
+      "auto" removes the runner's preinstalled toolchains (Android SDK,
+      .NET, GHC, CodeQL; roughly 30 GB) when less than 50 GB is free before
+      the download. "never" leaves them.
+    default: "auto"
 
 outputs:
   run-id:
@@ -85,6 +99,21 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Disk before the canonical DB
+      shell: bash
+      env:
+        FREE_RUNNER_SPACE: ${{ inputs.free-runner-space }}
+      run: |
+        set -uo pipefail
+        echo "Disk before download: $(df -h . | tail -1)"
+        FREE_KB=$(df -Pk . | awk 'NR==2 {print $4}')
+        if [ "${FREE_RUNNER_SPACE}" = "auto" ] && [ "${FREE_KB:-0}" -lt $((50 * 1024 * 1024)) ]; then
+          echo "Less than 50 GB free: removing preinstalled toolchains the pipeline never uses."
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost 2>/dev/null || true
+          echo "Disk after freeing runner space: $(df -h . | tail -1)"
+        fi
+
     - id: download
       shell: bash
       env:
@@ -120,10 +149,9 @@ runs:
             return 1
           fi
           if [ "${src}" != "${DEST}/resolver.duckdb" ]; then
-            cp "${src}" "${DEST}/resolver.duckdb"
-            # Drop the downloaded artifact tree once the canonical copy
-            # exists — otherwise every consumer carries two copies of a
-            # multi-GB DB through the rest of its job.
+            # Moved, not copied: a copy held two 30 GB files at once (Oct
+            # 2026), which is twice the disk the job needs.
+            mv -f "${src}" "${DEST}/resolver.duckdb"
             rm -rf "${DEST}/${ARTIFACT_NAME}"
           fi
           rm -f "${DEST}/resolver.duckdb.wal"
@@ -138,6 +166,11 @@ runs:
               return 0
             fi
             echo "Download from run ${run_id} failed (attempt ${attempt}/${max_attempts})"
+            FREE_KB=$(df -Pk "${DEST}" | awk 'NR==2 {print $4}')
+            if [ "${FREE_KB:-0}" -lt $((1024 * 1024)) ]; then
+              echo "::error title=Disk full during the canonical DB download::Less than 1 GB free after a failed download ($(df -h "${DEST}" | tail -1)). The DB no longer fits this runner; compact it (Compact Resolver DB, apply=true)."
+              exit 1
+            fi
             if [ "${attempt}" -lt "${max_attempts}" ]; then
               sleep_seconds=$((5 * attempt * attempt))
               sleep "${sleep_seconds}"
@@ -270,3 +303,13 @@ runs:
 
         echo "ERROR: No valid ${ARTIFACT_NAME} artifact found across canonical candidates."
         exit 1
+
+    - name: Is there room to work on the canonical DB
+      shell: bash
+      env:
+        DEST: ${{ inputs.dest }}
+        CANONICAL_DB_ROOM_FACTOR: ${{ inputs.room-factor }}
+      run: |
+        set -euo pipefail
+        echo "Disk after download: $(df -h "${DEST}" | tail -1)"
+        python3 -m scripts.ci.db_growth downloaded --db "${DEST}/resolver.duckdb"
