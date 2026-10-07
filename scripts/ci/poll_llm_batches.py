@@ -47,7 +47,7 @@ STAGE_WORKFLOW_NAME = "Pythia Pipeline Stage"
 # a shorter window would both under-count failures and let repeated failed
 # re-dispatches push the submit run (the one carrying the batch-state
 # artifact) out of discovery, silently dropping the pipeline.
-RUNS_PER_WORKFLOW = 30
+RUNS_PER_WORKFLOW = 100
 
 # A stage run that ended one of these ways counts as a spent dispatch
 # attempt for the stall cap.
@@ -135,6 +135,30 @@ def _retry_cooldown_minutes() -> float:
         return 60.0
 
 
+#: The stage-run listing does not reach back to this pipeline's batch state,
+#: so whether its next stage already ran cannot be read: never dispatch, and
+#: never re-arm for it (a lingering old state is the usual case).
+UNKNOWN_OUT_OF_WINDOW = "unknown: run listing does not reach back to this pipeline"
+#: The stage-run listing itself failed: nothing about any pipeline can be read.
+LISTING_UNAVAILABLE = "listing unavailable"
+
+
+def _listing_bounds(runs: list[dict], limit: int) -> tuple[datetime | None, bool]:
+    """(oldest createdAt in the listing, listing holds every run there is)."""
+    complete = len(runs) < limit
+    oldest = None
+    for r in runs:
+        try:
+            ts = datetime.fromisoformat(str(r.get("createdAt") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if oldest is None or ts < oldest:
+            oldest = ts
+    return oldest, complete
+
+
 def _dispatch_decision(
     pid: str,
     next_stage: str,
@@ -143,6 +167,9 @@ def _dispatch_decision(
     *,
     max_attempts: int,
     min_retry_minutes: float,
+    state_created_at: str | None = None,
+    listing_reaches_back_to: datetime | None = None,
+    listing_complete: bool = True,
 ) -> tuple[bool, str]:
     """(dispatch?, reason) for one pipeline's next stage.
 
@@ -152,8 +179,15 @@ def _dispatch_decision(
       2. >= max_attempts failed marker runs → STALLED: never re-dispatch
          (before this cap existed, a red stage was re-dispatched every 15
          minutes forever).
-      3. newest failed marker run younger than the cooldown → wait a tick.
-      4. otherwise → dispatch.
+      3. the listing does not reach back to the batch state → UNKNOWN: never
+         dispatch. A stage run always follows the state that asked for it, so a
+         listing reaching past the state holds any run there is; one that stops
+         short cannot say the stage never ran. On 7 Oct 2026 the 30-run listing
+         had lost the final stages of three pipelines from 1-6 Oct, and a
+         rehearsal's fresh state reopened the activity gate: the poller
+         re-dispatched all three, the first towards uploading a week-old DB.
+      4. newest failed marker run younger than the cooldown → wait a tick.
+      5. otherwise → dispatch.
     """
 
     marker = f"{pid} — {next_stage}"
@@ -167,6 +201,15 @@ def _dispatch_decision(
         return False, "already completed"
     if any(r.get("status") in ("queued", "in_progress") for r in with_marker):
         return False, "already running"
+    if not listing_complete and listing_reaches_back_to is not None:
+        try:
+            state_ts = datetime.fromisoformat(str(state_created_at or "").replace("Z", "+00:00"))
+            if state_ts.tzinfo is None:
+                state_ts = state_ts.replace(tzinfo=timezone.utc)
+        except ValueError:
+            state_ts = None
+        if state_ts is None or state_ts < listing_reaches_back_to:
+            return False, UNKNOWN_OUT_OF_WINDOW
 
     failed = [r for r in with_marker if r.get("conclusion") in FAILED_CONCLUSIONS]
     if len(failed) >= max_attempts:
@@ -193,7 +236,9 @@ def _dispatch_decision(
 # Actions that mean this pipeline still needs another poll. Everything else
 # ("already completed", "STALLED", a failed dispatch) is terminal for the
 # self-rescheduling chain — see _should_rearm.
-REARM_ACTIONS = frozenset({"waiting", "dispatched", "already running", "cooling down"})
+REARM_ACTIONS = frozenset({
+    "waiting", "dispatched", "already running", "cooling down", "listing unavailable",
+})
 
 
 def _chain_depth() -> int:
@@ -307,7 +352,13 @@ def _gh_ok(*args: str) -> bool:
     return subprocess.run(["gh", *args], capture_output=True, text=True).returncode == 0
 
 
-def _list_runs(workflow: str) -> list[dict]:
+def _list_runs(workflow: str) -> list[dict] | None:
+    """The workflow's newest runs, or None when the listing failed.
+
+    None and [] are different answers: an empty listing is no runs, a failed
+    one is unknown, and read as empty it made every lingering pipeline look
+    as if its next stage had never run.
+    """
     try:
         out = _gh(
             "run", "list", "--workflow", workflow, "--branch", "main",
@@ -315,10 +366,16 @@ def _list_runs(workflow: str) -> list[dict]:
             "--limit", str(RUNS_PER_WORKFLOW),
         )
         runs = json.loads(out or "[]")
-        return [r for r in runs if r.get("event") in TRUSTED_EVENTS]
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] gh run list failed for {workflow!r}: {exc}")
-        return []
+        return None
+    # Bounds are read off the WHOLE listing (any event), before the trust
+    # filter narrows it, because that is the window the API returned.
+    _LISTING_BOUNDS[workflow] = _listing_bounds(runs, RUNS_PER_WORKFLOW)
+    return [r for r in runs if r.get("event") in TRUSTED_EVENTS]
+
+
+_LISTING_BOUNDS: dict[str, tuple[datetime | None, bool]] = {}
 
 
 def _download_state(run_id: int, dest: str) -> dict | None:
@@ -372,7 +429,7 @@ def main() -> int:
     states: dict[str, dict] = {}
     with tempfile.TemporaryDirectory() as tmp:
         for workflow in SUBMIT_WORKFLOWS:
-            for run in _list_runs(workflow):
+            for run in _list_runs(workflow) or []:
                 if run.get("conclusion") != "success":
                     continue
                 run_id = run["databaseId"]
@@ -397,6 +454,8 @@ def main() -> int:
 
     # 3. Dispatch-once guard data: existing stage runs (any status).
     stage_runs = _list_runs(STAGE_WORKFLOW_NAME)
+    listing_ok = stage_runs is not None
+    reaches_back_to, listing_complete = _LISTING_BOUNDS.get(STAGE_WORKFLOW_NAME, (None, True))
 
     summary_lines: list[str] = []
     decisions: list[dict] = []
@@ -410,14 +469,24 @@ def main() -> int:
             "batches": [],
         }
         decisions.append(record)
-        dispatch, reason = _dispatch_decision(
-            pid,
-            next_stage,
-            stage_runs,
-            datetime.now(timezone.utc),
-            max_attempts=_max_dispatch_attempts(),
-            min_retry_minutes=_retry_cooldown_minutes(),
-        )
+        if not listing_ok:
+            print(
+                f"::warning title=Poller could not list stage runs::{pid}: whether "
+                f"{next_stage} already ran cannot be read; not dispatching this tick"
+            )
+            dispatch, reason = False, LISTING_UNAVAILABLE
+        else:
+            dispatch, reason = _dispatch_decision(
+                pid,
+                next_stage,
+                stage_runs,
+                datetime.now(timezone.utc),
+                max_attempts=_max_dispatch_attempts(),
+                min_retry_minutes=_retry_cooldown_minutes(),
+                state_created_at=state.get("created_at"),
+                listing_reaches_back_to=reaches_back_to,
+                listing_complete=listing_complete,
+            )
         if not dispatch:
             if reason == "STALLED":
                 print(
