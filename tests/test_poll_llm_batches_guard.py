@@ -370,3 +370,88 @@ def test_runs_a_pull_request_started_are_never_listed(monkeypatch):
     listed = poll_llm_batches._list_runs("Pythia Pipeline Stage")
     assert [r["databaseId"] for r in listed] == [3, 4]
     assert "event" in seen["args"][seen["args"].index("--json") + 1]
+
+
+# --- The listing must reach back to the pipeline (7 Oct 2026) --------------
+#
+# The guard looked for a pipeline's final stage among the newest 30 stage
+# runs. Pipelines from 1, 2 and 6 Oct had fallen out of that window, a
+# rehearsal's fresh batch state reopened the activity gate, and the poller
+# re-dispatched fc_collect_finalize for all three.
+
+
+def _filler(n, oldest_min_ago):
+    return [
+        _run(title="Pythia Pipeline Stage: hs_other — hs_submit", created_min_ago=oldest_min_ago - i)
+        for i in range(n)
+    ]
+
+
+def test_a_pipeline_older_than_the_listing_is_not_dispatched():
+    old_state = (NOW - timedelta(days=6)).isoformat()
+    runs = _filler(100, oldest_min_ago=120)
+    oldest, complete = poll_llm_batches._listing_bounds(runs, 100)
+    assert complete is False
+    dispatch, reason = _dispatch_decision(
+        PID, STAGE, runs, NOW, max_attempts=3, min_retry_minutes=60,
+        state_created_at=old_state, listing_reaches_back_to=oldest,
+        listing_complete=complete,
+    )
+    assert not dispatch
+    assert reason == poll_llm_batches.UNKNOWN_OUT_OF_WINDOW
+
+
+def test_a_recent_cancelled_run_does_not_make_an_old_pipeline_due():
+    # The cancelled re-dispatches are new and visible; the success is not.
+    old_state = (NOW - timedelta(days=6)).isoformat()
+    runs = _filler(99, oldest_min_ago=120) + [
+        _run(conclusion="cancelled", created_min_ago=90)
+    ]
+    oldest, complete = poll_llm_batches._listing_bounds(runs, 100)
+    dispatch, reason = _dispatch_decision(
+        PID, STAGE, runs, NOW, max_attempts=3, min_retry_minutes=0,
+        state_created_at=old_state, listing_reaches_back_to=oldest,
+        listing_complete=complete,
+    )
+    assert not dispatch
+    assert reason == poll_llm_batches.UNKNOWN_OUT_OF_WINDOW
+
+
+def test_a_fresh_pipeline_inside_the_listing_is_still_dispatched():
+    fresh_state = (NOW - timedelta(minutes=30)).isoformat()
+    runs = _filler(100, oldest_min_ago=120)
+    oldest, complete = poll_llm_batches._listing_bounds(runs, 100)
+    dispatch, _ = _dispatch_decision(
+        PID, STAGE, runs, NOW, max_attempts=3, min_retry_minutes=60,
+        state_created_at=fresh_state, listing_reaches_back_to=oldest,
+        listing_complete=complete,
+    )
+    assert dispatch
+
+
+def test_a_complete_listing_answers_for_any_age():
+    old_state = (NOW - timedelta(days=6)).isoformat()
+    runs = _filler(5, oldest_min_ago=120)
+    oldest, complete = poll_llm_batches._listing_bounds(runs, 100)
+    assert complete is True
+    dispatch, _ = _dispatch_decision(
+        PID, STAGE, runs, NOW, max_attempts=3, min_retry_minutes=60,
+        state_created_at=old_state, listing_reaches_back_to=oldest,
+        listing_complete=complete,
+    )
+    assert dispatch
+
+
+def test_an_out_of_window_pipeline_does_not_rearm_the_poller():
+    rearm, _ = _should_rearm([
+        {"pipeline_id": "old", "action": poll_llm_batches.UNKNOWN_OUT_OF_WINDOW},
+    ])
+    assert rearm is False
+
+
+def test_a_failed_listing_is_unknown_not_empty(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("gh exploded")
+
+    monkeypatch.setattr(poll_llm_batches, "_gh", boom)
+    assert poll_llm_batches._list_runs(poll_llm_batches.STAGE_WORKFLOW_NAME) is None
