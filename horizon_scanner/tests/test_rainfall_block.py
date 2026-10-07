@@ -69,7 +69,16 @@ def test_no_category_is_cut_from_the_mm_per_day_anomaly(db):
 
 def test_a_lead_with_no_probability_says_so(db):
     out = sc.load_seasonal_forecasts("NER", db_url=db)
-    assert "Lead 3: tercile probabilities unavailable" in out["nmme_precip_detail"]
+    assert "Lead 3: no tercile probability" in out["nmme_precip_detail"]
+    assert "Lead 3 carries no probability" in out["nmme_precip_outlook"]
+
+
+def test_the_reason_for_a_missing_probability_is_stated_once(db):
+    # Niger, 8 Oct 2026 issue: all seven leads masked put the full sentence in
+    # the prompt seven times.
+    out = sc.load_seasonal_forecasts("MLI", db_url=db)
+    rain = out["nmme_precip_outlook"] + out["nmme_precip_detail"]
+    assert rain.count("dry-season or arid mask") == 1
 
 
 def test_a_country_with_no_probability_says_so_in_the_outlook(db):
