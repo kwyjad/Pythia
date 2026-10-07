@@ -491,3 +491,44 @@ def test_the_empty_listing_cross_check_respects_the_chain_cap(monkeypatch):
     monkeypatch.setenv("POLLER_CHAIN_DEPTH", "5")
     rearm, why = poll_llm_batches._cross_check_empty_listing()
     assert rearm is False and "chain cap" in why
+
+
+# --- A partial run listing is checked too (7 Oct 2026, 17:51) ---
+
+def _main_with_only_finished_pipelines(monkeypatch, tmp_path, artifact_state, action="already completed"):
+    """The 17:51 tick: the listing yields a finished pipeline's state and not the live one."""
+    finished = {"pipeline_id": "hs_old", "next_stage": "fc_collect_finalize",
+                "db_run_id": "1", "created_at": "2026-10-01T00:00:00Z", "pending": []}
+    monkeypatch.setattr(poll_llm_batches, "_list_runs",
+                        lambda wf: [{"databaseId": 1, "conclusion": "success", "event": "workflow_dispatch"},
+                                    {"databaseId": 2, "conclusion": "success", "event": "workflow_dispatch"}])
+    monkeypatch.setattr(poll_llm_batches, "_download_state",
+                        lambda run_id, dest: dict(finished) if run_id == 1 else None)
+    monkeypatch.setattr(poll_llm_batches, "_dispatch_decision", lambda *a, **k: (False, action))
+    monkeypatch.setattr(poll_llm_batches, "_artifact_state", lambda: artifact_state)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(poll_llm_batches, "_DECISION_PATH", str(tmp_path / "d.json"))
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    assert poll_llm_batches.main() == 0
+    import json as _json
+    return out.read_text(), _json.loads((tmp_path / "d.json").read_text())
+
+
+@pytest.mark.parametrize("state", ["in_flight", "unknown"])
+def test_a_listing_missing_the_live_pipeline_keeps_the_chain(monkeypatch, tmp_path, state):
+    out, decision = _main_with_only_finished_pipelines(monkeypatch, tmp_path, (state, "artifact from today"))
+    assert "rearm=true" in out
+    assert decision["rearm"] is True
+    assert "gave no readable batch state" in decision["rearm_reason"]
+
+
+def test_a_listing_of_finished_pipelines_ends_the_chain_when_the_artifacts_agree(monkeypatch, tmp_path):
+    out, decision = _main_with_only_finished_pipelines(monkeypatch, tmp_path, ("idle", "fc_collect_finalize succeeded"))
+    assert "rearm=false" in out
+
+
+def test_a_stalled_pipeline_is_not_re_armed_by_the_artifact_check(monkeypatch, tmp_path):
+    out, decision = _main_with_only_finished_pipelines(
+        monkeypatch, tmp_path, ("in_flight", "no successful final stage"), action="STALLED")
+    assert "rearm=false" in out
