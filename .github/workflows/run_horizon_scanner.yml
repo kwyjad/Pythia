@@ -548,6 +548,12 @@ jobs:
 
           echo "DB selection: source=${DB_SOURCE:-unknown} run_id=${DB_RUN_ID} created=${DB_CREATED_AT:-manual} artifact=${DB_ARTIFACT_NAME:-pythia-resolver-db}"
 
+      - name: Is there room to work on the canonical DB
+        run: |
+          set -euo pipefail
+          echo "Disk after download: $(df -h . | tail -1)"
+          python3 -m scripts.ci.db_growth downloaded --db data/resolver.duckdb
+
       # Step 5: Diagnostics – confirm GEMINI_API_KEY is present
       - name: Diagnostics — GEMINI_API_KEY presence
         env:

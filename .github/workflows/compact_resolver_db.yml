@@ -53,11 +53,17 @@
 ---
 name: Compact Resolver DB
 
-concurrency:
-  group: pythia-resolver-db
-  cancel-in-progress: false
-
+# Scheduled since Oct 2026 (the 4th and the 20th, 04:17 UTC): the canonical
+# DB went 18 GB -> 30.6 GB in nine days, and compaction was manual. The days
+# avoid the SPEI-3 producer (8th), the Resolver Update and forecast window
+# (10th-13th) and the nightly backcast (20:30 UTC). A scheduled run applies
+# the compaction; it is gated on the staged pipeline like the weekly ingest,
+# and the pythia-resolver-db group sits on the writing job, never at the
+# workflow level (a gate that usually skips would take the group's one
+# pending slot).
 "on":
+  schedule:
+    - cron: "17 4 4,20 * *"
   workflow_dispatch:
     inputs:
       apply:
@@ -86,10 +92,37 @@ permissions:
   actions: write
 
 jobs:
+  gate:
+    name: Skip if a staged pipeline is in flight
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: "false"
+        run: python3 -m scripts.ci.check_pipeline_active
+
   compact:
+    needs: gate
+    if: ${{ always() && (github.event_name != 'schedule' || needs.gate.outputs.proceed == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    concurrency:
+      group: pythia-resolver-db
+      cancel-in-progress: false
     env:
+      # A scheduled run has no inputs: it applies the raw-cache compaction.
+      APPLY: ${{ github.event_name == 'schedule' && 'true' || format('{0}', inputs.apply) }}
+      MODE: ${{ github.event_name == 'schedule' && 'compact' || inputs.maintenance }}
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       # haz_raw_* are deliberately in NEITHER list: they shrink by design, and
@@ -122,6 +155,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           force-run-id: ${{ inputs.db_run_id }}
           extra-workflows: Compact Resolver DB
+          # The reclaim step writes a second, compacted file beside the first.
+          room-factor: "1.2"
 
       # The rollback handle. The canonical artifact is immutable per run and
       # retained for 90 days, so recovering from a bad compaction is a
@@ -129,7 +164,7 @@ jobs:
       - name: Record the source run for rollback
         env:
           IN_DB_RUN_ID: ${{ inputs.db_run_id }}
-          IN_APPLY: ${{ inputs.apply }}
+          IN_APPLY: ${{ env.APPLY }}
         run: |
           set -euo pipefail
           SRC_RUN="${CANONICAL_DB_RUN_ID:-${IN_DB_RUN_ID}}"
@@ -169,10 +204,20 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Bytes each producer added per run (db_growth_log) and haz_revisions
+      # rows and provenance bytes per day: the growth before and after the
+      # October 2026 revision dedupe.
+      - name: Growth report
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.db_growth report --db data/resolver.duckdb \
+            --json-out diagnostics/db_growth_report.json | tee diagnostics/db_growth_report.txt
+
       # Always runs, apply or not: the plan is what a human reads before
       # authorising the write.
       - name: "Dry run: the compaction plan"
-        if: inputs.maintenance == 'compact'
+        if: env.MODE == 'compact'
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.retention \
@@ -185,7 +230,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collapse the raw caches
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'compact'
+        if: env.APPLY == 'true' && env.MODE == 'compact'
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.retention \
@@ -204,7 +249,7 @@ jobs:
       # publish_latest_data.yml's own "~14 GB runner disk" note is stale. A
       # copy that dies for want of space otherwise looks like a DuckDB error.
       - name: Reclaim the file
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'compact'
+        if: env.APPLY == 'true' && env.MODE == 'compact'
         run: |
           set -euo pipefail
           echo "disk before: $(df -h . | tail -1)"
@@ -239,7 +284,7 @@ jobs:
       # The audit copy runs on a dry run as well: it is read-only, and it is
       # the record of what the rerun is about to replace.
       - name: "Conflict reset: export the audit copy"
-        if: inputs.maintenance == 'conflict_resolution_reset'
+        if: env.MODE == 'conflict_resolution_reset'
         run: |
           set -euo pipefail
           rm -f data/resolver.duckdb.wal
@@ -259,7 +304,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: "Conflict reset: upload the audit copy"
-        if: inputs.maintenance == 'conflict_resolution_reset'
+        if: env.MODE == 'conflict_resolution_reset'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-audit-prefix-conflict-resolution
@@ -268,7 +313,7 @@ jobs:
           if-no-files-found: error
 
       - name: "Conflict reset: relabel battles-only facts and reset centroids"
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'conflict_resolution_reset'
+        if: env.APPLY == 'true' && env.MODE == 'conflict_resolution_reset'
         run: |
           set -euo pipefail
           python -m resolver.tools.repair_acled_fatalities_metric \
@@ -286,7 +331,7 @@ jobs:
 
       # --- maintenance=conflict_displacement_reset ----------------------
       - name: "Conflict displacement reset: export the audit copy"
-        if: inputs.maintenance == 'conflict_displacement_reset'
+        if: env.MODE == 'conflict_displacement_reset'
         run: |
           set -euo pipefail
           rm -f data/resolver.duckdb.wal
@@ -302,7 +347,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: "Conflict displacement reset: upload the audit copy"
-        if: inputs.maintenance == 'conflict_displacement_reset'
+        if: env.MODE == 'conflict_displacement_reset'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-audit-conflict-displacement
@@ -311,7 +356,7 @@ jobs:
           if-no-files-found: error
 
       - name: "Conflict displacement reset: delete the ACE/PA rows"
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'conflict_displacement_reset'
+        if: env.APPLY == 'true' && env.MODE == 'conflict_displacement_reset'
         run: |
           set -euo pipefail
           python -m scripts.reset_conflict_displacement \
@@ -328,7 +373,7 @@ jobs:
       # required-table regression fails the job BEFORE the upload, so a
       # damaged DB never becomes the canonical artifact.
       - name: DB signature after
-        if: inputs.apply == true || inputs.apply == 'true'
+        if: env.APPLY == 'true'
         run: |
           set -euo pipefail
           python -m scripts.ci.db_signature compare \
@@ -339,7 +384,7 @@ jobs:
             --out diagnostics/db_signature_after.json
 
       - name: Table sizes after
-        if: inputs.apply == true || inputs.apply == 'true'
+        if: env.APPLY == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -366,7 +411,7 @@ jobs:
       # A step's `if:` already implies success(), so naming it as well would
       # only trip the A && B || C shell lint for no behavioural gain.
       - name: Refuse to upload over a newer canonical DB
-        if: inputs.apply == true || inputs.apply == 'true'
+        if: env.APPLY == 'true'
         uses: ./.github/actions/guard-canonical-upload
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -374,7 +419,7 @@ jobs:
           source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload compacted canonical DB
-        if: inputs.apply == true || inputs.apply == 'true'
+        if: env.APPLY == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
@@ -385,7 +430,7 @@ jobs:
       # Resolutions re-resolves ACE/PA under the settled rule, and its
       # workflow_run chain rebuilds scores, calibration and the release.
       - name: "Conflict displacement reset: start the resolution chain"
-        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'conflict_displacement_reset'
+        if: env.APPLY == 'true' && env.MODE == 'conflict_displacement_reset'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

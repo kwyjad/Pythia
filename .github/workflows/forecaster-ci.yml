@@ -109,6 +109,10 @@ on:
       - "scripts/ci/tests/test_build_release_db.py"
       - "scripts/ci/db_table_sizes.py"
       - "scripts/ci/tests/test_db_table_sizes.py"
+      # Disk room after a canonical download, growth before every upload.
+      - "scripts/ci/db_growth.py"
+      - "scripts/ci/tests/test_db_growth.py"
+      - ".github/actions/download-canonical-db/**"
       # The debug bundle and its collectors. Without these the bundle could
       # be changed with nothing running its tests — which is how it came to
       # report "LLM Calls: OK" for a run that had lost four provider
@@ -401,6 +405,7 @@ jobs:
             scripts/ci/tests/test_advice_arm_text.py \
             scripts/ci/tests/test_build_release_db.py \
             scripts/ci/tests/test_db_table_sizes.py \
+            scripts/ci/tests/test_db_growth.py \
             pythia/tests/test_secret_scrub.py \
             forecaster/tests/test_gemini_key_header.py
 

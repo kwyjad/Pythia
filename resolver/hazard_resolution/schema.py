@@ -266,7 +266,8 @@ _CORE_TABLE_DDL: dict[str, str] = {
         old_value DOUBLE,
         new_value DOUBLE,
         detail_json TEXT,
-        observed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        observed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        rule_fired TEXT
     )
     """,
     # Backcast bookkeeping: one row per (hazard, month) the historical
@@ -389,6 +390,9 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str | None], ...] = (
     # JSON list of the ISO3s a 'deferred' backcast month still owes: the
     # resume walks exactly those cells. NULL means the month owes nothing.
     ("haz_backcast_progress", "deferred_cells", "TEXT", None),
+    # The rule that fired on a post-freeze attempt, so an unchanged attempt
+    # is recognised without parsing the provenance JSON (Oct 2026).
+    ("haz_revisions", "rule_fired", "TEXT", None),
     # What decided a ledger month. NULL on every row written before these
     # columns existed, and NULL is meaningful: it says the month was walked
     # by code that did not record its rules, so the resume treats it as

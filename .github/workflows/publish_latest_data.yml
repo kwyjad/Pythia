@@ -1,27 +1,20 @@
 name: Publish Latest Data (Release)
 
 on:
-  workflow_run:
-    # NOTE: "Resolver Update" is intentionally NOT a trigger here. It used to be,
-    # but it kicks off the resolution→scores→calibration chain in parallel with
-    # publish, so a Resolver-Update-triggered publish raced ahead and shipped the
-    # pre-resolution DB (stale resolutions/scores, empty calibration_*). The
-    # calibration workflow now dispatches publish explicitly at the end of that
-    # chain (see compute_calibration_pythia.yml), so the terminus DB always wins.
-    #
-    # NOTE: "Horizon Scanner Triage" is also intentionally NOT a trigger here.
-    # HS Triage completion fires Sibyl Deep Research (run_sibyl.yml); Sibyl
-    # dispatches publish at the end of its run (always, on success). So the
-    # forecast-pipeline release is pythia → Sibyl → publish (a single release),
-    # not a publish racing HS completion in parallel with Sibyl. The forecast
-    # release therefore depends on Sibyl reaching its end — if a Sibyl run breaks,
-    # recover by manually dispatching this workflow (workflow_dispatch).
-    workflows:
-      - "Pythia — Compute Calibration Weights & Advice"
-    types: [completed]
-    # A run triggered from a fork's pull request is never one of ours,
-    # whatever its branch is called; the job if: below checks both.
-    branches: [main]
+  # Dispatch only (Oct 2026). Publish used to subscribe to "Pythia — Compute
+  # Calibration Weights & Advice" by workflow_run AND be dispatched by it at
+  # the end of the calibration job, so one calibration run started Publish
+  # twice (6 Oct 2026: 08:25:00 dispatch, 08:25:07 workflow_run; on 30 Sept
+  # one of a pair was cancelled). The pythia-resolver-db group and this
+  # workflow's own group hold one pending run each, so a spare run can cancel
+  # a wanted one. The dispatch is the one that always fires: GitHub sends no
+  # workflow_run for a chain a bot dispatched, which is why calibration
+  # dispatches Publish itself.
+  #
+  # Publish entry points: Sibyl's end-of-run dispatch (the forecast chain),
+  # calibration's end-of-chain dispatch (the scoring chain), and a person.
+  # "Resolver Update" and "Horizon Scanner Triage" are deliberately not
+  # triggers: each raced its chain and shipped a DB from before it.
   workflow_dispatch:
     inputs:
       run_id:

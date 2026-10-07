@@ -222,6 +222,114 @@ def compact_raw_cache(
     }
 
 
+REVISION_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS haz_revision_collapse_log (
+    collapsed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    rows_before BIGINT,
+    rows_after BIGINT,
+    rows_removed BIGINT
+)
+"""
+
+# The rule an old revision row fired, read from its provenance when the
+# rule_fired column (added Oct 2026) is empty.
+_REVISION_RULE_SQL = (
+    "COALESCE(rule_fired, json_extract_string(detail_json, '$.observed_rule_fired'), "
+    "json_extract_string(detail_json, '$.observed_status'))"
+)
+
+
+def _slim_revision_details(con: "duckdb.DuckDBPyConnection") -> int:
+    """Replace each kept row's provenance with its SHA-256 and byte count.
+
+    The writer stores revisions this way since Oct 2026
+    (``resolutions.slim_revision_detail``); the rows before it carried the
+    whole provenance of an answer that was never applied, ~75 KB each. The
+    hash is of the stored JSON text. Value, source, rule and flags stay.
+    """
+    where = (
+        "json_valid(detail_json) AND (json_extract(detail_json, '$.provenance') IS NOT NULL "
+        "OR json_extract(detail_json, '$.evidence_of_absence') IS NOT NULL)"
+    )
+    n = int(con.execute(f"SELECT COUNT(*) FROM haz_revisions WHERE {where}").fetchone()[0])
+    if not n:
+        return 0
+    con.execute(
+        f"""
+        UPDATE haz_revisions SET detail_json = CAST(json_merge_patch(
+            json_merge_patch(detail_json, '{{"provenance": null, "evidence_of_absence": null}}'),
+            json_object(
+                'provenance_sha256', sha256(CAST(json_extract(detail_json, '$.provenance') AS VARCHAR)),
+                'provenance_bytes', length(CAST(json_extract(detail_json, '$.provenance') AS VARCHAR)),
+                'evidence_of_absence_sha256',
+                    sha256(CAST(json_extract(detail_json, '$.evidence_of_absence') AS VARCHAR)),
+                'evidence_of_absence_bytes',
+                    length(CAST(json_extract(detail_json, '$.evidence_of_absence') AS VARCHAR)),
+                'flags', json_extract(detail_json, '$.provenance.decision.flags')
+            )
+        ) AS VARCHAR)
+        WHERE {where}
+        """
+    )
+    return n
+
+
+def collapse_revisions(con: "duckdb.DuckDBPyConnection", *, apply: bool = False) -> dict[str, Any]:
+    """Collapse ``haz_revisions`` to the rule its writer now follows.
+
+    Per (cell, source), in observed order, a row is kept only when its
+    value, source reference or rule differs from the row before it. The
+    nightly backcast and every Resolver Update had re-logged the same frozen
+    cells with the full provenance on each row: 40% of a 30.6 GB canonical
+    DB in October 2026. Idempotent; an applied collapse is recorded in
+    ``haz_revision_collapse_log`` with the rows removed.
+    """
+    out: dict[str, Any] = {"source": "haz_revisions", "present": _table_exists(con, "haz_revisions"),
+                           "applied": False}
+    if not out["present"]:
+        return out
+    before = int(con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0])
+    dup_sql = f"""
+        WITH s AS (
+            SELECT rowid AS rid, iso3, year, month, hazard, source, observed_at,
+                   new_value, source_ref, {_REVISION_RULE_SQL} AS rule
+            FROM haz_revisions
+        ),
+        l AS (
+            SELECT rid,
+                   LAG(rid) OVER w IS NOT NULL
+                   AND LAG(new_value) OVER w IS NOT DISTINCT FROM new_value
+                   AND LAG(source_ref) OVER w IS NOT DISTINCT FROM source_ref
+                   AND LAG(rule) OVER w IS NOT DISTINCT FROM rule AS dup
+            FROM s
+            WINDOW w AS (PARTITION BY iso3, year, month, hazard, source ORDER BY observed_at, rid)
+        )
+        SELECT rid FROM l WHERE dup
+    """
+    dups = int(con.execute(f"SELECT COUNT(*) FROM ({dup_sql})").fetchone()[0])
+    out.update(rows_before=before, rows_after=before - dups, removed=dups)
+    if not apply:
+        return out
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute(f"DELETE FROM haz_revisions WHERE rowid IN ({dup_sql})")
+        con.execute(f"UPDATE haz_revisions SET rule_fired = {_REVISION_RULE_SQL} WHERE rule_fired IS NULL")
+        out["slimmed"] = _slim_revision_details(con)
+        con.execute(REVISION_LOG_DDL)
+        after = int(con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0])
+        con.execute(
+            "INSERT INTO haz_revision_collapse_log (rows_before, rows_after, rows_removed) VALUES (?, ?, ?)",
+            [before, after, before - after],
+        )
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    out.update(rows_after=after, removed=before - after, applied=True)
+    LOG.info("[retention] haz_revisions: %d -> %d rows (%d removed)", before, after, before - after)
+    return out
+
+
 def compact_all(
     con: "duckdb.DuckDBPyConnection",
     *,
@@ -241,6 +349,12 @@ def compact_all(
         except Exception as exc:
             LOG.error("[retention] %s failed: %s", source, exc)
             out[source] = {"source": source, "error": str(exc), "applied": False}
+    if sources is None:
+        try:
+            out["haz_revisions"] = collapse_revisions(con, apply=apply)
+        except Exception as exc:
+            LOG.error("[retention] haz_revisions failed: %s", exc)
+            out["haz_revisions"] = {"source": "haz_revisions", "error": str(exc), "applied": False}
     return out
 
 

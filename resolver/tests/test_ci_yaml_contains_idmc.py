@@ -239,6 +239,8 @@ WF_STAGE = pathlib.Path(".github/workflows/pythia_pipeline_stage.yml")
 WF_POLLER = pathlib.Path(".github/workflows/poll_llm_batches.yml")
 WF_INGEST = pathlib.Path(".github/workflows/ingest-structured-data.yml")
 WF_BACKCAST = pathlib.Path(".github/workflows/haz_backcast.yml")
+WF_COMPACT = pathlib.Path(".github/workflows/compact_resolver_db.yml")
+WF_CALIBRATION = pathlib.Path(".github/workflows/compute_calibration_pythia.yml")
 
 
 def _steps(path: pathlib.Path, job: str) -> list[dict]:
@@ -294,7 +296,7 @@ def test_db_concurrency_group_is_on_the_writing_job_not_the_gate() -> None:
     single pending slot before deciding anything, and a newer queued run
     cancels whatever is pending — a poller-dispatched stage or the
     monthly hs_submit cron itself (the 13th)."""
-    for path, job in ((WF_INGEST, "ingest"), (WF_BACKCAST, "backcast")):
+    for path, job in ((WF_INGEST, "ingest"), (WF_BACKCAST, "backcast"), (WF_COMPACT, "compact")):
         data = _load_yaml(path)
         assert "concurrency" not in data, f"{path}: concurrency must not be workflow-level"
         assert data["jobs"][job]["concurrency"]["group"] == "pythia-resolver-db", path
@@ -338,3 +340,57 @@ def test_fc_collect_resolves_the_epoch_from_stage_state_before_newest_hs_run() -
 def test_poller_rearm_dispatch_retries_before_breaking_the_chain() -> None:
     step = _step(WF_POLLER, "poll", "Reschedule next poll")
     assert "for attempt in" in step["run"] and "gh workflow run poll_llm_batches.yml" in step["run"]
+
+
+def _on(data: dict) -> dict:
+    # PyYAML reads an unquoted `on:` key as the boolean True.
+    return data.get("on") or data.get(True) or {}
+
+
+def test_publish_is_started_once_per_calibration_run() -> None:
+    """Calibration dispatched Publish AND Publish subscribed to Calibration
+    by workflow_run, so one calibration run started Publish twice (6 Oct
+    2026, 08:25:00 and 08:25:07). The dispatch is the one that always fires."""
+    on = _on(_load_yaml(WF_PUBLISH))
+    assert "workflow_run" not in on
+    assert "workflow_dispatch" in on
+    assert "gh workflow run publish_latest_data.yml" in WF_CALIBRATION.read_text(encoding="utf-8")
+
+
+def test_compaction_is_scheduled_on_days_that_collide_with_nothing() -> None:
+    """The canonical DB went 18 GB -> 30.6 GB in nine days with compaction
+    manual. The schedule avoids the 8th (SPEI-3), the 10th-13th (Resolver
+    Update, its chain, the forecast) and the nightly backcast (20:30)."""
+    on = _on(_load_yaml(WF_COMPACT))
+    crons = [c["cron"] for c in on["schedule"]]
+    assert crons
+    for cron in crons:
+        minute, hour, dom = cron.split()[:3]
+        days = {int(d) for d in dom.split(",")}
+        assert not days & {8, 10, 11, 12, 13}, cron
+        assert int(hour) not in (20, 21), cron
+    data = _load_yaml(WF_COMPACT)
+    gate = data["jobs"]["gate"]
+    assert "check_pipeline_active" in str(gate["steps"])
+    assert data["jobs"]["compact"]["needs"] == "gate"
+
+
+def test_scheduled_compaction_is_watched() -> None:
+    import importlib
+
+    mod = importlib.import_module("scripts.ci.check_workflow_freshness")
+    assert "Compact Resolver DB" in {w.name for w in mod.WATCHED}
+
+
+def test_every_canonical_download_checks_disk_room() -> None:
+    """A runner that dies of a full disk mid-upload must not be how a jump
+    in DB size is discovered (Oct 2026: 30.6 GB)."""
+    action = pathlib.Path(".github/actions/download-canonical-db/action.yml").read_text(encoding="utf-8")
+    assert "scripts.ci.db_growth downloaded" in action
+    guard = pathlib.Path(".github/actions/guard-canonical-upload/action.yml").read_text(encoding="utf-8")
+    assert "scripts.ci.db_growth before-upload" in guard
+    for wf in pathlib.Path(".github/workflows").glob("*.yml"):
+        text = wf.read_text(encoding="utf-8")
+        bespoke = "gh run download" in text and "pythia-resolver-db" in text
+        if bespoke and "download-canonical-db" not in text and wf.name != "publish_latest_data.yml":
+            assert "scripts.ci.db_growth downloaded" in text, wf.name
