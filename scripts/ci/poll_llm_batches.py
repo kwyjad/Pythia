@@ -308,6 +308,40 @@ def _should_rearm(decisions: list[dict]) -> tuple[bool, str]:
     )
 
 
+def _artifact_state() -> tuple[str, str]:
+    """The pipeline gate's answer from the ARTIFACT listing: in_flight | idle | unknown.
+
+    A seam for tests; it asks a different endpoint from ``gh run list``, so a
+    glitch in one is not repeated by the other.
+    """
+    try:
+        from scripts.ci.check_pipeline_active import read_state
+
+        return read_state(datetime.now(timezone.utc), attempts=2, backoff=10.0)
+    except Exception as exc:  # noqa: BLE001
+        return "unknown", f"could not ask the artifact listing ({type(exc).__name__}: {exc})"
+
+
+def _cross_check_empty_listing() -> tuple[bool, str]:
+    """(rearm?, why) when the run listing yielded no batch state at all.
+
+    On 7 Oct 2026 one tick of a live chain got an empty answer from ``gh run
+    list`` (0.7 s, no error), read it as "no pipelines" and stopped re-arming
+    with four batches in flight. Nothing but that one listing said so, so an
+    empty result is checked against the artifact listing: only a definite
+    ``idle`` ends the chain; ``in_flight`` or ``unknown`` re-arms without
+    dispatching anything, bounded by the chain cap.
+    """
+    state, reason = _artifact_state()
+    if state == "idle":
+        return False, f"no batch-state artifacts ({reason})"
+    depth, cap = _chain_depth(), _max_chain()
+    if depth >= cap:
+        return False, f"chain cap reached ({depth}/{cap}) with the listing empty and the artifact check {state}"
+    return True, (f"the run listing held no batch state, but the artifact check reads {state} "
+                  f"({reason}); re-arming without dispatching")
+
+
 def _write_decisions(decisions: list[dict], rearm: bool, why: str, path: str) -> None:
     """Persist why the poller did what it did (gap G6).
 
@@ -447,9 +481,13 @@ def main() -> int:
                     states[pid] = state
 
     if not states:
-        print("No pending pipelines (no pythia-batch-state artifacts found).")
-        _write_output("rearm", "false")
-        _write_decisions([], False, "no batch-state artifacts", _DECISION_PATH)
+        rearm, why = _cross_check_empty_listing()
+        if rearm:
+            print(f"::warning title=Poller found no pipelines::{why}")
+        else:
+            print("No pending pipelines (no pythia-batch-state artifacts found).")
+        _write_output("rearm", "true" if rearm else "false")
+        _write_decisions([], rearm, why, _DECISION_PATH)
         return 0
 
     # 3. Dispatch-once guard data: existing stage runs (any status).

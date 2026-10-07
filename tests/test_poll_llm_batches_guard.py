@@ -455,3 +455,39 @@ def test_a_failed_listing_is_unknown_not_empty(monkeypatch):
 
     monkeypatch.setattr(poll_llm_batches, "_gh", boom)
     assert poll_llm_batches._list_runs(poll_llm_batches.STAGE_WORKFLOW_NAME) is None
+
+
+# --- An empty run listing is checked against the artifact listing (7 Oct 2026) ---
+
+def _main_with_empty_listing(monkeypatch, tmp_path, artifact_state):
+    monkeypatch.setattr(poll_llm_batches, "_list_runs", lambda wf: [])
+    monkeypatch.setattr(poll_llm_batches, "_artifact_state", lambda: artifact_state)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(poll_llm_batches, "_DECISION_PATH", str(tmp_path / "d.json"))
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    assert poll_llm_batches.main() == 0
+    import json as _json
+    return out.read_text(), _json.loads((tmp_path / "d.json").read_text())
+
+
+@pytest.mark.parametrize("state", ["in_flight", "unknown"])
+def test_an_empty_listing_with_a_live_artifact_keeps_the_chain(monkeypatch, tmp_path, state):
+    out, decision = _main_with_empty_listing(monkeypatch, tmp_path, (state, "batch-state artifact from today"))
+    assert "rearm=true" in out
+    assert decision["rearm"] is True
+    assert decision["decisions"] == []  # nothing dispatched
+
+
+def test_an_empty_listing_with_no_live_artifact_ends_the_chain(monkeypatch, tmp_path):
+    out, decision = _main_with_empty_listing(monkeypatch, tmp_path, ("idle", "outside the 72h window"))
+    assert "rearm=false" in out
+    assert decision["rearm"] is False
+
+
+def test_the_empty_listing_cross_check_respects_the_chain_cap(monkeypatch):
+    monkeypatch.setattr(poll_llm_batches, "_artifact_state", lambda: ("unknown", "x"))
+    monkeypatch.setenv("POLLER_MAX_CHAIN", "5")
+    monkeypatch.setenv("POLLER_CHAIN_DEPTH", "5")
+    rearm, why = poll_llm_batches._cross_check_empty_listing()
+    assert rearm is False and "chain cap" in why
