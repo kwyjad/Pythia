@@ -322,24 +322,52 @@ def _artifact_state() -> tuple[str, str]:
         return "unknown", f"could not ask the artifact listing ({type(exc).__name__}: {exc})"
 
 
-def _cross_check_empty_listing() -> tuple[bool, str]:
-    """(rearm?, why) when the run listing yielded no batch state at all.
+def _cross_check_stop(what: str) -> tuple[bool, str]:
+    """(rearm?, why) when the run listing gives the poller no reason to go on.
 
-    On 7 Oct 2026 one tick of a live chain got an empty answer from ``gh run
-    list`` (0.7 s, no error), read it as "no pipelines" and stopped re-arming
-    with four batches in flight. Nothing but that one listing said so, so an
-    empty result is checked against the artifact listing: only a definite
-    ``idle`` ends the chain; ``in_flight`` or ``unknown`` re-arms without
-    dispatching anything, bounded by the chain cap.
+    The run listing is not the only witness. On 7 Oct 2026 one tick of a live
+    chain got an empty answer from ``gh run list`` (16:35) and another found
+    the batch states of two finished pipelines and not the live one (17:51,
+    most likely one failed ``gh run download``); both read it as "nothing in
+    flight" and stopped re-arming with gpt-6-luna batches still running. So
+    before the chain stops it asks the ARTIFACT listing: only a definite
+    ``idle`` ends it; ``in_flight`` or ``unknown`` re-arms without dispatching
+    anything, bounded by the chain cap. ``what`` names what the run listing
+    said, for the log.
     """
     state, reason = _artifact_state()
     if state == "idle":
-        return False, f"no batch-state artifacts ({reason})"
+        return False, f"{what} ({reason})"
     depth, cap = _chain_depth(), _max_chain()
     if depth >= cap:
-        return False, f"chain cap reached ({depth}/{cap}) with the listing empty and the artifact check {state}"
-    return True, (f"the run listing held no batch state, but the artifact check reads {state} "
+        return False, f"chain cap reached ({depth}/{cap}) with {what} and the artifact check {state}"
+    return True, (f"{what}, but the artifact check reads {state} "
                   f"({reason}); re-arming without dispatching")
+
+
+def _cross_check_empty_listing() -> tuple[bool, str]:
+    """The empty-listing case of ``_cross_check_stop`` (kept for its callers)."""
+    return _cross_check_stop("the run listing held no batch state")
+
+
+def _final_rearm(decisions: list[dict], download_failures: int) -> tuple[bool, str]:
+    """(rearm?, why) at the end of a tick that found at least one batch state.
+
+    ``_should_rearm`` answers from the states the run listing yielded. When it
+    says stop, a live pipeline may simply be missing from that listing, so the
+    artifact check is asked first — except where a pipeline is STALLED, which
+    must stay stopped (the artifact check would read it as in flight until it
+    left the 72-hour window).
+    """
+    rearm, why = _should_rearm(decisions)
+    if rearm:
+        return rearm, why
+    if any(d.get("action") == "STALLED" for d in decisions):
+        return rearm, why
+    what = why
+    if download_failures:
+        what = f"{why}; {download_failures} successful run(s) gave no readable batch state"
+    return _cross_check_stop(what)
 
 
 def _write_decisions(decisions: list[dict], rearm: bool, why: str, path: str) -> None:
@@ -461,6 +489,7 @@ def _poll_provider(provider: str, provider_batch_id: str) -> str:
 def main() -> int:
     # 1-2. Newest batch-state per pipeline across submit-capable workflows.
     states: dict[str, dict] = {}
+    download_failures = 0
     with tempfile.TemporaryDirectory() as tmp:
         for workflow in SUBMIT_WORKFLOWS:
             for run in _list_runs(workflow) or []:
@@ -468,6 +497,11 @@ def main() -> int:
                     continue
                 run_id = run["databaseId"]
                 state = _download_state(run_id, os.path.join(tmp, str(run_id)))
+                if state is None:
+                    # A run with no batch state (a final stage) also lands
+                    # here, so this counts and does not warn.
+                    download_failures += 1
+                    continue
                 if not state or not state.get("pipeline_id") or not state.get("next_stage"):
                     continue
                 problem = state_problem(state)
@@ -588,7 +622,7 @@ def main() -> int:
             record["reason"] = str(exc)
             summary_lines.append(f"{pid}: dispatch FAILED: {exc}")
 
-    rearm, why = _should_rearm(decisions)
+    rearm, why = _final_rearm(decisions, download_failures)
     _write_output("rearm", "true" if rearm else "false")
     _write_output("chain_depth_next", str(_chain_depth() + 1))
     _write_decisions(decisions, rearm, why, _DECISION_PATH)
