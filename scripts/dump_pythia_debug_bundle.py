@@ -2457,11 +2457,16 @@ def _forecast_run_exists(con: duckdb.DuckDBPyConnection, run_id: str) -> bool:
 
 
 def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list[dict[str, Any]]:
+    # hs_run_id and track as THIS forecaster run saw them (run_questions): a
+    # test run's production questions name the production scan as origin.
+    from pythia.run_questions import link_overlay  # noqa: PLC0415
+
+    join, hs_expr, track_expr = link_overlay(con, "q", "rq")
     rows = con.execute(
-        """
+        f"""
         SELECT DISTINCT
             q.question_id,
-            q.hs_run_id,
+            {hs_expr} AS hs_run_id,
             q.iso3,
             q.hazard_code,
             q.metric,
@@ -2469,15 +2474,16 @@ def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list
             q.window_start_date,
             q.window_end_date,
             q.wording,
-            q.track
+            {track_expr} AS track
         FROM questions q
+        {join}
         JOIN forecasts_ensemble fe
           ON fe.question_id = q.question_id
          AND fe.run_id = ?
         WHERE q.status = 'active'
         ORDER BY q.iso3, q.hazard_code, q.metric, q.question_id
         """,
-        [run_id],
+        [run_id, run_id] if join else [run_id],
     ).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:

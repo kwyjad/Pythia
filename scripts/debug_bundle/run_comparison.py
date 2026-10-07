@@ -93,14 +93,25 @@ def _forecaster_run_for(con, hs_run_id: str) -> str | None:
     if not _columns(con, "forecasts_ensemble") or not _columns(con, "questions"):
         return None
     try:
-        row = con.execute(
-            """
-            SELECT run_id FROM forecasts_ensemble
-            WHERE question_id IN (SELECT question_id FROM questions WHERE hs_run_id = ?)
-            GROUP BY run_id ORDER BY COUNT(*) DESC LIMIT 1
-            """,
-            [hs_run_id],
-        ).fetchone()
+        from pythia.run_questions import in_run_clause  # noqa: PLC0415
+
+        clause, n = in_run_clause(con, "q")
+        row = None
+        if _columns(con, "run_questions"):
+            row = con.execute(
+                "SELECT MAX(forecaster_run_id) FROM run_questions "
+                "WHERE hs_run_id = ? AND forecaster_run_id IS NOT NULL",
+                [hs_run_id],
+            ).fetchone()
+        if not (row and row[0]):
+            row = con.execute(
+                f"""
+                SELECT run_id FROM forecasts_ensemble
+                WHERE question_id IN (SELECT q.question_id FROM questions q WHERE {clause})
+                GROUP BY run_id ORDER BY COUNT(*) DESC LIMIT 1
+                """,
+                [hs_run_id] * n,
+            ).fetchone()
     except Exception:
         return None
     return str(row[0]) if row and row[0] else None
@@ -117,8 +128,11 @@ def _metrics_for_run(con, hs_run_id: str) -> dict[str, Any]:
         "hs_run_id": hs_run_id,
         "forecaster_run_id": fc_run_id or "",
     }
+    from pythia.run_questions import in_run_clause  # noqa: PLC0415
+
+    clause, n = in_run_clause(con, "q")
     out["questions_generated"] = _scalar(
-        con, "SELECT COUNT(*) FROM questions WHERE hs_run_id = ?", [hs_run_id]
+        con, f"SELECT COUNT(*) FROM questions q WHERE {clause}", [hs_run_id] * n
     )
     out["countries_covered"] = _scalar(
         con, "SELECT COUNT(DISTINCT iso3) FROM hs_triage WHERE run_id = ?", [hs_run_id]

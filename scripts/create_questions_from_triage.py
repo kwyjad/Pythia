@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import duckdb
 
 from pythia.db.schema import ensure_schema
+from pythia.run_questions import backfill_run_questions, record_run_question
 from pythia.test_mode import is_test_mode
 from pythia.tools.question_repairs import repair_questions_pointing_at_test_scans  # noqa: F401  re-exported
 
@@ -397,6 +398,23 @@ def _upsert_question(
         "SELECT COALESCE(is_test, FALSE) FROM questions WHERE question_id = ?", [question_id]
     ).fetchone()
     meta_json = json.dumps(metadata, ensure_ascii=False)
+    # Every run records the questions it asked for, as it saw them, whatever
+    # happens to the questions row below. A test run in an epoch production
+    # has already opened leaves the production row alone and still finds the
+    # question through this link (the 6 Oct 2026 rehearsal forecast 2 of 21).
+    record_run_question(
+        con,
+        hs_run_id=hs_run_id,
+        question_id=question_id,
+        iso3=iso3,
+        hazard_code=hazard_code,
+        metric=metric,
+        track=track,
+        tier=(metadata or {}).get("tier"),
+        triage_score=(metadata or {}).get("triage_score"),
+        metadata=metadata,
+        is_test=is_test,
+    )
     if existing and is_test and not bool(existing[0]):
         # A test run changes nothing on a production question. Same-epoch
         # test scans used to re-point hs_run_id and the metadata at
@@ -457,6 +475,17 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
     try:
         ensure_schema(con)
         repair_questions_pointing_at_test_scans(con)
+        try:
+            backfill = backfill_run_questions(con)
+            if backfill.get("runs_examined"):
+                print(
+                    "run_questions backfill: "
+                    f"{backfill['runs_linked']} of {backfill['runs_examined']} run(s) linked, "
+                    f"{backfill['links_written']} link(s) written; could not reconstruct: "
+                    f"{', '.join(backfill['unreconstructable']) or 'none'}"
+                )
+        except Exception as exc:  # noqa: BLE001 - a backfill must never stop question creation
+            print(f"run_questions backfill skipped: {exc}")
         run_id = _select_hs_run_id(con, hs_run_id)
         if not run_id:
             print("create_questions_from_triage: no hs_run_id found; nothing to do.")

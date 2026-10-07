@@ -63,6 +63,7 @@ from interpreter import gating as _gating
 from pythia.config import load as load_cfg
 from pythia.tools.base_rate_spd import base_rate_spd, _as_of_ym
 from pythia.tools.compute_scores import _load_spd
+from pythia.tools._db_utils import column_exists
 from resolver.db import duckdb_io
 
 LOGGER = logging.getLogger(__name__)
@@ -397,16 +398,24 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
         else:
             rid_clause, rid_params = "", []
 
+        # A row is test when its question OR its forecast is: a same-epoch
+        # test run forecasts production questions, and a deviation row
+        # stamped from the question alone reads as production in every
+        # production view (the compute_scores rule, Oct 2026).
+        fr_test = (
+            "COALESCE(fr.is_test, FALSE)" if column_exists(conn, "forecasts_raw", "is_test") else "FALSE"
+        )
         pairs = conn.execute(
             f"""
-            SELECT DISTINCT fr.run_id, fr.question_id, fr.model_name,
+            SELECT fr.run_id, fr.question_id, fr.model_name,
                    q.iso3, q.hazard_code, upper(q.metric) AS metric,
                    q.window_start_date, q.target_month,
-                   COALESCE(q.is_test, FALSE) AS is_test
+                   BOOL_OR(COALESCE(q.is_test, FALSE) OR {fr_test}) AS is_test
             FROM forecasts_raw fr
             JOIN questions q ON q.question_id = fr.question_id
             WHERE fr.model_name IN ({model_list})
               {rid_clause}
+            GROUP BY ALL
             ORDER BY fr.run_id, fr.question_id, fr.model_name
             """,
             rid_params,

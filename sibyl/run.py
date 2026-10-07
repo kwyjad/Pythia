@@ -373,7 +373,7 @@ def process_question(
         logger.error("sibyl.run: aggregation failed for %s: %s", question.question_id, exc)
         return outcome
 
-    standard_run_id = find_standard_run_id(con, question.question_id)
+    standard_run_id = find_standard_run_id(con, question.question_id, question.hs_run_id)
     forecast_run_id = standard_run_id or sibyl_run_id
     standard = (
         load_standard_spd_by_month(

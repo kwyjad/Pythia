@@ -98,6 +98,7 @@ HS_DIRECT_TABLES = [
     ("hs_stage_state", "run_id"),  # staged-pipeline carry state
     ("llm_calls", "hs_run_id"),
     ("run_provenance", "hs_run_id"),
+    ("run_questions", "hs_run_id"),  # the run's question set (Oct 2026)
 ]
 
 # Tables deleted by question_id cascade

@@ -222,6 +222,46 @@ jobs:
             python -m sibyl.run | tee sibyl_stdout.txt
           fi
 
+      # Runs BEFORE the deviation step and the current-run bundle (Oct 2026):
+      # a test run in an epoch production has already opened forecasts
+      # production questions, so "the latest run" picks production and the
+      # bundles must be told which forecaster run this cycle was.
+      # Dispatched from fc_collect_finalize the identifiers arrive as inputs
+      # and db_run_id IS that stage's run; from workflow_run (the legacy HS
+      # workflow) the triggering run is the source and nothing else is
+      # supplied. Either way one helper fills in what is missing from the
+      # canonical DB and fetches the stage's pythia-stage-context artifact
+      # into debug/stage_context/ (a stub when it is missing — a reader must
+      # never have to guess whether a collector failed or a file was never
+      # produced). pipeline_id matters: without it the bundle's workflow-log
+      # collector captures this job's logs and nothing else.
+      - name: Resolve bundle identifiers and fetch stage context
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_DB_RUN_ID: ${{ github.event.inputs.db_run_id }}
+          INPUT_PIPELINE_ID: ${{ github.event.inputs.pipeline_id }}
+          INPUT_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
+          INPUT_FORECASTER_RUN_ID: ${{ github.event.inputs.forecaster_run_id }}
+          TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set +e
+          mkdir -p debug
+          SRC_RUN="${INPUT_DB_RUN_ID}"
+          if [ -z "${SRC_RUN}" ]; then
+            SRC_RUN="${TRIGGERING_RUN_ID}"
+          fi
+          python -m scripts.ci.sibyl_bundle_context \
+            --db "${RESOLVER_DB_URL}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
+            --hs-run-id "${INPUT_HS_RUN_ID}" \
+            --forecaster-run-id "${INPUT_FORECASTER_RUN_ID}" \
+            --stage-context-run-id "${SRC_RUN}" \
+            --stage-context-dir debug/stage_context \
+            --github-env "${GITHUB_ENV}"
+          exit 0
+
       # Deviation-from-base-rate rows (forecast_deviation) — recomputed here
       # so Sibyl's forecasts (written under the standard forecaster run_id
       # with model_name='sibyl') get deviation rows too, and so the legacy
@@ -247,8 +287,12 @@ jobs:
         continue-on-error: true
         run: |
           set +e
+          ARGS=()
+          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
+            ARGS+=(--run-id "${FORECASTER_RUN_ID}")
+          fi
           python -m scripts.ai_bundle.build_current_run_bundle \
-            --db "${RESOLVER_DB_URL}" --out-dir ai_bundle
+            --db "${RESOLVER_DB_URL}" --out-dir ai_bundle "${ARGS[@]}"
           exit 0
 
       # What the selection gate did, and what the base-rate anchors rest on.
@@ -374,42 +418,6 @@ jobs:
       # diagnostics bug must never cost the run its DB upload or its
       # publish dispatch, both of which follow.
       # ------------------------------------------------------------------
-
-      # Dispatched from fc_collect_finalize the identifiers arrive as inputs
-      # and db_run_id IS that stage's run; from workflow_run (the legacy HS
-      # workflow) the triggering run is the source and nothing else is
-      # supplied. Either way one helper fills in what is missing from the
-      # canonical DB and fetches the stage's pythia-stage-context artifact
-      # into debug/stage_context/ (a stub when it is missing — a reader must
-      # never have to guess whether a collector failed or a file was never
-      # produced). pipeline_id matters: without it the bundle's workflow-log
-      # collector captures this job's logs and nothing else.
-      - name: Resolve bundle identifiers and fetch stage context
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_DB_RUN_ID: ${{ github.event.inputs.db_run_id }}
-          INPUT_PIPELINE_ID: ${{ github.event.inputs.pipeline_id }}
-          INPUT_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
-          INPUT_FORECASTER_RUN_ID: ${{ github.event.inputs.forecaster_run_id }}
-          TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id }}
-        run: |
-          set +e
-          mkdir -p debug
-          SRC_RUN="${INPUT_DB_RUN_ID}"
-          if [ -z "${SRC_RUN}" ]; then
-            SRC_RUN="${TRIGGERING_RUN_ID}"
-          fi
-          python -m scripts.ci.sibyl_bundle_context \
-            --db "${RESOLVER_DB_URL}" \
-            --pipeline-id "${INPUT_PIPELINE_ID}" \
-            --hs-run-id "${INPUT_HS_RUN_ID}" \
-            --forecaster-run-id "${INPUT_FORECASTER_RUN_ID}" \
-            --stage-context-run-id "${SRC_RUN}" \
-            --stage-context-dir debug/stage_context \
-            --github-env "${GITHUB_ENV}"
-          exit 0
 
       # The bundle captures this cycle's Actions logs and the raw provider
       # batch objects, so the credentials are scoped to this step only. The

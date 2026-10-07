@@ -1825,6 +1825,12 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        # A run's question SET, apart from a question's origin (Oct 2026):
+        # see pythia/run_questions.py.
+        from pythia.run_questions import ensure_run_questions  # noqa: PLC0415
+
+        ensure_run_questions(con)
+
         _ensure_table_and_columns(
             con,
             "forecasts_ensemble",
