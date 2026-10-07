@@ -313,7 +313,30 @@ _RESOLUTION_SEMANTICS = """\
   REPLACES the row, so `resolution_vintages` keeps the first resolution and
   those taken ~60 and ~90 days after month end (`vintage` = first / d60 /
   d90, with the actual `days_after_month_end`). Compare them to see whether
-  an outcome moved after it was scored.
+  an outcome moved after it was scored. ACE/PA keeps first / d180 / d270.
+- `resolution_reading` (in `scores_flat.csv`, `forecast_vs_outcome.csv` and
+  each record's `outcome.resolutions`) names the reading the resolution a
+  score used was taken at: `first`, or the latest milestone the resolution's
+  own date had reached (d60 / d90 for FATALITIES, d180 / d270 for ACE/PA).
+"""
+
+_INDICATIVE_SEMANTICS = """ACE/PA (conflict displacement) resolves from IDMC, which most countries
+report late and irregularly. For a country IDMC does not report in at least
+8 of the 12 months before a month, that month resolves only when IDMC
+reports something, so its resolved months are a selected sample. Such a
+resolution carries `scoring_class = 'indicative'` (with
+`scoring_class_reason`); every other resolution is `scored` (NULL for
+hazards and metrics other than ACE/PA reads as scored).
+
+Indicative months are still forecast, published, resolved and scored, but
+they are LEFT OUT of `rollups.csv`, `headline.json`, `skill_history.csv`,
+the digest's skill and sharpness tables, and every calibration step
+(weights, advice, recalibration, centroids, the Sibyl comparison).
+`indicative_questions.csv` lists them, one row per score, with the reason;
+`rollups.csv` and `headline.json` count what each group left out in
+`n_indicative_excluded`. `scores_flat.csv` and `forecast_vs_outcome.csv`
+carry every row with its `scoring_class`, so filter on it before computing
+a skill figure of your own.
 """
 
 _REASONING_TRACE = """\
@@ -589,7 +612,9 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "4. `case_studies/` — pre-selected best/worst questions per score "
         "family (same record shape, plus Sibyl trial traces when available).",
         "5. Flat tables: `scores_flat.csv`, `forecast_vs_outcome.csv`, "
-        "`rollups.csv`, `calibration_weights.csv`, `calibration_advice.md`.",
+        "`rollups.csv`, `calibration_weights.csv`, `calibration_advice.md`, "
+        "`indicative_questions.csv` (ACE/PA months left out of every skill "
+        "figure, with the reason).",
         "6. Error attribution: `headline.json` first, then `trace_stages_summary.csv` "
         "(start or adjustments?), `update_value_summary.csv`, `rc_outcomes_summary.csv`, "
         "`experiments.csv`, `skill_history.csv`, `tail_outcomes.csv`, "
@@ -622,6 +647,9 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "## Resolution semantics",
         "",
         _RESOLUTION_SEMANTICS,
+        "## Indicative questions (ACE/PA)",
+        "",
+        _INDICATIVE_SEMANTICS,
         "## Reasoning traces",
         "",
         _REASONING_TRACE,
@@ -820,8 +848,9 @@ _QUESTION_RECORD_SCHEMA = """\
   why: each (hazard, metric) needs 20 resolved questions with member Brier
   scores, and the file gives the count so far. A new version of a model
   family inherits its predecessor's record as a prior (`inherited_from`).
-- `outcome`: resolutions per horizon (value, observed_month, source_desc)
-  plus `unresolved_horizons` (absent ≠ zero!).
+- `outcome`: resolutions per horizon (value, observed_month, source_desc,
+  `scoring_class`, `resolution_reading`) plus `unresolved_horizons`
+  (absent ≠ zero!).
 - `scores`: [{horizon_m, model_name, score_type, value}].
 - `sibyl`: status, divergences, cost; `trials` (full belief traces) present
   in case_studies/ or when built with --include-sibyl-trials=all.

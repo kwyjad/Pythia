@@ -215,6 +215,32 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(pool) / len(pool) if pool else None
 
 
+#: ``resolutions.scoring_class`` of an ACE/PA month that is forecast and
+#: resolved but never marked (pythia/tools/scoring_class.py). Literal here so
+#: this module stays pure.
+INDICATIVE = "indicative"
+
+
+def split_indicative(
+    paired: Sequence[Sequence[Any]],
+) -> tuple[list[tuple[float, float]], int]:
+    """(scored pairs, number of indicative pairs left out).
+
+    Each row is ``(model_score, reference_score)`` or ``(model_score,
+    reference_score, scoring_class)``. An indicative ACE/PA month is a
+    selected sample: it never enters a skill figure or the small-sample
+    count, and the count of what was left out is reported beside it.
+    """
+    kept: list[tuple[float, float]] = []
+    dropped = 0
+    for row in paired:
+        if len(row) >= 3 and str(row[2] or "").lower() == INDICATIVE:
+            dropped += 1
+            continue
+        kept.append((row[0], row[1]))
+    return kept, dropped
+
+
 def bootstrap_skill(
     paired: Sequence[tuple[float, float]],
     *,
@@ -229,11 +255,15 @@ def bootstrap_skill(
     comparison fair, and resampling the two sides independently would inflate
     the interval by comparing different question sets.
 
+    A row may carry a third element, its scoring class; indicative rows are
+    left out (``split_indicative``).
+
     Seeded, because an interval that moves between two runs of one dataset is
     not evidence of anything.
     """
+    scored, _ = split_indicative(paired)
     pool = [
-        (float(a), float(b)) for a, b in paired
+        (float(a), float(b)) for a, b in scored
         if a is not None and b is not None
     ]
     if not pool:
@@ -287,11 +317,13 @@ def skill_claim(
     number is offered. That is the whole discipline: the report declines,
     rather than hedging in prose beside a number the reader will keep.
     """
-    result = bootstrap_skill(paired, samples=samples)
-    n = result["n_resolved"] if result else len(paired)
+    scored, n_indicative = split_indicative(paired)
+    result = bootstrap_skill(scored, samples=samples)
+    n = result["n_resolved"] if result else len(scored)
     base = {
         "label": label,
         "n_resolved": n,
+        "n_indicative_excluded": n_indicative,
         "min_resolved": int(min_resolved),
         "claim_allowed": False,
         "verdict": VERDICT_TOO_FEW,

@@ -379,6 +379,10 @@ def _render_entry(
     if tags:
         lines.append(f"*{'; '.join(tags)}.*")
         lines.append("")
+    scoring_note = _first_for(qids, extras.get("scoring_notes"))
+    if scoring_note:
+        lines.append(f"*{scoring_note}*")
+        lines.append("")
     if entry.get("why_it_stands_out"):
         lines.append(_r("why_it_stands_out"))
     # Which of the two figures moved. Generated, because "worsening" is a

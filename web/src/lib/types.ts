@@ -625,6 +625,9 @@ export type InterpreterAttentionEntry = {
   // The two figures a response planner can act on, as a sentence. The
   // placeholders are resolved server-side, like every other figure.
   planning_sentence?: string;
+  // Generated server-side for a conflict displacement entry IDMC cannot
+  // score fairly (Oct 2026).
+  scoring_note?: string;
   spd_shape?: string;
   how_to_read_the_distribution?: string;
   what_the_model_was_reacting_to?: string;

@@ -275,6 +275,11 @@ def _member_rows(con) -> List[Tuple]:
         "WHERE _lr.question_id = fr.question_id)"
         if _has_col(con, "forecasts_ensemble", "run_id") else ""
     )
+    # An indicative ACE/PA month is a selected sample and never fits a
+    # factor (pythia/tools/scoring_class.py).
+    from pythia.tools.scoring_class import scored_only_clause  # noqa: PLC0415
+
+    scored = scored_only_clause(con, "r")
     sql = f"""
         SELECT fr.question_id, fr.model_name, fr.month_index, fr.bucket_index,
                fr.probability, upper(q.hazard_code), upper(q.metric),
@@ -286,7 +291,7 @@ def _member_rows(con) -> List[Tuple]:
           AND fr.probability IS NOT NULL
           AND fr.bucket_index IS NOT NULL
           AND fr.model_name NOT LIKE '\\_\\_ext\\_%' ESCAPE '\\'
-          AND fr.model_name NOT LIKE '%\\_\\_recal' ESCAPE '\\'{latest}
+          AND fr.model_name NOT LIKE '%\\_\\_recal' ESCAPE '\\'{latest}{scored}
     """
     return con.execute(sql).fetchall()
 

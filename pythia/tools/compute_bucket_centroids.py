@@ -13,6 +13,7 @@ from resolver.db import duckdb_io
 
 from pythia.buckets import bucket_schema_version, get_bucket_specs
 from pythia.config import load as load_cfg
+from pythia.tools.scoring_class import scored_only_clause
 
 
 LOGGER = logging.getLogger(__name__)
@@ -260,7 +261,9 @@ def update_bucket_centroids_ema(
                 )
         case_sql = "\n                ".join(case_lines)
 
-        # Compute empirical mean per (hazard_code, bucket) from resolutions
+        # Compute empirical mean per (hazard_code, bucket) from resolutions.
+        # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
+        # selected sample and never moves a centroid.
         empirical_sql = f"""
             WITH res_with_bucket AS (
                 SELECT
@@ -270,7 +273,7 @@ def update_bucket_centroids_ema(
                 FROM resolutions r
                 JOIN questions q ON q.question_id = r.question_id
                 WHERE upper(q.metric) = ?
-                  AND r.value IS NOT NULL
+                  AND r.value IS NOT NULL{scored_only_clause(conn, "r", prefix=chr(10) + "                  AND ")}
             )
             SELECT
                 COALESCE(UPPER(hazard_code), '*') AS hazard_code,

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+from pythia.tools.scoring_class import scored_only_clause
 from pythia.config import load as load_cfg
 from resolver.db import duckdb_io
 
@@ -161,6 +162,9 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
     # let them into the weights.
     if _column_exists(conn, "scores", "is_test"):
         sql += "        AND COALESCE(s.is_test, FALSE) = FALSE\n"
+    # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
+    # selected sample and never moves a weight.
+    sql += scored_only_clause(conn, "s", prefix="        AND ") + "\n"
     rows = conn.execute(sql, [as_of_month]).fetchall()
 
     samples: List[Sample] = []

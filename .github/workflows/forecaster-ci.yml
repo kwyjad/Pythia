@@ -22,6 +22,14 @@ on:
       - "forecaster/**"
       - "horizon_scanner/**"
       - "pythia/db/**"
+      # Indicative ACE/PA months stay out of calibration, advice, the Sibyl
+      # comparison and every skill figure (test_scored_only_exclusions.py).
+      - "pythia/tests/test_scored_only_exclusions.py"
+      - "pythia/tests/test_scoring_class.py"
+      - "sibyl/advice.py"
+      - "sibyl/score_variants.py"
+      - "sibyl/shadow.py"
+      - "interpreter/performance.py"
       - "pythia/tools/**"
       - "pythia/web_research/**"
       - "pythia/llm_profiles.py"
@@ -527,7 +535,9 @@ jobs:
             pythia/tests/test_score_baselines.py \
             pythia/tests/test_scoring_honesty.py \
             pythia/tests/test_score_is_test_from_forecast.py \
-            pythia/tests/test_api_sibyl_comparison.py
+            pythia/tests/test_api_sibyl_comparison.py \
+            pythia/tests/test_scored_only_exclusions.py \
+            pythia/tests/test_scoring_class.py
 
       - name: Run debug-bundle tests
         run: |

@@ -53,6 +53,7 @@ from scripts.ai_bundle.common import (
     triage_view,
 )
 from scripts.ai_bundle.guides import build_analyst_guide, build_question_record_schema_md
+from pythia.tools.scoring_class import has_scoring_class, scored_only_sql
 
 LOGGER = logging.getLogger(__name__)
 
@@ -67,6 +68,44 @@ BRIEFING_BUDGET_KB = 300
 # Warn-only ceiling for the whole zip (GitHub artifact limits are the real
 # constraint; the per-file guards only cover digest/briefing).
 _ZIP_WARN_MB = 500
+
+
+# ---------------------------------------------------------------------------
+# Scoring class and resolution reading (ACE/PA, Oct 2026)
+# ---------------------------------------------------------------------------
+
+
+def _resolution_extra_cols(con, alias: str = "r") -> str:
+    """``scoring_class``, ``scoring_class_reason`` and the resolution's date,
+    NULL on a DB whose resolutions table predates them."""
+    p = f"{alias}." if alias else ""
+    sc = (f"{p}scoring_class" if column_exists(con, "resolutions", "scoring_class")
+          else "CAST(NULL AS VARCHAR)")
+    scr = (f"{p}scoring_class_reason" if column_exists(con, "resolutions", "scoring_class_reason")
+           else "CAST(NULL AS VARCHAR)")
+    ca = (f"CAST({p}created_at AS DATE)" if column_exists(con, "resolutions", "created_at")
+          else "CAST(NULL AS DATE)")
+    return f"{sc} AS scoring_class, {scr} AS scoring_class_reason, {ca} AS resolved_on"
+
+
+def _resolution_reading(hazard: Any, metric: Any, observed_month: Any, resolved_on: Any) -> str | None:
+    """The reading (first, or d60/d90, d180/d270) the resolution was taken at
+    (``compute_resolutions.reading_label``); None when it cannot be said."""
+    if not observed_month or resolved_on is None:
+        return None
+    try:
+        from datetime import date as _date
+
+        from pythia.tools.compute_resolutions import reading_label  # noqa: PLC0415
+
+        as_of = resolved_on if isinstance(resolved_on, _date) else _date.fromisoformat(str(resolved_on)[:10])
+        return reading_label(str(hazard or ""), str(metric or ""), str(observed_month)[:7], as_of)
+    except Exception:  # noqa: BLE001 - a label never costs a row
+        return None
+
+
+def _is_indicative(row: Mapping[str, Any]) -> bool:
+    return str(row.get("scoring_class") or "").lower() == "indicative"
 
 
 def _score_family(metric: str | None) -> str:
@@ -566,11 +605,16 @@ def build_question_record(
             con,
             "SELECT horizon_m, observed_month, value, source_snapshot_ym"
             + (", source_desc" if has_source_desc else "")
+            + ", " + _resolution_extra_cols(con, "")
             + " FROM resolutions WHERE question_id = ? ORDER BY horizon_m",
             [qid],
         )
         for r in resolution_rows:
             r["realized_bucket"] = _realized_bucket(con, metric, r.get("value"))
+            r["resolution_reading"] = _resolution_reading(
+                hz, metric, r.get("observed_month"), r.pop("resolved_on", None))
+            if r.get("scoring_class_reason") is None:
+                r.pop("scoring_class_reason", None)
         resolved_horizons = {int(r["horizon_m"]) for r in resolution_rows if r.get("horizon_m") is not None}
         record["outcome"] = {
             "resolutions": resolution_rows,
@@ -646,9 +690,11 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
     has_source_desc = has_res and column_exists(con, "resolutions", "source_desc")
     has_run_id = column_exists(con, "scores", "run_id")
     res_cols = (
-        "r.value AS resolved_value, r.observed_month, r.source_snapshot_ym"
+        "r.value AS resolved_value, r.observed_month, r.source_snapshot_ym, "
+        + _resolution_extra_cols(con, "r")
         if has_res else
-        "NULL AS resolved_value, NULL AS observed_month, NULL AS source_snapshot_ym"
+        "NULL AS resolved_value, NULL AS observed_month, NULL AS source_snapshot_ym, "
+        "NULL AS scoring_class, NULL AS scoring_class_reason, NULL AS resolved_on"
     )
     rows = rows_as_dicts(
         con,
@@ -669,16 +715,67 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
         " ORDER BY s.question_id, s.model_name, s.score_type, s.horizon_m",
         [qids],
     )
+    for r in rows:
+        r["resolution_reading"] = _resolution_reading(
+            r.get("hazard_code"), r.get("metric"), r.get("observed_month"), r.get("resolved_on"))
     write_csv(
         out_dir / "scores_flat.csv",
         [
             "question_id", "iso3", "hazard_code", "metric", "score_family",
             "horizon_m", "model_name", "score_type", "value", "resolved_value",
             "observed_month", "source_snapshot_ym", "source_desc", "run_id",
-            "is_latest_run",
+            "is_latest_run", "scoring_class", "resolution_reading",
         ],
         rows,
     )
+
+
+INDICATIVE_COLUMNS = [
+    "question_id", "iso3", "hazard_code", "metric", "horizon_m", "observed_month", "value",
+    "scoring_class_reason", "resolution_reading", "model_name", "score_type", "score_value",
+]
+
+
+def _emit_indicative_questions(con, out_dir: Path, qids: list[str]) -> int:
+    """indicative_questions.csv: every indicative ACE/PA resolution of the
+    bundled questions, one row per score of the latest run (or one row with
+    empty score columns when none), with the reason it is not marked."""
+    rows: list[dict[str, Any]] = []
+    if qids and table_exists(con, "resolutions") and has_scoring_class(con):
+        has_scores = table_exists(con, "scores")
+        score_join = (
+            "LEFT JOIN scores s ON s.question_id = r.question_id AND s.horizon_m = r.horizon_m"
+            + latest_run_clause(con, "s") + " "
+            if has_scores else ""
+        )
+        score_cols = ("s.model_name, s.score_type, s.value AS score_value"
+                      if has_scores else
+                      "NULL AS model_name, NULL AS score_type, NULL AS score_value")
+        rows = rows_as_dicts(
+            con,
+            "SELECT r.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric, r.horizon_m, "
+            "r.observed_month, r.value, " + _resolution_extra_cols(con, "r") + ", "
+            f"{score_cols} FROM resolutions r "
+            "JOIN questions q ON q.question_id = r.question_id "
+            f"{score_join}"
+            "WHERE r.scoring_class = 'indicative' "
+            "AND r.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
+            "ORDER BY r.question_id, r.horizon_m, s.model_name, s.score_type"
+            if has_scores else
+            "SELECT r.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric, r.horizon_m, "
+            "r.observed_month, r.value, " + _resolution_extra_cols(con, "r") + ", "
+            f"{score_cols} FROM resolutions r "
+            "JOIN questions q ON q.question_id = r.question_id "
+            "WHERE r.scoring_class = 'indicative' "
+            "AND r.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
+            "ORDER BY r.question_id, r.horizon_m",
+            [qids],
+        )
+        for r in rows:
+            r["resolution_reading"] = _resolution_reading(
+                r.get("hazard_code"), r.get("metric"), r.get("observed_month"), r.get("resolved_on"))
+    write_csv(out_dir / "indicative_questions.csv", INDICATIVE_COLUMNS, rows)
+    return len(rows)
 
 
 def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = None) -> list[dict[str, Any]]:
@@ -689,6 +786,9 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = No
         con,
         f"SELECT fe.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric, {track_sql} AS track, "
         "fe.model_name, r.horizon_m, r.value AS resolved_value, "
+        + ("r.observed_month" if column_exists(con, "resolutions", "observed_month")
+           else "CAST(NULL AS VARCHAR) AS observed_month") + ", "
+        + _resolution_extra_cols(con, "r") + ", "
         "fe.bucket_index, fe.probability, fe.ev_value "
         "FROM forecasts_ensemble fe "
         "JOIN questions q ON q.question_id = fe.question_id "
@@ -717,6 +817,9 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = No
                 "horizon_m": r["horizon_m"],
                 "resolved_value": r["resolved_value"],
                 "ev_value": r.get("ev_value"),
+                "scoring_class": r.get("scoring_class"),
+                "resolution_reading": _resolution_reading(
+                    r["hazard_code"], r["metric"], r.get("observed_month"), r.get("resolved_on")),
                 "_probs": {},
             },
         )
@@ -729,7 +832,8 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = No
     if refs:
         res_rows = rows_as_dicts(
             con,
-            "SELECT r.question_id, r.horizon_m, r.value, q.iso3, q.hazard_code, "
+            "SELECT r.question_id, r.horizon_m, r.value, r.observed_month, q.iso3, q.hazard_code, "
+            + _resolution_extra_cols(con, "r") + ", "
             f"UPPER(q.metric) AS metric, {track_sql} AS track FROM resolutions r "
             "JOIN questions q ON q.question_id = r.question_id "
             "WHERE r.question_id IN (SELECT UNNEST(?::VARCHAR[]))",
@@ -750,6 +854,9 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = No
                 "horizon_m": h,
                 "resolved_value": res["value"],
                 "ev_value": None,
+                "scoring_class": res.get("scoring_class"),
+                "resolution_reading": _resolution_reading(
+                    res["hazard_code"], res["metric"], res.get("observed_month"), res.get("resolved_on")),
                 "_probs": {i + 1: p for i, p in enumerate(vec)},
             }
 
@@ -781,6 +888,7 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = No
             "horizon_m", "resolved_value", "realized_bucket", "p_realized_bucket",
             "modal_bucket", "p_modal_bucket", "ev_value", "bucket_edge",
             "nearest_boundary", "input_partial_month", "probs",
+            "scoring_class", "resolution_reading",
         ],
         out_rows,
     )
@@ -864,8 +972,10 @@ def _rollup_samples(con, qids: list[str], ctx: Any = None) -> list[dict[str, Any
         "SELECT q.hazard_code, UPPER(q.metric) AS metric, "
         "CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END "
         f"AS score_family, {track_sql} AS track, s.model_name, s.score_type, "
-        "s.question_id, s.horizon_m, s.value "
-        "FROM scores s JOIN questions q ON q.question_id = s.question_id "
+        "s.question_id, s.horizon_m, s.value, "
+        + (f"NOT ({scored_only_sql('s')}) AS indicative "
+           if has_scoring_class(con) else "FALSE AS indicative ")
+        + "FROM scores s JOIN questions q ON q.question_id = s.question_id "
         "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
         + latest_run_clause(con, "s"),
         [qids],
@@ -908,13 +1018,25 @@ def _emit_rollups(
 ) -> list[dict[str, Any]]:
     import statistics
 
-    samples = _rollup_samples(con, qids, ctx)
+    all_samples = _rollup_samples(con, qids, ctx)
+    # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
+    # selected sample: never in a mean or a skill figure, and each row says
+    # how many questions it left out rather than dropping them silently.
+    samples = [sm for sm in all_samples if not sm.get("indicative")]
+    excluded: dict[tuple, set] = {}
     groups: dict[tuple, list[dict[str, Any]]] = {}
-    for sm in samples:
-        groups.setdefault(_row_key(sm), []).append(sm)
+    for sm in all_samples:
+        groups.setdefault(_row_key(sm), [])
+        if sm.get("indicative"):
+            excluded.setdefault(_row_key(sm), set()).add(sm["question_id"])
+        else:
+            groups[_row_key(sm)].append(sm)
+    first_of = {}
+    for sm in all_samples:
+        first_of.setdefault(_row_key(sm), sm)
     rows: list[dict[str, Any]] = []
     for key, sms in groups.items():
-        first = sms[0]
+        first = sms[0] if sms else first_of[key]
         vals = [float(x["value"]) for x in sms if x["value"] is not None]
         rows.append({
             "hazard_code": first["hazard_code"], "metric": first["metric"],
@@ -928,6 +1050,7 @@ def _emit_rollups(
             "n_questions_scored": len({x["question_id"] for x in sms}),
             "mean_value": (sum(vals) / len(vals)) if vals else None,
             "median_value": statistics.median(vals) if vals else None,
+            "n_indicative_excluded": len(excluded.get(key, ())),
         })
     rows.sort(key=lambda r: (str(r["score_family"]), str(r["hazard_code"]), str(r["metric"]),
                              str(r["track"]), int(r.get("horizon_m") or 0),
@@ -951,7 +1074,7 @@ def _emit_rollups(
             "correction", "block_version_pooled", "model_name", "score_type",
             "n_samples", "n_questions", "n_questions_scored", "mean_value", "median_value",
             "n_paired", "paired_model_mean", "climatology_mean", "skill_vs_climatology",
-            "cost_per_question_usd",
+            "cost_per_question_usd", "n_indicative_excluded",
         ],
         rows,
     )
@@ -1216,7 +1339,7 @@ def _sharpness_lines(fvo_rows: list[dict[str, Any]]) -> list[str]:
     """
     by_q: dict[tuple, dict[str, dict[str, Any]]] = {}
     for r in fvo_rows:
-        if r.get("metric") == "EVENT_OCCURRENCE":
+        if r.get("metric") == "EVENT_OCCURRENCE" or _is_indicative(r):
             continue
         if r.get("model_name") not in _PRIMARY_AGGREGATES + _SHARPNESS_REFERENCES:
             continue
@@ -1444,6 +1567,15 @@ def _write_digest(
             f"| {rps} | {_skill(c) if c else '—'} |"
         )
 
+    n_ind = len({(r["question_id"], r["horizon_m"]) for r in (fvo_rows or []) if _is_indicative(r)})
+    if n_ind:
+        lines += [
+            "",
+            f"_{n_ind} indicative ACE/PA (question, horizon) resolution(s) are left out of the "
+            "table above and of every skill figure: IDMC does not report those countries "
+            "regularly, so their resolved months are a selected sample. They are listed in "
+            "`indicative_questions.csv`._",
+        ]
     lines += _sharpness_lines(fvo_rows or [])
     lines += _error_digest_lines(error_parts)
 
@@ -1777,6 +1909,15 @@ def build_bundle(
             write_csv(staging / "inject_health.csv", _err.INJECT_HEALTH_COLUMNS, inject_rows)
 
         _emit_scores_flat(con, staging, qids)
+        try:
+            n_indicative_rows = _emit_indicative_questions(con, staging, qids)
+            indicative_error = None
+        except Exception as exc:  # noqa: BLE001 - the table never costs the bundle
+            n_indicative_rows = 0
+            indicative_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning("indicative_questions.csv failed: %s", indicative_error)
+            write_csv(staging / "indicative_questions.csv", ["stub_reason"],
+                      [{"stub_reason": indicative_error}])
         resolution_sources = _emit_resolution_sources(con, staging, qids)
         fvo_rows = _emit_forecast_vs_outcome(con, staging, qids, err_ctx)
         rollups = _emit_rollups(con, staging, qids, costs, err_ctx)
@@ -1860,6 +2001,16 @@ def build_bundle(
                     if r.get("verdict") == "FAIL"
                 ],
                 "lineups": _lineups_seen(staging, summaries),
+                "indicative_questions": {
+                    "file": "indicative_questions.csv",
+                    "rows": n_indicative_rows,
+                    "error": indicative_error,
+                    "note": (
+                        "ACE/PA months whose resolution is indicative (IDMC does not report "
+                        "the country regularly): resolved and scored, but left out of every "
+                        "skill figure and calibration step"
+                    ),
+                },
                 "error_attribution": {
                     "files": err_sections.files,
                     "context_error": err_ctx_error,

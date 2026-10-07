@@ -522,6 +522,12 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
     if as_of_month and "observed_month" in r_cols:
         where.append("observed_month <= ?")
         params.append(as_of_month)
+    # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
+    # selected sample and never part of Sibyl's record.
+    from pythia.tools.scoring_class import has_scoring_class, scored_only_sql  # noqa: PLC0415
+
+    if has_scoring_class(con):
+        where.append(scored_only_sql("resolutions"))
     outcomes: Dict[str, List[float]] = {}
     horizons: Dict[str, List[Optional[int]]] = {}
     h_col = "horizon_m" if "horizon_m" in r_cols else "CAST(NULL AS INTEGER)"
@@ -598,6 +604,9 @@ def load_question_scores(con, records: Sequence[SibylRecord]) -> Dict[str, Dict[
         return {}
     s_cols = _cols(con, "scores")
     test = " AND NOT COALESCE(is_test, FALSE)" if "is_test" in s_cols else ""
+    from pythia.tools.scoring_class import scored_only_clause  # noqa: PLC0415
+
+    test += scored_only_clause(con, "scores")
     out: Dict[str, Dict[str, Dict[str, float]]] = {}
     for r in records:
         rows = con.execute(

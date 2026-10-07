@@ -56,6 +56,7 @@ from scripts.ai_bundle.common import (
     write_csv,
     write_json,
 )
+from pythia.tools.scoring_class import INDICATIVE
 
 LOGGER = logging.getLogger(__name__)
 
@@ -419,6 +420,10 @@ class Context:
     primary: dict[str, str] = field(default_factory=dict)
     #: {question_id: {member with a __raw sibling}}, filled by index_scores().
     raw_siblings: dict[str, set[str]] = field(default_factory=dict)
+    #: {(question_id, horizon_m)} whose resolution is an indicative ACE/PA
+    #: month (pythia/tools/scoring_class.py): never in a headline or skill
+    #: history figure.
+    indicative: set[tuple[str, int]] = field(default_factory=set)
 
     def index_scores(self) -> None:
         models: dict[str, set[str]] = defaultdict(set)
@@ -649,15 +654,17 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
     outcomes: dict[tuple[str, int], dict[str, Any]] = {}
     if table_exists(con, "resolutions"):
         om = "observed_month" if column_exists(con, "resolutions", "observed_month") else "NULL"
+        sc = "scoring_class" if column_exists(con, "resolutions", "scoring_class") else "NULL"
         try:
-            for qid, h, v, obs in con.execute(
-                f"SELECT question_id, horizon_m, value, {om} FROM resolutions"
+            for qid, h, v, obs, scls in con.execute(
+                f"SELECT question_id, horizon_m, value, {om}, {sc} FROM resolutions"
             ).fetchall():
                 meta = qmeta.get(str(qid))
                 if meta is None or h is None:
                     continue
                 metric = meta["metric"]
-                rec: dict[str, Any] = {"value": v, "observed_month": _ym(obs)}
+                rec: dict[str, Any] = {"value": v, "observed_month": _ym(obs),
+                                       "scoring_class": scls}
                 if _family(metric) == "binary":
                     rec["event"] = None if v is None else (1 if float(v) >= 0.5 else 0)
                     rec["bucket0"] = None if v is None else (0 if float(v) >= 0.5 else 1)
@@ -672,6 +679,7 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
     ctx = Context(con=con, include_test=include_test, qmeta=qmeta, outcomes=outcomes,
                   bundle_qids=[str(x) for x in bundle_qids if str(x) in qmeta], problems=problems)
     ctx.scores = _load_scores(con, latest)
+    ctx.indicative = {k for k, o in outcomes.items() if o.get("scoring_class") == INDICATIVE}
     ctx.index_scores()
     return ctx
 
@@ -1417,6 +1425,8 @@ def _skill_pairs(ctx: Context, qids: Iterable[str] | None = None) -> list[dict[s
             continue
         if model.startswith("__ext_") or model == "sibyl":
             continue
+        if (qid, h) in ctx.indicative:
+            continue
         primary = primary_aggregate(ctx, qid)
         if model == primary:
             role = "primary"
@@ -1786,18 +1796,26 @@ def build_headline(ctx: Context) -> dict[str, Any]:
     """
     bundle = set(ctx.bundle_qids)
     groups: dict[tuple, dict[str, Any]] = {}
+    excluded: dict[tuple, set[str]] = defaultdict(set)
     for (qid, model, h, st), v in ctx.scores.items():
         if qid not in bundle or model != primary_aggregate(ctx, qid):
             continue
         meta = ctx.qmeta[qid]
         if st not in ("brier", "crps") or (st == "crps" and _family(meta["metric"]) == "binary"):
             continue
-        g = groups.setdefault((meta["hazard_code"], meta["metric"], meta["track"]), {})
+        gkey = (meta["hazard_code"], meta["metric"], meta["track"])
+        if (qid, h) in ctx.indicative:
+            # Counted, never pooled: an indicative month is a selected sample.
+            excluded[gkey].add(qid)
+            groups.setdefault(gkey, {})
+            continue
+        g = groups.setdefault(gkey, {})
         g.setdefault(st, []).append((qid, h, model, v))
     out_groups = []
     for (hz, metric, track), by_st in sorted(groups.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
         entry: dict[str, Any] = {"hazard_code": hz, "metric": metric, "score_family": _family(metric),
-                                 "track": track, "scores": {}}
+                                 "track": track, "scores": {},
+                                 "n_indicative_excluded": len(excluded.get((hz, metric, track), ()))}
         for st, items in by_st.items():
             clim_pairs: dict[str, list[tuple[float, float]]] = defaultdict(list)
             for qid, h, _m, v in items:
@@ -1870,6 +1888,10 @@ def build_headline(ctx: Context) -> dict[str, Any]:
             "else track2_flash"
         ),
         "seed": SEED, "bootstrap": BOOTSTRAP, "min_n": MIN_N,
+        "indicative_excluded": (
+            "indicative ACE/PA months (resolutions.scoring_class) are left out of every "
+            "figure; n_indicative_excluded counts the questions each group left out"
+        ),
         "questions_resolved_per_horizon": {str(h): n for h, n in sorted(by_h.items())},
         "groups": out_groups,
     }

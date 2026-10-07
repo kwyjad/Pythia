@@ -285,6 +285,21 @@ def load_resolutions(con) -> Dict[str, Dict[int, float]]:
     return out
 
 
+def indicative_keys(con) -> set:
+    """{(question_id, horizon_m)} whose resolution is an indicative ACE/PA
+    month (pythia/tools/scoring_class.py): scored, never fitted on."""
+    from pythia.tools.scoring_class import INDICATIVE, has_scoring_class  # noqa: PLC0415
+
+    if not has_scoring_class(con):
+        return set()
+    return {
+        (str(q), int(h))
+        for q, h in con.execute(
+            "SELECT question_id, horizon_m FROM resolutions WHERE scoring_class = ?", [INDICATIVE]
+        ).fetchall()
+    }
+
+
 def covered_months(con) -> Dict[Tuple[str, str], set]:
     """{(hazard, metric): calendar months the resolver resolved for that class}."""
     if not _cols(con, "resolutions") or not _cols(con, "questions"):
@@ -330,6 +345,7 @@ def score_variants(con, *, as_of_month: Optional[str] = None) -> Dict[str, Any]:
         return counters
     resolved = load_resolutions(con)
     covered = covered_months(con)
+    indicative = indicative_keys(con)
     cases: Dict[str, List[Tuple[List[float], List[float], int]]] = {}
 
     for f in forecasts:
@@ -378,7 +394,8 @@ def score_variants(con, *, as_of_month: Optional[str] = None) -> Dict[str, Any]:
                        value, j, now)
                 counters["scored_shadow"] += 1
             counters["shadow_trial_rows"] += _write_shadow_trials(con, f, h, j, value, now)
-            if raw is not None and ref is not None and len(raw) == len(ref) and not f["is_test"]:
+            if (raw is not None and ref is not None and len(raw) == len(ref) and not f["is_test"]
+                    and (qid, h) not in indicative):
                 cases.setdefault(qid, []).append((ref, raw, j))
 
         if f["hazard_code"] in TWO_PART_HAZARDS:

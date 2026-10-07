@@ -125,6 +125,7 @@ from pythia.tools._db_utils import (
     row_count as _row_count,
     table_exists as _table_exists,
 )
+from pythia.tools.scoring_class import INDICATIVE_REASON_SHORT, conflict_scoring_class
 from pythia.tools.base_rate_spd import (
     CONFLICT_DISPLACEMENT_SERIES,
     CONFLICT_STATUS_QUIET,
@@ -712,6 +713,33 @@ def _purge_non_series_fatalities(conn) -> int:
 VINTAGE_MILESTONES: tuple[tuple[str, int], ...] = (("d60", 60), ("d90", 90))
 VINTAGE_TOLERANCE_DAYS = 5
 VINTAGE_METRICS = frozenset({"FATALITIES"})
+#: Conflict displacement (ACE/PA) settles far more slowly: of a month's
+#: eventual recommended IDMC figure, 68% had arrived 90 days after month end
+#: and 90% at 180 (probe of 6 Oct 2026). The first reading is the one taken
+#: at the 90-day settle period; the later ones at ~180 and ~270 days.
+VINTAGE_MILESTONES_BY_GROUP: dict[tuple[str, str], tuple[tuple[str, int], ...]] = {
+    ("*", "FATALITIES"): VINTAGE_MILESTONES,
+    ("ACE", "PA"): (("d180", 180), ("d270", 270)),
+}
+
+
+def vintage_milestones(hazard: str, metric: str) -> Optional[tuple[tuple[str, int], ...]]:
+    """The later readings kept for a (hazard, metric), or None for none."""
+    key = (str(hazard or "").upper(), str(metric or "").upper())
+    return VINTAGE_MILESTONES_BY_GROUP.get(key) or VINTAGE_MILESTONES_BY_GROUP.get(("*", key[1]))
+
+
+def reading_label(hazard: str, metric: str, observed_month: str, as_of: date) -> str:
+    """Which reading a resolution taken on ``as_of`` is: ``first`` or the
+    latest milestone reached (the scored bundle states it per score)."""
+    milestones = vintage_milestones(hazard, metric) or ()
+    days = _days_after_month_end(observed_month, as_of)
+    label = "first"
+    if days is not None:
+        for name, milestone in milestones:
+            if days >= milestone - VINTAGE_TOLERANCE_DAYS:
+                label = name
+    return label
 
 
 def _ensure_vintage_table(conn) -> None:
@@ -765,6 +793,7 @@ def record_vintages(
     source_ts: Optional[str],
     today: date,
     is_test: bool,
+    milestones: Optional[tuple[tuple[str, int], ...]] = None,
 ) -> list[str]:
     """Insert the vintages this resolution completes; returns their labels.
 
@@ -776,7 +805,7 @@ def record_vintages(
     labels = ["first"]
     if days is not None:
         labels += [
-            label for label, milestone in VINTAGE_MILESTONES
+            label for label, milestone in (milestones or VINTAGE_MILESTONES)
             if days >= milestone - VINTAGE_TOLERANCE_DAYS
         ]
     written: list[str] = []
@@ -849,6 +878,14 @@ def _ensure_resolutions_table(conn) -> None:
             conn.execute("ALTER TABLE resolutions ADD COLUMN source_desc TEXT")
         except Exception:
             pass
+    # ACE/PA scoring class (Oct 2026, pythia/tools/scoring_class.py): NULL
+    # for every other hazard and metric, which reads as scored.
+    for col in ("scoring_class", "scoring_class_reason"):
+        if col not in existing:
+            try:
+                conn.execute(f"ALTER TABLE resolutions ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
 
 
 def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
@@ -956,6 +993,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
         # months per country), read once per run on the first ACE/PA horizon.
         conflict_series = None
         conflict_status_counts: Counter = Counter()
+        scoring_counts: Counter = Counter()
         # Per (hazard, metric): how many horizon-months resolved from a
         # source, defaulted to zero, or stayed unresolved and why. A group
         # resolved mostly by zero-defaults is a group whose outcomes are
@@ -1066,6 +1104,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
             for horizon_m in range(1, NUM_HORIZONS + 1):
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
                 group = (hazard_norm, metric_norm)
+                scoring = None
 
                 if hazard_norm == "ACE" and metric_norm == "PA":
                     # ACE/PA resolves from the IDMC conflict displacement
@@ -1088,6 +1127,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                         held=held_all.get(iso3_norm, set()),
                     )
                     conflict_status_counts[status] += 1
+                    scoring = conflict_scoring_class(reported_all.get(iso3_norm, {}), cal_month)
                     if status not in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
                         skipped_conflict_displacement_gate += 1
                         outcome_counts[group][
@@ -1107,6 +1147,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                         resolved_from_source += 1
                         outcome_counts[group]["sourced"] += 1
                         resolved = (float(value_cd), None, CONFLICT_DISPLACEMENT_SERIES)
+                    scoring_counts[scoring[0]] += 1
 
                 # A FATALITIES cell whose only row was written before its
                 # month ended stays unresolved and is counted as such, not
@@ -1183,8 +1224,10 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                       source_desc,
                       created_at,
                       is_test,
-                      acled_snapshot_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      acled_snapshot_date,
+                      scoring_class,
+                      scoring_class_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         question_id,
@@ -1198,10 +1241,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                         # The ACLED pull this figure came from (its
                         # updated_at), stated as a date on the row.
                         _snapshot_date(source_ts) if metric_norm == "FATALITIES" else None,
+                        scoring[0] if scoring else None,
+                        scoring[1] if scoring else None,
                     ],
                 )
                 written += 1
-                if metric_norm in VINTAGE_METRICS:
+                milestones = vintage_milestones(hazard_norm, metric_norm)
+                if milestones:
                     try:
                         vintages_written += len(record_vintages(
                             conn,
@@ -1213,6 +1259,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                             source_ts=source_ts,
                             today=today,
                             is_test=bool(is_test_val),
+                            milestones=milestones,
                         ))
                     except Exception as exc:  # noqa: BLE001 - a vintage never blocks a resolution
                         LOGGER.warning("resolution vintage for %s h%d failed: %r",
@@ -1272,6 +1319,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
             skipped_unresolvable_hazard,
             vintages_written,
         )
+        if scoring_counts:
+            LOGGER.info(
+                "ACE/PA resolutions by scoring class: %s (indicative = %s; "
+                "kept out of calibration, advice, recalibration, centroids, the "
+                "Sibyl comparison and headline skill)",
+                dict(scoring_counts), INDICATIVE_REASON_SHORT,
+            )
         if conflict_status_counts:
             LOGGER.info("ACE/PA horizon-months by conflict displacement status: %s",
                         dict(conflict_status_counts))
