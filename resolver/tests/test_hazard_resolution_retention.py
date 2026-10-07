@@ -219,3 +219,80 @@ class TestSwapAndKeep:
                       hazard="FL", stamp=f"2024-01-0{day} 00:00:00")
         out = retention.compact_all(con, sources=["gdacs"], apply=True, rulebook=_RB())
         assert out["gdacs"]["rows_after"] == 3
+
+
+# --------------------------------------------------------------------------
+# haz_revisions collapse under a memory cap (run 37609780161)
+# --------------------------------------------------------------------------
+
+def _wide_revisions(path, *, n: int, blob_chars: int) -> None:
+    con = duckdb.connect(str(path))
+    ensure_haz_schema(con)
+    # 50 cells; the value alternates every 50 rows, so each cell keeps a row
+    # at each change and drops the repeats between.
+    con.execute(
+        f"""
+        INSERT INTO haz_revisions (iso3, year, month, hazard, source, observed_at,
+                                   new_value, source_ref, detail_json)
+        SELECT printf('C%02d', i % 50), 2020, 1, 'FL', 'emdat',
+               TIMESTAMP '2026-09-01' + to_days(CAST((i // 50) % 28 AS INTEGER)),
+               CAST((i // 50) % 2 AS DOUBLE), 'ref',
+               '{{"provenance": {{"blob": "' || repeat('x', {int(blob_chars)}) ||
+               '", "decision": {{"flags": ["f"]}}}}, "observed_rule_fired": "ladder:emdat"}}'
+        FROM range({int(n)}) t(i)
+        """
+    )
+    con.execute("CHECKPOINT")
+    con.close()
+
+
+def test_the_revision_collapse_fits_in_bounded_memory(tmp_path):
+    """The first applied compaction deleted and rewrote 12 GB of JSON in one
+    transaction and ran out of memory at 12.4 GiB, changing nothing. The same
+    shape at a 128 MB cap: the in-place version fails, the rebuild finishes."""
+    path = tmp_path / "rev.duckdb"
+    _wide_revisions(path, n=20_000, blob_chars=4_000)
+    con = duckdb.connect(str(path))
+    con.execute("SET memory_limit='128MB'")
+    con.execute("SET threads=1")
+    out = retention.collapse_revisions(con, apply=True)
+    assert out["applied"] is True
+    assert (out["rows_before"], out["rows_after"]) == (20_000, 1_400)
+    assert out["slimmed"] == 1_400
+    assert con.execute(
+        "SELECT COUNT(*) FROM haz_revisions WHERE detail_json LIKE '%xxxx%'"
+    ).fetchone()[0] == 0
+    assert con.execute(
+        "SELECT COUNT(*) FROM haz_revisions WHERE rule_fired = 'ladder:emdat'"
+    ).fetchone()[0] == 1_400
+
+
+def test_the_rebuilt_revisions_table_keeps_its_schema_and_leaves_nothing_behind(tmp_path):
+    path = tmp_path / "rev.duckdb"
+    _wide_revisions(path, n=200, blob_chars=100)
+    con = duckdb.connect(str(path))
+    retention.collapse_revisions(con, apply=True, batch_rows=7)
+    tables = {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables").fetchall()}
+    assert not tables & {"haz_revisions_rebuild", "haz_revisions_old",
+                         "_haz_revision_keep", "_haz_revision_narrow"}
+    # The writers leave observed_at to its default and rely on NOT NULL.
+    con.execute(
+        "INSERT INTO haz_revisions (iso3, year, month, hazard, source, new_value) "
+        "VALUES ('PHL', 2024, 3, 'FL', 'emdat', 1.0)"
+    )
+    assert con.execute(
+        "SELECT observed_at IS NOT NULL FROM haz_revisions WHERE iso3 = 'PHL'"
+    ).fetchone()[0]
+    with pytest.raises(duckdb.ConstraintException):
+        con.execute("INSERT INTO haz_revisions (year, month, hazard, source) VALUES (2024, 3, 'FL', 'x')")
+
+
+def test_a_rebuild_left_by_a_killed_run_is_discarded(tmp_path):
+    path = tmp_path / "rev.duckdb"
+    _wide_revisions(path, n=200, blob_chars=100)
+    con = duckdb.connect(str(path))
+    con.execute("CREATE TABLE haz_revisions_rebuild AS SELECT * FROM haz_revisions LIMIT 3")
+    out = retention.collapse_revisions(con, apply=True)
+    # 200 distinct rows, not the 3 the dead run had copied plus 200.
+    assert out["rows_after"] == con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0] == 200

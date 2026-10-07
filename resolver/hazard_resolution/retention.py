@@ -44,6 +44,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Iterable
 
 from resolver.hazard_resolution.schema import (
+    _CORE_TABLE_DDL,
     RAW_SOURCES,
     ensure_haz_schema,
     raw_ddl,
@@ -239,49 +240,72 @@ _REVISION_RULE_SQL = (
 )
 
 
-def _slim_revision_details(con: "duckdb.DuckDBPyConnection") -> int:
-    """Replace each kept row's provenance with its SHA-256 and byte count.
+# Physical rows read per committed batch when the table is rebuilt. A
+# pre-October row is ~75 KB, so a batch holds at most ~75 MB of JSON in
+# Python and writes a few hundred KB.
+REVISION_BATCH_ROWS = 1000
 
-    The writer stores revisions this way since Oct 2026
-    (``resolutions.slim_revision_detail``); the rows before it carried the
-    whole provenance of an answer that was never applied, ~75 KB each. The
-    hash is of the stored JSON text. Value, source, rule and flags stay.
+_REVISION_COLUMNS = (
+    "iso3", "year", "month", "hazard", "source", "source_ref",
+    "old_value", "new_value", "detail_json", "observed_at", "rule_fired",
+)
+
+
+def _narrow_revisions(con: "duckdb.DuckDBPyConnection") -> None:
+    """The small columns of every revision, with its rule read out of the JSON.
+
+    A window over ``haz_revisions`` itself carries each row's 75 KB of JSON
+    through the sort; over this table it carries a few dozen bytes.
     """
-    where = (
-        "json_valid(detail_json) AND (json_extract(detail_json, '$.provenance') IS NOT NULL "
-        "OR json_extract(detail_json, '$.evidence_of_absence') IS NOT NULL)"
-    )
-    n = int(con.execute(f"SELECT COUNT(*) FROM haz_revisions WHERE {where}").fetchone()[0])
-    if not n:
-        return 0
+
     con.execute(
-        f"""
-        UPDATE haz_revisions SET detail_json = CAST(json_merge_patch(
-            json_merge_patch(detail_json, '{{"provenance": null, "evidence_of_absence": null}}'),
-            json_object(
-                'provenance_sha256', sha256(CAST(json_extract(detail_json, '$.provenance') AS VARCHAR)),
-                'provenance_bytes', length(CAST(json_extract(detail_json, '$.provenance') AS VARCHAR)),
-                'evidence_of_absence_sha256',
-                    sha256(CAST(json_extract(detail_json, '$.evidence_of_absence') AS VARCHAR)),
-                'evidence_of_absence_bytes',
-                    length(CAST(json_extract(detail_json, '$.evidence_of_absence') AS VARCHAR)),
-                'flags', json_extract(detail_json, '$.provenance.decision.flags')
-            )
-        ) AS VARCHAR)
-        WHERE {where}
-        """
+        "CREATE OR REPLACE TEMP TABLE _haz_revision_narrow AS "
+        "SELECT rowid AS rid, iso3, year, month, hazard, source, observed_at, "
+        f"new_value, source_ref, {_REVISION_RULE_SQL} AS rule FROM haz_revisions"
     )
-    return n
 
 
-def collapse_revisions(con: "duckdb.DuckDBPyConnection", *, apply: bool = False) -> dict[str, Any]:
+def _revision_dup_sql() -> str:
+    """Row ids of revisions that repeat the row before them in their cell.
+
+    Reads ``_haz_revision_narrow``; call ``_narrow_revisions`` first.
+    """
+
+    return """
+        WITH l AS (
+            SELECT rid,
+                   LAG(rid) OVER w IS NOT NULL
+                   AND LAG(new_value) OVER w IS NOT DISTINCT FROM new_value
+                   AND LAG(source_ref) OVER w IS NOT DISTINCT FROM source_ref
+                   AND LAG(rule) OVER w IS NOT DISTINCT FROM rule AS dup
+            FROM _haz_revision_narrow
+            WINDOW w AS (PARTITION BY iso3, year, month, hazard, source ORDER BY observed_at, rid)
+        )
+    """
+
+
+def collapse_revisions(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    apply: bool = False,
+    batch_rows: int = REVISION_BATCH_ROWS,
+) -> dict[str, Any]:
     """Collapse ``haz_revisions`` to the rule its writer now follows.
 
     Per (cell, source), in observed order, a row is kept only when its
-    value, source reference or rule differs from the row before it. The
-    nightly backcast and every Resolver Update had re-logged the same frozen
-    cells with the full provenance on each row: 40% of a 30.6 GB canonical
-    DB in October 2026. Idempotent; an applied collapse is recorded in
+    value, source reference or rule differs from the row before it, and a
+    kept row's provenance is replaced by its hash. The nightly backcast and
+    every Resolver Update had re-logged the same frozen cells with the full
+    provenance on each row: 40% of a 30.6 GB canonical DB in October 2026.
+
+    The table is REBUILT, never updated in place: the first applied run
+    (37609780161) did the DELETE and the UPDATE of 12 GB of JSON inside one
+    transaction, DuckDB held every old version for the rollback, and it ran
+    out of memory at 12.4 GiB with nothing changed. Now the rows to keep are
+    marked once over the small columns, copied slimmed into
+    ``haz_revisions_rebuild`` in committed batches, and the names are swapped
+    in one transaction, the old table renamed aside before it is dropped.
+    Idempotent; an applied collapse is recorded in
     ``haz_revision_collapse_log`` with the rows removed.
     """
     out: dict[str, Any] = {"source": "haz_revisions", "present": _table_exists(con, "haz_revisions"),
@@ -289,45 +313,148 @@ def collapse_revisions(con: "duckdb.DuckDBPyConnection", *, apply: bool = False)
     if not out["present"]:
         return out
     before = int(con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0])
-    dup_sql = f"""
-        WITH s AS (
-            SELECT rowid AS rid, iso3, year, month, hazard, source, observed_at,
-                   new_value, source_ref, {_REVISION_RULE_SQL} AS rule
-            FROM haz_revisions
-        ),
-        l AS (
-            SELECT rid,
-                   LAG(rid) OVER w IS NOT NULL
-                   AND LAG(new_value) OVER w IS NOT DISTINCT FROM new_value
-                   AND LAG(source_ref) OVER w IS NOT DISTINCT FROM source_ref
-                   AND LAG(rule) OVER w IS NOT DISTINCT FROM rule AS dup
-            FROM s
-            WINDOW w AS (PARTITION BY iso3, year, month, hazard, source ORDER BY observed_at, rid)
-        )
-        SELECT rid FROM l WHERE dup
-    """
-    dups = int(con.execute(f"SELECT COUNT(*) FROM ({dup_sql})").fetchone()[0])
+    _narrow_revisions(con)
+    dup_sql = _revision_dup_sql()
+    dups = int(con.execute(f"{dup_sql} SELECT COUNT(*) FROM l WHERE dup").fetchone()[0])
     out.update(rows_before=before, rows_after=before - dups, removed=dups)
     if not apply:
         return out
+    # A string match, not a JSON parse: this only decides whether to rebuild,
+    # and a slimmed row says "provenance_sha256", never "provenance":.
+    to_slim = int(con.execute(
+        "SELECT COUNT(*) FROM haz_revisions WHERE detail_json LIKE '%\"provenance\":%' "
+        "OR detail_json LIKE '%\"evidence_of_absence\":%'").fetchone()[0])
+    no_rule = int(con.execute(
+        "SELECT COUNT(*) FROM haz_revisions WHERE rule_fired IS NULL").fetchone()[0])
+    slimmed = 0
+    if dups or to_slim or no_rule:
+        slimmed = _rebuild_revisions(con, dup_sql, batch_rows=max(1, int(batch_rows)))
+    con.execute(REVISION_LOG_DDL)
+    after = int(con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0])
+    con.execute(
+        "INSERT INTO haz_revision_collapse_log (rows_before, rows_after, rows_removed) VALUES (?, ?, ?)",
+        [before, after, before - after],
+    )
+    out.update(rows_after=after, removed=before - after, applied=True, slimmed=slimmed)
+    LOG.info("[retention] haz_revisions: %d -> %d rows (%d removed, %d slimmed)",
+             before, after, before - after, slimmed)
+    return out
+
+
+def _slim_row_detail(detail_json: Any) -> tuple[Any, bool]:
+    """The writer's own slimming, applied to a stored row.
+
+    ``resolutions.slim_revision_detail`` is what every revision written since
+    October 2026 went through, so a compacted row and a new row carry the
+    same digest for the same provenance. Returns (detail, slimmed).
+    """
+    import json
+
+    from resolver.hazard_resolution.resolutions import (
+        _BULKY_REVISION_KEYS,
+        slim_revision_detail,
+    )
+
+    if not isinstance(detail_json, str):
+        return detail_json, False
+    try:
+        detail = json.loads(detail_json)
+    except ValueError:
+        return detail_json, False
+    if not isinstance(detail, dict) or not any(k in detail for k in _BULKY_REVISION_KEYS):
+        return detail_json, False
+    return json.dumps(slim_revision_detail(detail), default=str), True
+
+
+def _row_rule(rule_fired: Any, detail_json: Any) -> Any:
+    """``rule_fired``, else the rule the pre-column rows kept in their JSON."""
+    import json
+
+    if rule_fired is not None or not isinstance(detail_json, str):
+        return rule_fired
+    try:
+        detail = json.loads(detail_json)
+    except ValueError:
+        return None
+    if not isinstance(detail, dict):
+        return None
+    for key in ("observed_rule_fired", "observed_status"):
+        value = detail.get(key)
+        if value is not None:
+            return value if isinstance(value, str) else json.dumps(value)
+    return None
+
+
+def _rebuild_revisions(con: "duckdb.DuckDBPyConnection", dup_sql: str, *, batch_rows: int) -> int:
+    """Copy the kept rows, slimmed, into a fresh table; swap it into place.
+
+    The slimming runs in Python: DuckDB's JSON functions held about fifty
+    times the row's size in memory per row, which is how a 12 GB table needed
+    more than the runner's 16 GB.
+    """
+    import pandas as pd
+
+    cols = ", ".join(_REVISION_COLUMNS)
+    # A run killed mid-copy leaves the rebuild table; it is never read.
+    con.execute("DROP TABLE IF EXISTS haz_revisions_rebuild")
+    # From the schema's own DDL: a CREATE TABLE AS would drop the NOT NULL
+    # constraints and observed_at's default, which every writer relies on.
+    con.execute(_CORE_TABLE_DDL["haz_revisions"].replace(
+        "haz_revisions (", "haz_revisions_rebuild (", 1))
+    # Nothing writes haz_revisions on this connection until the swap, so a
+    # rowid read here still names the same row when the batch copies it.
+    con.execute(f"CREATE OR REPLACE TEMP TABLE _haz_revision_keep AS {dup_sql} "
+                "SELECT rid FROM l WHERE NOT dup")
+    rid_min, rid_max = con.execute(
+        "SELECT MIN(rid), MAX(rid) FROM _haz_revision_keep").fetchone()
+    # A batch is a window of PHYSICAL rows, not of kept rows: kept rows are
+    # sparse, and a window of N kept rows can span many times N rows that are
+    # read only to be dropped. The window bounds what one batch holds.
+    windows = [] if rid_min is None else range(int(rid_min), int(rid_max) + 1, batch_rows)
+    slimmed = 0
+    for lo in windows:
+        hi = lo + batch_rows - 1
+        rows = con.execute(
+            f"SELECT {cols} FROM haz_revisions WHERE rowid BETWEEN {lo} AND {hi} "
+            f"AND rowid IN (SELECT rid FROM _haz_revision_keep WHERE rid BETWEEN {lo} AND {hi})"
+        ).fetchall()
+        if not rows:
+            continue
+        out_rows = []
+        i_detail = _REVISION_COLUMNS.index("detail_json")
+        i_rule = _REVISION_COLUMNS.index("rule_fired")
+        for row in rows:
+            row = list(row)
+            row[i_rule] = _row_rule(row[i_rule], row[i_detail])
+            row[i_detail], did = _slim_row_detail(row[i_detail])
+            slimmed += int(did)
+            out_rows.append(row)
+        frame = pd.DataFrame(out_rows, columns=list(_REVISION_COLUMNS))
+        con.register("_haz_revision_batch", frame)
+        try:
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.execute(f"INSERT INTO haz_revisions_rebuild ({cols}) "
+                            f"SELECT {cols} FROM _haz_revision_batch")
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+        finally:
+            con.unregister("_haz_revision_batch")
     con.execute("BEGIN TRANSACTION")
     try:
-        con.execute(f"DELETE FROM haz_revisions WHERE rowid IN ({dup_sql})")
-        con.execute(f"UPDATE haz_revisions SET rule_fired = {_REVISION_RULE_SQL} WHERE rule_fired IS NULL")
-        out["slimmed"] = _slim_revision_details(con)
-        con.execute(REVISION_LOG_DDL)
-        after = int(con.execute("SELECT COUNT(*) FROM haz_revisions").fetchone()[0])
-        con.execute(
-            "INSERT INTO haz_revision_collapse_log (rows_before, rows_after, rows_removed) VALUES (?, ?, ?)",
-            [before, after, before - after],
-        )
+        con.execute("DROP TABLE IF EXISTS haz_revisions_old")
+        con.execute("ALTER TABLE haz_revisions RENAME TO haz_revisions_old")
+        con.execute("ALTER TABLE haz_revisions_rebuild RENAME TO haz_revisions")
+        con.execute("DROP TABLE haz_revisions_old")
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
-    out.update(rows_after=after, removed=before - after, applied=True)
-    LOG.info("[retention] haz_revisions: %d -> %d rows (%d removed)", before, after, before - after)
-    return out
+    con.execute("DROP TABLE IF EXISTS _haz_revision_keep")
+    con.execute("DROP TABLE IF EXISTS _haz_revision_narrow")
+    return slimmed
 
 
 def compact_all(
