@@ -150,3 +150,16 @@ class TestWriteStageContext:
         assert payload["db_signature_before"] == {"tables": {"questions": 3}}
         assert payload["db_signature_after"]["missing"] is True
         assert "env" in payload["env_snapshot"]  # the env_config collector ran
+
+
+def test_stage_context_names_the_cache_flags_the_stage_ran_with(tmp_path):
+    from scripts.ci import write_stage_context as wsc
+
+    ctx = wsc.build_context(
+        pipeline_id="pl_1", hs_run_id="hs_1", forecaster_run_id="fc_1",
+        conclusion="success", signature_before=None, signature_after=None,
+        repo_root=tmp_path,
+        environ={"PYTHIA_BATCH_PROMPT_CACHE": "1", "PYTHIA_PROMPT_CACHE_ENABLED": "1"},
+    )
+    assert ctx["cache_flags"]["PYTHIA_BATCH_PROMPT_CACHE"] == "1"
+    assert ctx["cache_flags"]["PYTHIA_PROMPT_V3_ORDER"] == "<unset>"

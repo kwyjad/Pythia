@@ -459,14 +459,32 @@ def select_row(
     kind: str = "combined",
     interpretation_id: str | None = None,
     include_test: bool = False,
+    run_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Newest row of ``kind`` (or the explicit id), test-filtered by default."""
+    """Newest row of ``kind`` (or the explicit id), test-filtered by default.
+
+    With ``run_id`` only that forecaster run's rows are candidates, test or
+    not: the run that just finished renders its OWN report or nothing. Left
+    to "newest production row", a test run's Sibyl job re-rendered the 1
+    October report on 7 October 2026 and publish replaced the release's
+    latest PDF with it.
+    """
     store.ensure_table(con)
     cols = ", ".join(_ROW_COLUMNS)
     if interpretation_id:
         rows = con.execute(
             f"SELECT {cols} FROM interpretations WHERE interpretation_id = ?",
             [interpretation_id],
+        ).fetchall()
+    elif run_id:
+        rows = con.execute(
+            f"""
+            SELECT {cols} FROM interpretations
+            WHERE kind = ? AND run_id = ?
+            ORDER BY created_at DESC, version DESC
+            LIMIT 1
+            """,
+            [kind, run_id],
         ).fetchall()
     else:
         test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
@@ -529,9 +547,12 @@ def run_tag(row: dict[str, Any]) -> str:
 def pdf_filename(row: dict[str, Any]) -> str:
     version = int(row.get("version") or 0)
     tag = run_tag(row)
+    # A test row's PDF never carries the report__ prefix the publish step
+    # globs for, so it cannot reach the release under a production name.
+    prefix = "test_report" if row.get("is_test") else "report"
     if tag:
-        return f"report__{month_label(row)}__{tag}__v{version}.pdf"
-    return f"report__{month_label(row)}__v{version}.pdf"
+        return f"{prefix}__{month_label(row)}__{tag}__v{version}.pdf"
+    return f"{prefix}__{month_label(row)}__v{version}.pdf"
 
 
 def generate_pdf(
@@ -541,8 +562,14 @@ def generate_pdf(
     kind: str = "combined",
     interpretation_id: str | None = None,
     include_test: bool = False,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Select -> HTML -> WeasyPrint -> versioned PDF + latest copy."""
+    """Select -> HTML -> WeasyPrint -> versioned PDF + latest copy.
+
+    A test row is rendered for inspection but writes no
+    ``interpreter_report_latest.pdf``: that file is what publish attaches to
+    the release, and a test pipeline must never republish a report.
+    """
     result: dict[str, Any] = {"status": "skipped"}
     if not config.enabled():
         result["reason"] = "disabled"
@@ -555,11 +582,12 @@ def generate_pdf(
     try:
         row = select_row(
             con, kind=kind, interpretation_id=interpretation_id,
-            include_test=include_test,
+            include_test=include_test, run_id=run_id,
         )
         if row is not None:
             map_values = mapviz.values_from_deviation(
-                con, row.get("run_id"), include_test=include_test,
+                con, row.get("run_id"),
+                include_test=include_test or bool(row.get("is_test")),
             )
     finally:
         duckdb_io.close_db(con)
@@ -609,14 +637,21 @@ def generate_pdf(
         (out / (versioned.stem + ".html")).write_text(html, encoding="utf-8")
         result.update({"status": "failed_render", "error": str(exc)})
         return result
-    (out / LATEST_PDF_NAME).write_bytes(versioned.read_bytes())
-    LOGGER.info("[interpreter.pdf] wrote %s (+ %s)", versioned, LATEST_PDF_NAME)
+    if row.get("is_test"):
+        LOGGER.info("[interpreter.pdf] wrote %s (test row: no %s, nothing to publish)",
+                    versioned, LATEST_PDF_NAME)
+        latest = None
+    else:
+        (out / LATEST_PDF_NAME).write_bytes(versioned.read_bytes())
+        LOGGER.info("[interpreter.pdf] wrote %s (+ %s)", versioned, LATEST_PDF_NAME)
+        latest = str(out / LATEST_PDF_NAME)
     result.update({
         "status": "ok",
         "interpretation_id": row.get("interpretation_id"),
         "row_status": row.get("status"),
+        "is_test": bool(row.get("is_test")),
         "pdf": str(versioned),
-        "latest": str(out / LATEST_PDF_NAME),
+        "latest": latest,
     })
     return result
 
@@ -629,6 +664,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interpretation-id", default=None,
                         help="Render this exact row instead of the newest")
     parser.add_argument("--include-test", action="store_true")
+    parser.add_argument("--run-id", default=None,
+                        help="Render only this forecaster run's row (test or not); nothing if it has none")
     parser.add_argument("--out-dir", default="interpreter_out")
     args = parser.parse_args(argv)
 
@@ -638,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
             db=args.db, out_dir=args.out_dir, kind=args.kind,
             interpretation_id=args.interpretation_id,
             include_test=args.include_test,
+            run_id=args.run_id or None,
         )
     except Exception as exc:  # noqa: BLE001 - never fail the pipeline
         LOGGER.error("[interpreter.pdf] failed: %s", exc)

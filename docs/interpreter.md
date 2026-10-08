@@ -680,7 +680,7 @@ the release asset is missing.
 
 `interpreter/pdf.py` (`python -m interpreter.pdf --db ... --kind combined
 --out-dir interpreter_out`) reads the newest `interpretations` row of the
-kind (test-filtered by default; `--interpretation-id` pins an exact row),
+kind (test-filtered by default; `--interpretation-id` pins an exact row; `--run-id` takes only one forecaster run's row, test or not, which is how the Sibyl job renders since 2026-10-08, and a test row writes `test_report__*.pdf` and no `interpreter_report_latest.pdf`, so publish cannot pick it up),
 converts its `content_md` to a self-contained HTML document with a small
 deterministic subset converter (only what `render_markdown` emits —
 headings, lists, pipe tables, bold/italic/code; inline code protects the

@@ -553,6 +553,53 @@ def test_cache_report_separates_a_provider_that_cannot_cache_from_one_that_did_n
     assert summary["cache_hit_rate_pct"] == 20.0
 
 
+def _one_cache_row_db(tmp_path: Path):
+    con = duckdb.connect(str(tmp_path / "pcf.duckdb"))
+    con.execute(
+        "CREATE TABLE llm_calls (phase TEXT, provider TEXT, model_id TEXT, run_id TEXT, usage_json TEXT)"
+    )
+    con.execute(
+        "INSERT INTO llm_calls VALUES ('spd_v2','anthropic','claude-opus-5-5','fc_1',?)",
+        [json.dumps({"prompt_tokens": 1000})],
+    )
+    return con
+
+
+def test_cache_flags_come_from_the_forecast_stage_not_the_bundle_job(tmp_path: Path, monkeypatch):
+    """The bundle is built in the Sibyl job, which does not set the batch
+    cache flag; the 7 Oct 2026 rehearsal's bundle reported it unset beside a
+    stage whose context says 1. The stage's flags win."""
+    monkeypatch.delenv("PYTHIA_BATCH_PROMPT_CACHE", raising=False)
+    con = _one_cache_row_db(tmp_path)
+    # The context shape the rehearsal's stage actually wrote: an env snapshot.
+    ctx = {"env_snapshot": {"env": {"PYTHIA_BATCH_PROMPT_CACHE": "1",
+                                    "PYTHIA_PROMPT_CACHE_ENABLED": "1",
+                                    "PYTHIA_PROMPT_V3_ORDER": "1"}}}
+    rows = prompt_cache.collect(con, predicate="run_id = ?", params=["fc_1"], stage_context=ctx)
+    assert rows[0]["batch_prompt_cache"] == "1"
+    assert rows[0]["flags_source"] == "stage_context_env"
+    # The explicit block a stage writes from now on wins over the snapshot.
+    ctx["cache_flags"] = {"PYTHIA_BATCH_PROMPT_CACHE": "0"}
+    rows = prompt_cache.collect(con, predicate="run_id = ?", params=["fc_1"], stage_context=ctx)
+    assert rows[0]["batch_prompt_cache"] == "0"
+    assert rows[0]["flags_source"] == "stage_context"
+    # With no stage context the job's own environment answers, and says so.
+    rows = prompt_cache.collect(con, predicate="run_id = ?", params=["fc_1"])
+    assert rows[0]["batch_prompt_cache"] == "<unset>"
+    assert rows[0]["flags_source"] == "bundle_job_env"
+
+
+def test_the_dump_reads_the_stage_context_it_was_handed(tmp_path: Path):
+    from scripts import dump_pythia_debug_bundle as dump
+
+    (tmp_path / "stage_context").mkdir()
+    (tmp_path / "stage_context" / "stage_context.json").write_text(
+        json.dumps({"cache_flags": {"PYTHIA_BATCH_PROMPT_CACHE": "1"}})
+    )
+    assert dump._read_stage_context(tmp_path) == {"cache_flags": {"PYTHIA_BATCH_PROMPT_CACHE": "1"}}
+    assert dump._read_stage_context(tmp_path / "nowhere") is None
+
+
 # ---------------------------------------------------------------------------
 # Retries
 # ---------------------------------------------------------------------------
