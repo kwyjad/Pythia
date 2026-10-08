@@ -609,6 +609,7 @@ jobs:
             pythia/tests/test_score_baselines.py \
             pythia/tests/test_scoring_honesty.py \
             pythia/tests/test_score_is_test_from_forecast.py \
+            pythia/tests/test_forecast_of_record.py \
             pythia/tests/test_api_sibyl_comparison.py \
             pythia/tests/test_scored_only_exclusions.py \
             pythia/tests/test_scoring_class.py

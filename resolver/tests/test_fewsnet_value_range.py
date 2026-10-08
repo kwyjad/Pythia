@@ -89,8 +89,8 @@ CANONICAL_2026_10_08_DDL = (
 )
 
 
-def test_the_november_ingest_adds_value_high_to_the_canonical_schema(tmp_path):
-    """The 11 Nov 2026 Resolver Update writes FEWS NET through run_pipeline's
+def test_the_next_ingest_adds_value_high_to_the_canonical_schema(tmp_path):
+    """The 11 Oct 2026 Resolver Update writes FEWS NET through run_pipeline's
     _write_to_db, which runs init_schema first. Against a copy of the canonical
     schema of 8 Oct 2026 that adds the column, keeps the existing rows, and
     lands the upper bound, with no manual step."""

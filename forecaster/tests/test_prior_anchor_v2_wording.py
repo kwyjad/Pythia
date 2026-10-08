@@ -9,7 +9,7 @@ told members Israel's count "stayed in the same bucket 42% of the time"
 beside a month-1 row putting 71% on zero. v2 reads stay / up / down straight
 off the vector. v1 stays the CODE default; v2 is selected by
 ``PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION=v2`` and recorded as ``prior_anchor_v2``.
-Both production workflows set v2 from the run on the 13th of November 2026
+Both production workflows set v2 from the run on 13 October 2026
 (owner decision 2026-10-06), and the experiment flags must agree between them.
 """
 

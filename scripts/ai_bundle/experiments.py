@@ -66,6 +66,15 @@ def _r(v: Optional[float]) -> Optional[float]:
     return None if v is None else round(v, 4)
 
 
+
+def _record_sql(con, question_expr: str) -> str:
+    """The question's forecast-of-record run (``pythia/tools/forecast_of_record.py``):
+    its latest PRODUCTION run. Each question counts once per epoch, from that
+    run; a plain MAX(run_id) took a later same-epoch test run's arm and scores."""
+    from pythia.tools.forecast_of_record import record_run_subquery  # noqa: PLC0415
+
+    return record_run_subquery(con, question_expr)
+
 ADVICE_COLUMNS = [
     "hazard_code", "metric", "score_family", "track",
     "n_advice", "n_no_advice", "mean_brier_advice", "mean_brier_no_advice",
@@ -85,8 +94,7 @@ def emit_advice_experiment(con, out_dir: Path, qids: List[str]) -> List[Dict[str
             SELECT fe.question_id, ANY_VALUE(fe.advice_arm) AS arm
             FROM forecasts_ensemble fe
             WHERE fe.advice_arm IS NOT NULL
-              AND fe.run_id = (SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr
-                               WHERE _lr.question_id = fe.question_id)
+              AND fe.run_id = {_record_sql(con, 'fe.question_id')}
             GROUP BY fe.question_id
         )
         SELECT upper(q.hazard_code), upper(q.metric), {track}, arm.arm, s.question_id, AVG(s.value)
@@ -95,8 +103,7 @@ def emit_advice_experiment(con, out_dir: Path, qids: List[str]) -> List[Dict[str
         JOIN questions q ON q.question_id = s.question_id
         WHERE s.score_type = 'brier'
           AND s.model_name IN ('ensemble_mean_v2', 'track2_flash')
-          AND s.run_id = (SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr
-                          WHERE _lr.question_id = s.question_id)
+          AND s.run_id = {_record_sql(con, 's.question_id')}
           AND s.question_id IN (SELECT UNNEST(?::VARCHAR[]))
         GROUP BY 1, 2, 3, 4, 5
         """,
@@ -135,13 +142,12 @@ def emit_recalibration_effect(con, out_dir: Path, qids: List[str]) -> List[Dict[
         write_csv(out_dir / "recalibration_effect.csv", RECAL_COLUMNS, rows)
         return rows
     data = con.execute(
-        """
+        f"""
         SELECT s.question_id, s.horizon_m, upper(q.hazard_code), upper(q.metric),
                s.score_type, s.model_name, s.value, s.run_id
         FROM scores s JOIN questions q ON q.question_id = s.question_id
         WHERE s.run_id IS NOT NULL
-          AND s.run_id = (SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr
-                          WHERE _lr.question_id = s.question_id)
+          AND s.run_id = {_record_sql(con, 's.question_id')}
           AND s.question_id IN (SELECT UNNEST(?::VARCHAR[]))
         """,
         [qids],
@@ -193,7 +199,7 @@ def _member_mean_effect(con, qids: List[str]) -> List[Dict[str, Any]]:
     except Exception:  # noqa: BLE001
         return []
     rows = con.execute(
-        """
+        f"""
         SELECT fr.question_id, fr.month_index, fr.model_name, fr.bucket_index, fr.probability,
                upper(q.hazard_code), upper(q.metric), r.value
         FROM forecasts_raw fr
@@ -201,8 +207,7 @@ def _member_mean_effect(con, qids: List[str]) -> List[Dict[str, Any]]:
         JOIN resolutions r ON r.question_id = fr.question_id AND r.horizon_m = fr.month_index
         WHERE fr.probability IS NOT NULL AND fr.bucket_index IS NOT NULL
           AND upper(q.metric) <> 'EVENT_OCCURRENCE'
-          AND fr.run_id = (SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr
-                           WHERE _lr.question_id = fr.question_id)
+          AND fr.run_id = {_record_sql(con, 'fr.question_id')}
           AND fr.question_id IN (SELECT UNNEST(?::VARCHAR[]))
         """,
         [qids],

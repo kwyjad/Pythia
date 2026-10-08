@@ -519,19 +519,34 @@ def _test_sql(con, table: str, alias: str, include_test: bool) -> str:
     return f" AND COALESCE({alias}.is_test, FALSE) = FALSE"
 
 
-def _latest_runs(con) -> dict[str, str]:
-    """{question_id: latest run_id}: from scores, else forecasts_ensemble."""
+def _latest_runs(con, include_test: bool = False) -> dict[str, str]:
+    """{question_id: run of record}: the latest PRODUCTION run that forecast
+    it (``pythia/tools/forecast_of_record.py``), else, for a question with no
+    ensemble row, its latest production scored run.
+
+    This took MAX(run_id) over every run with the scores' value winning, so a
+    same-epoch test run made after production (2, 6 and 7 Oct 2026 in epoch
+    2026-11) became the forecast the headline, rollups and experiments read.
+    """
+    from pythia.tools.forecast_of_record import record_runs  # noqa: PLC0415
+
     out: dict[str, str] = {}
-    for table in ("forecasts_ensemble", "scores"):
-        if table_exists(con, table) and column_exists(con, table, "run_id"):
-            try:
-                for qid, run in con.execute(
-                    f"SELECT question_id, MAX(run_id) FROM {table} "
-                    "WHERE run_id IS NOT NULL AND run_id <> '' GROUP BY 1"
-                ).fetchall():
-                    out[str(qid)] = str(run)
-            except Exception:  # noqa: BLE001
-                continue
+    if table_exists(con, "scores") and column_exists(con, "scores", "run_id"):
+        test = "" if include_test or not column_exists(con, "scores", "is_test") \
+            else " AND NOT COALESCE(is_test, FALSE)"
+        try:
+            for qid, run in con.execute(
+                "SELECT question_id, MAX(run_id) FROM scores "
+                f"WHERE run_id IS NOT NULL AND run_id <> ''{test} GROUP BY 1"
+            ).fetchall():
+                out[str(qid)] = str(run)
+        except Exception:  # noqa: BLE001
+            pass
+    if table_exists(con, "forecasts_ensemble"):
+        try:
+            out.update(record_runs(con, include_test=include_test))
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 
@@ -560,7 +575,7 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
         "FROM questions q WHERE q.question_id IN (SELECT question_id FROM scores)"
         + _test_sql(con, "questions", "q", include_test),
     )
-    latest = _latest_runs(con)
+    latest = _latest_runs(con, include_test)
 
     created: dict[tuple[str, str], Any] = {}
     if table_exists(con, "forecasts_ensemble") and column_exists(con, "forecasts_ensemble", "created_at"):

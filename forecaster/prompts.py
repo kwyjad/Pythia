@@ -2242,7 +2242,7 @@ def prior_anchor_version() -> str:
 
     The distribution is the same under both; only the Spread sentence moves.
     v1 stays the CODE default; both production workflows set v2 from the run
-    on the 13th of November 2026 (owner decision 2026-10-06). Family
+    on 13 October 2026 (owner decision 2026-10-06). Family
     recalibration treats the two as one group
     (``family_recalibration.BLOCK_VERSION_EQUIVALENCE``), so October's v1
     evidence still corrects v2 forecasts.

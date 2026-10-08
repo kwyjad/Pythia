@@ -387,7 +387,7 @@ def _format_base_rate_for_prompt(
         ]
         if history_summary.get("values_are_range_lower_bounds"):
             # The upper-bound clause is written only when a figure below
-            # carries one: before the November 2026 ingest no row did, and
+            # carries one: before the 11 October 2026 ingest no row did, and
             # every prompt promised a "to" figure that never appeared.
             shown = [history_summary.get("last_observed") or {}]
             shown += list(last_6m) + list(history_summary.get("projections") or [])
