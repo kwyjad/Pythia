@@ -4882,6 +4882,10 @@ class BundleBuilder:
         # feed's restale request. Empty until then, which is a statement
         # about the SPEI-3 producer rather than about this run.
         "haz_feed_restale": "haz-backcast, applying a committed feed's restale request",
+        # The GDACS cache snapshots flood zeros cite (Oct 2026). Written by
+        # every flood pass that sweeps (Phase 2.5 and the nightly backcast)
+        # and by the compaction's zero-row rewrite.
+        "haz_evidence_snapshots": "flood zeros (phase 2.5, haz-backcast) and compact_resolver_db",
     }
 
     def _check_declared_active_tables_hold_rows(self) -> None:

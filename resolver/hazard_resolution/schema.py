@@ -327,6 +327,24 @@ _CORE_TABLE_DDL: dict[str, str] = {
         UNIQUE (feed, hazard, token)
     )
     """,
+    # The state of a raw cache that a zero was checked against, stored ONCE.
+    # A flood zero used to carry every GDACS event URL in the cache, twice:
+    # 4.9 GB across 20,048 rows by 8 Oct 2026, growing each month. A zero
+    # now cites a snapshot_id (source, hazard, date, count, hash), and the
+    # full sorted URL list lives here. See evidence_snapshots.py.
+    "haz_evidence_snapshots": """
+    CREATE TABLE IF NOT EXISTS haz_evidence_snapshots (
+        snapshot_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        hazard TEXT,
+        snapshot_date TEXT,
+        n_urls INTEGER NOT NULL,
+        urls_sha256 TEXT NOT NULL,
+        urls_json TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (snapshot_id)
+    )
+    """,
     "haz_base_rates_occurrence": f"""
     CREATE TABLE IF NOT EXISTS haz_base_rates_occurrence (
         iso3 TEXT NOT NULL,

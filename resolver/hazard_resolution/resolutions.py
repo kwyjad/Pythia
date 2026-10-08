@@ -195,6 +195,12 @@ def _collect_urls(evidence: dict[str, Any]) -> list[str]:
         for url in (evidence.get(detector) or {}).get("source_urls") or []:
             if url:
                 urls.append(str(url))
+        # A detector block that cites its cache by snapshot (GDACS since
+        # Oct 2026) lists only the events in the cell's own window; the
+        # whole listing is in haz_evidence_snapshots, never in the row.
+        for event in (evidence.get(detector) or {}).get("events_in_window") or []:
+            if isinstance(event, dict) and event.get("source_url"):
+                urls.append(str(event["source_url"]))
     # Drought: the analysis windows the zero rests on, and every indicator
     # feed consulted. A zero has to cite what it checked.
     for key in ("covering", "previous"):

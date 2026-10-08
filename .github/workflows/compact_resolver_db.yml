@@ -229,6 +229,35 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Flood zeros carried every GDACS event URL in the cache, twice (4.9 GB
+      # of 9.2 GB on 8 Oct 2026). Each listing moves once into
+      # haz_evidence_snapshots and the row cites it. Committed batches, a
+      # per-row compare-and-swap, and a before/after report of counts by
+      # hazard and status plus a checksum over every column but
+      # provenance_json: a mismatch exits 1, so the canonical upload never
+      # happens. It runs BEFORE the raw-cache collapse because each row's
+      # own window events are read from haz_raw_gdacs, and before the copy
+      # so the copy returns the freed bytes. Idempotent; a run cut short by
+      # --max-seconds leaves the rest for the next.
+      - name: Flood zero rows cite a snapshot
+        if: env.MODE == 'compact'
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          ARGS=(--db data/resolver.duckdb --max-seconds 3600
+                --json-out diagnostics/zero_snapshots.json
+                --md-out diagnostics/zero_snapshots.md)
+          if [ "${APPLY}" = "true" ]; then
+            ARGS+=(--apply)
+          fi
+          python -m resolver.hazard_resolution.evidence_snapshots "${ARGS[@]}"
+          {
+            echo "#### Flood zero rows: snapshot rewrite"
+            echo ""
+            cat diagnostics/zero_snapshots.md
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Collapse the raw caches
         if: env.APPLY == 'true' && env.MODE == 'compact'
         run: |
