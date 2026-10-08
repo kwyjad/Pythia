@@ -52,6 +52,14 @@ on:
       - "sibyl/config.py"
       - "sibyl/agent.py"
       - "pythia/tests/**"
+      # Tests wired by scripts/ci/check_test_wiring.py (Oct 2026): each ran in
+      # no workflow until that check made a test with no workflow fail CI.
+      - "pythia/prediction_markets/**"
+      - "pythia/test_mode.py"
+      - "pythia/api/**"
+      - "scripts/tests/**"
+      - "scripts/reconcile_llm_calls_is_test.py"
+      - "scripts/retire_blocked_hazard_questions.py"
       - "pythia/buckets.py"
       - "pythia/api/app.py"
       - "pythia/api/core.py"
@@ -448,6 +456,43 @@ jobs:
             pythia/tests/test_api_forecasts_limit.py \
             tests/test_api_public_read_admin_only.py \
             pythia/tests/test_gdelt.py
+
+      - name: Run tests the wiring check found running nowhere
+        run: |
+          # scripts/ci/check_test_wiring.py fails CI when a test file runs in
+          # no workflow. These 35 passed on 2026-10-08 and were named nowhere.
+          pytest -vv \
+            forecaster/tests/test_event_loop_safety.py \
+            forecaster/tests/test_history_sanitization.py \
+            forecaster/tests/test_llm_call_logging.py \
+            forecaster/tests/test_prompt_bucket_text.py \
+            forecaster/tests/test_questions_filter.py \
+            forecaster/tests/test_questions_from_triage.py \
+            forecaster/tests/test_scenarios.py \
+            forecaster/tests/test_scoring.py \
+            forecaster/tests/test_spd_prompt_structured_sections.py \
+            forecaster/tests/test_spd_timeline.py \
+            forecaster/tests/test_tail_pack_truncation.py \
+            forecaster/tests/test_trace_validation.py \
+            pythia/tests/test_acled_political_attribution.py \
+            pythia/tests/test_api_connection_retry.py \
+            pythia/tests/test_api_downloads_fileresponse.py \
+            pythia/tests/test_api_lazy_pipeline_import.py \
+            pythia/tests/test_api_version_cache.py \
+            pythia/tests/test_binary_scoring.py \
+            pythia/tests/test_bucket_phase3.py \
+            pythia/tests/test_buckets.py \
+            pythia/tests/test_fewsnet_resolution.py \
+            pythia/tests/test_prediction_markets/ \
+            pythia/tests/test_retire_blocked_hazards.py \
+            pythia/tests/test_schema.py \
+            pythia/tests/test_scoring_correctness.py \
+            pythia/tests/test_summarize_all_phases.py \
+            pythia/tests/test_test_mode.py \
+            scripts/tests/test_create_questions_binary.py \
+            scripts/tests/test_create_questions_fewsnet.py \
+            scripts/tests/test_mark_test_runs.py \
+            scripts/tests/test_reconcile_llm_calls_is_test.py
 
       - name: Run formerly orphaned tests
         run: |

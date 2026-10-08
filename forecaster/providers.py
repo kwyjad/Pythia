@@ -15,12 +15,14 @@ usage, latency, and estimated cost so we can monitor spend across runs.
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import os
 import random
 import re
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -149,8 +151,33 @@ def is_shadow(ms: Any) -> bool:
 
 
 _MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "18")))
-_LLM_SEMAPHORES: Dict[int, asyncio.Semaphore] = {}
-_HTTP_CLIENTS_BY_LOOP: Dict[int, httpx.AsyncClient] = {}
+# Per-event-loop state is keyed by the LOOP OBJECT, weakly, never by id(loop).
+# asyncio.run() closes its loop, and the next loop is free to be allocated at
+# the same address: keyed by id(), it inherited the dead loop's semaphore and
+# HTTP client (both bound to a closed loop). Whether that happened depended on
+# heap state, which is why test_event_loop_safety passed or failed with test
+# order. A weak key drops the entry when its loop is collected.
+_LLM_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+_HTTP_CLIENTS_BY_LOOP: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+    weakref.WeakKeyDictionary()
+)
+_LOOP_TOKENS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, int]" = weakref.WeakKeyDictionary()
+_LOOP_TOKEN_COUNTER = itertools.count(1)
+
+
+def loop_token(loop: asyncio.AbstractEventLoop) -> int:
+    """A number that names one event loop for the life of the process.
+
+    Unlike id(loop) it is never reused by a later loop, so it is safe inside
+    a dict key that outlives the loop.
+    """
+    token = _LOOP_TOKENS.get(loop)
+    if token is None:
+        token = next(_LOOP_TOKEN_COUNTER)
+        _LOOP_TOKENS[loop] = token
+    return token
 
 
 def _parse_retry_after(raw: Optional[str]) -> Optional[float]:
@@ -165,11 +192,10 @@ def _parse_retry_after(raw: Optional[str]) -> Optional[float]:
 
 def _get_llm_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
-    key = id(loop)
-    sem = _LLM_SEMAPHORES.get(key)
+    sem = _LLM_SEMAPHORES.get(loop)
     if sem is None:
         sem = asyncio.Semaphore(_MAX_LLM_CONCURRENCY)
-        _LLM_SEMAPHORES[key] = sem
+        _LLM_SEMAPHORES[loop] = sem
     return sem
 
 
@@ -636,11 +662,10 @@ def _get_or_client() -> httpx.AsyncClient:
     """Return a shared async HTTP client for provider calls."""
 
     loop = asyncio.get_running_loop()
-    key = id(loop)
-    client = _HTTP_CLIENTS_BY_LOOP.get(key)
+    client = _HTTP_CLIENTS_BY_LOOP.get(loop)
     if client is None:
         client = httpx.AsyncClient(timeout=30.0)
-        _HTTP_CLIENTS_BY_LOOP[key] = client
+        _HTTP_CLIENTS_BY_LOOP[loop] = client
     return client
 
 
@@ -1743,7 +1768,7 @@ def _format_provider_exception(exc: Exception) -> str:
     sem_id: Optional[int] = None
     try:
         loop = asyncio.get_running_loop()
-        loop_id = id(loop)
+        loop_id = loop_token(loop)
         sem = _get_llm_semaphore()
         sem_id = id(sem)
     except Exception:

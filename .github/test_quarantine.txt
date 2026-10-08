@@ -1,0 +1,10 @@
+# Test files that exist but run in no workflow, each with a reason and a date
+# by which someone decides to wire it, fix it or delete it.
+#
+#   path/to/test_x.py | YYYY-MM-DD | one-line reason
+#
+# scripts/ci/check_test_wiring.py reads this file on every PR (ci-lint). An
+# entry past its date is reported as a warning; an entry for a file that does
+# not exist, or that a workflow now runs, fails the check.
+#
+# Empty on 2026-10-08: every test file that existed then is wired.

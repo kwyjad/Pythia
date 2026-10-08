@@ -55,6 +55,11 @@ on:
       # The signature gate decides whether every DB-producing workflow may
       # upload canonical; its tests ran in no workflow until Sept 2026.
       - "scripts/ci/db_signature.py"
+      # Wired by scripts/ci/check_test_wiring.py (Oct 2026).
+      - "scripts/ci/run_connectors.py"
+      - "scripts/ci/tests/test_run_connectors_report.py"
+      - "scripts/ci/verify_duckdb_counts.py"
+      - "scripts/tests/test_verify_duckdb_counts.py"
       - "scripts/ci/tests/test_db_signature.py"
       # The shell-sanity rules cover the composite action and the resolver
       # workflow, so a change to either must run them.
@@ -134,6 +139,11 @@ on:
       # The signature gate decides whether every DB-producing workflow may
       # upload canonical; its tests ran in no workflow until Sept 2026.
       - "scripts/ci/db_signature.py"
+      # Wired by scripts/ci/check_test_wiring.py (Oct 2026).
+      - "scripts/ci/run_connectors.py"
+      - "scripts/ci/tests/test_run_connectors_report.py"
+      - "scripts/ci/verify_duckdb_counts.py"
+      - "scripts/tests/test_verify_duckdb_counts.py"
       - "scripts/ci/tests/test_db_signature.py"
       # The shell-sanity rules cover the composite action and the resolver
       # workflow, so a change to either must run them.
@@ -283,7 +293,7 @@ jobs:
           fi
 
           # Real run with JUnit
-          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests resolver/ingestion/tests resolver/transform/tests/test_acled_adapter.py resolver/transform/tests/test_idmc_adapter.py scripts/ci/tests/test_inspect_resolver_db.py scripts/ci/tests/test_diagnose_acled_cast.py scripts/ci/tests/test_diagnose_emdat.py scripts/ci/tests/test_diagnose_acled_auth.py scripts/ci/tests/test_db_signature.py -q -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
+          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests resolver/ingestion/tests resolver/transform/tests/test_acled_adapter.py resolver/transform/tests/test_idmc_adapter.py scripts/ci/tests/test_inspect_resolver_db.py scripts/ci/tests/test_diagnose_acled_cast.py scripts/ci/tests/test_diagnose_emdat.py scripts/ci/tests/test_diagnose_acled_auth.py scripts/ci/tests/test_db_signature.py resolver/transform/tests/test_source_priority_contract.py scripts/ci/tests/test_run_connectors_report.py scripts/tests/test_verify_duckdb_counts.py -q -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
 
           # Mirror to legacy root filename for collectors that still look there
           if [ -f "$ART_DIR/pytest-junit.xml" ]; then

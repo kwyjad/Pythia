@@ -3296,7 +3296,11 @@ def _cache_warm_key(ms: "ModelSpec", prompt_cache_key: str | None) -> tuple | No
     except Exception:  # noqa: BLE001
         return None
     try:
-        loop_id = id(asyncio.get_running_loop())
+        # A per-loop token, never id(loop): a later loop at a reused address
+        # would otherwise find this loop's Lock (bound to a closed loop) or
+        # read its prefix as already warmed.
+        from .providers import loop_token  # noqa: PLC0415
+        loop_id = loop_token(asyncio.get_running_loop())
     except RuntimeError:
         return None
     return (loop_id, str(ms.provider or "").lower(), str(ms.model_id or ""), prompt_cache_key)

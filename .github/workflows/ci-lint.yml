@@ -67,6 +67,19 @@ jobs:
           PYTHONPATH: .
         run: pytest -vv --noconftest tests/test_check_workflow_freshness.py tests/test_check_dashboard_sync.py
 
+      # A test file named in no workflow's pytest command runs nowhere and can
+      # go red unseen (fifteen had, on 2026-10-07). This fails the PR that
+      # adds one, unless it is quarantined in .github/test_quarantine.txt with
+      # a review date and a reason. Stdlib-only, so it lives in this job,
+      # which runs on every PR.
+      - name: Every test file runs in some workflow
+        env:
+          PYTHONPATH: .
+        run: |
+          set -e
+          python scripts/ci/check_test_wiring.py
+          pytest -vv --noconftest scripts/ci/tests/test_check_test_wiring.py
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
