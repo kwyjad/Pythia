@@ -386,11 +386,22 @@ def _format_base_rate_for_prompt(
             f"{window_txt} ({coverage:.0f}% coverage).",
         ]
         if history_summary.get("values_are_range_lower_bounds"):
+            # The upper-bound clause is written only when a figure below
+            # carries one: before the November 2026 ingest no row did, and
+            # every prompt promised a "to" figure that never appeared.
+            shown = [history_summary.get("last_observed") or {}]
+            shown += list(last_6m) + list(history_summary.get("projections") or [])
+            any_range = any(
+                e.get("value") is not None and e.get("value_high") is not None
+                and float(e["value_high"]) > float(e["value"])
+                for e in shown
+            )
             lines.append(
                 "Each FEWS NET figure is the LOWER bound of the population range FEWS NET "
-                "publishes (for example \"1.0 - 2.49 million\" is stored as 1,000,000); "
-                "the upper bound is shown after \"to\" where FEWS NET gave one. The "
-                "question resolves on the lower bound."
+                "publishes (for example \"1.0 - 2.49 million\" is stored as 1,000,000)"
+                + ("; the upper bound is shown after \"to\" where FEWS NET gave one."
+                   if any_range else ".")
+                + " The question resolves on the lower bound."
             )
 
         # The newest observation, with its month and age. The six-month

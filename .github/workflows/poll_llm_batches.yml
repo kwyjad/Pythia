@@ -55,8 +55,18 @@ permissions:
   contents: read
   actions: write  # dispatches pythia_pipeline_stage.yml
 
+# One group for the chain, so two polls never dispatch the same stage at
+# once. The group holds ONE pending run: while a poll is held in-job (up to
+# 225 minutes when GitHub refuses the re-arm), a later cron tick or re-arm
+# waits behind it and a newer one cancels the older pending one. Nothing is
+# lost by that, because the held job is itself polling every 5.5 minutes and
+# dispatching stages. The pipeline stages are in pythia-resolver-db, a
+# different group, so a held poll can neither block nor cancel a stage.
+# Diagnostic dispatches (canary, inspect_*) skip polling and take their own
+# group: queued behind a held job they would wait hours and could be
+# cancelled by the next cron tick.
 concurrency:
-  group: poll-llm-batches
+  group: ${{ (github.event_name == 'workflow_dispatch' && (inputs.canary == true || inputs.canary == 'true' || inputs.inspect_batches != '' || inputs.inspect_recent != '')) && 'poll-llm-batches-diagnostic' || 'poll-llm-batches' }}
   cancel-in-progress: false
 
 jobs:

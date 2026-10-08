@@ -581,7 +581,17 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
     if fr:
         for col in ("base_rate_block_version", "rc_guidance", "rc_shift_arm", "advice_arm"):
             if column_exists(con, "forecasts_raw", col):
-                attrs[col] = _mode_by_run_question(con, col, member_where)
+                where = member_where
+                if col == "rc_shift_arm" and table_exists(con, "questions"):
+                    # The RC guidance reaches SPD prompts only. Binary
+                    # questions were stamped with an arm until 2026-10-08
+                    # and never received the treatment, so their stamp is
+                    # not an arm.
+                    where += (
+                        " AND question_id NOT IN (SELECT question_id FROM questions "
+                        "WHERE upper(metric) = 'EVENT_OCCURRENCE')"
+                    )
+                attrs[col] = _mode_by_run_question(con, col, where)
         if column_exists(con, "forecasts_raw", "recalibration_json"):
             attrs["recalibration_mode"] = _mode_by_run_question(
                 con, "json_extract_string(recalibration_json, '$.mode')", member_where

@@ -71,3 +71,51 @@ def test_the_upper_bound_survives_precedence_into_facts_resolved(tmp_path):
         "SELECT iso3, value_high FROM facts_resolved WHERE metric = 'phase3plus_in_need'"
     ).fetchall())
     assert got == {"ETH": 2_490_000.0, "SOM": None}
+
+
+#: facts_resolved exactly as the canonical DB held it on 8 Oct 2026
+#: (backcast run 37707136171): no value_high, both indexes present.
+CANONICAL_2026_10_08_DDL = (
+    "CREATE TABLE facts_resolved(ym VARCHAR NOT NULL, iso3 VARCHAR NOT NULL, hazard_code VARCHAR NOT NULL, "
+    "hazard_label VARCHAR, hazard_class VARCHAR, metric VARCHAR NOT NULL, series_semantics VARCHAR "
+    "DEFAULT('') NOT NULL, \"value\" DOUBLE, unit VARCHAR, as_of DATE, as_of_date VARCHAR, "
+    "publication_date VARCHAR, publisher VARCHAR, source_id VARCHAR, source_type VARCHAR, source_url VARCHAR, "
+    "doc_title VARCHAR, definition_text VARCHAR, precedence_tier VARCHAR, event_id VARCHAR, proxy_for VARCHAR, "
+    "confidence VARCHAR, provenance_source VARCHAR, provenance_rank INTEGER, series VARCHAR, alertlevel VARCHAR, "
+    "created_at TIMESTAMP DEFAULT(CURRENT_TIMESTAMP) NOT NULL, updated_at TIMESTAMP)",
+    "CREATE INDEX idx_facts_resolved_lookup ON facts_resolved(iso3, hazard_code, ym)",
+    "CREATE UNIQUE INDEX ux_facts_resolved_series ON facts_resolved(event_id, iso3, hazard_code, metric, "
+    "as_of_date, publication_date, source_id, series_semantics, ym)",
+)
+
+
+def test_the_november_ingest_adds_value_high_to_the_canonical_schema(tmp_path):
+    """The 11 Nov 2026 Resolver Update writes FEWS NET through run_pipeline's
+    _write_to_db, which runs init_schema first. Against a copy of the canonical
+    schema of 8 Oct 2026 that adds the column, keeps the existing rows, and
+    lands the upper bound, with no manual step."""
+    from resolver.tools import run_pipeline as rp
+    from resolver.tools.enrich import derive_ym, enrich
+
+    db = tmp_path / "canonical.duckdb"
+    con = duckdb.connect(str(db))
+    for ddl in CANONICAL_2026_10_08_DDL:
+        con.execute(ddl)
+    con.execute(
+        "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, publisher, event_id, source_id) "
+        "VALUES ('2026-08', 'KEN', 'ACE', 'fatalities', 12, 'ACLED', 'e1', 'acled')"
+    )
+    con.close()
+
+    combined = derive_ym(enrich(_fetch(CSV)))
+    resolved = rp._run_precedence(combined)
+    rp._write_to_db(f"duckdb:///{db}", resolved, rp._run_deltas(resolved))
+
+    con = duckdb.connect(str(db))
+    cols = [r[1] for r in con.execute("PRAGMA table_info('facts_resolved')").fetchall()]
+    assert "value_high" in cols
+    assert con.execute("SELECT value FROM facts_resolved WHERE iso3 = 'KEN'").fetchone() == (12.0,)
+    got = dict(con.execute(
+        "SELECT iso3, value_high FROM facts_resolved WHERE metric = 'phase3plus_in_need'"
+    ).fetchall())
+    assert got == {"ETH": 2_490_000.0, "SOM": None}

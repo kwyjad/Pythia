@@ -359,3 +359,24 @@ def test_warm_gate_releases_when_the_first_call_raises(monkeypatch):
     results, ran = asyncio.run(_scenario())
     assert isinstance(results[0], RuntimeError)
     assert ran == ["second"]
+
+
+def test_warm_gate_state_is_freed_with_its_loop(monkeypatch):
+    """A plain dict kept every closed loop's Lock and warmed set forever."""
+    import gc
+
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    cli._reset_cache_warm_gates()
+
+    async def _scenario():
+        ms = ModelSpec(provider="openai", model_id="gpt-6-sol", name="sol")
+        key = cli._cache_warm_key(ms, "pythia:spd_v2:ACE:PA:t1")
+        async with cli._prompt_cache_warm_gate(key):
+            pass
+        assert len(cli._CACHE_WARM_GATES) == 1 and len(cli._CACHE_WARMED) == 1
+
+    for _ in range(3):
+        asyncio.run(_scenario())
+    gc.collect()
+    assert len(cli._CACHE_WARM_GATES) == 0
+    assert len(cli._CACHE_WARMED) == 0

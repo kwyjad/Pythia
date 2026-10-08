@@ -609,3 +609,24 @@ def test_experiments_compare_versions_apart_and_the_pooled_group(tmp_path):
     assert pooled and {pooled[0]["arm"], pooled[0]["reference_arm"]} == {GROUP, "none"}
     (p,) = [r for r in pooled if r["score_type"] == "brier"]
     assert {p["n_arm"], p["n_reference"]} == {5, 2}
+
+
+def test_a_binary_question_stamped_with_an_rc_arm_is_in_neither_arm(tmp_path):
+    """Until 2026-10-08 binary Track 1 questions were stamped with an RC arm
+    although the shift guidance is SPD-only; the split must not read them."""
+    path = tmp_path / "arm.duckdb"
+    con = duckdb.connect(str(path))
+    _schema(con)
+    con.execute("ALTER TABLE forecasts_raw ADD COLUMN rc_shift_arm TEXT")
+    _question(con, "S1", "ETH", "ACE", "FATALITIES")
+    _question(con, "B1", "ETH", "FL", "EVENT_OCCURRENCE")
+    _spd(con, "forecasts_raw", "r1", "S1", "model-a", 1, POST)
+    _spd(con, "forecasts_raw", "r1", "B1", "model-a", 1, [0.2, 0.8])
+    for qid, probs in (("S1", POST), ("B1", [0.2, 0.8])):
+        _spd(con, "forecasts_ensemble", "r1", qid, "ensemble_mean_v2", 1, probs)
+        _resolve(con, qid, 1, 1.0)
+        _score(con, qid, "ensemble_mean_v2", 1, "brier", 0.3)
+    con.execute("UPDATE forecasts_raw SET rc_shift_arm = 'shift'")
+    ctx = ea.build_context(con, ["S1", "B1"])
+    assert ctx.qmeta["S1"]["rc_shift_arm"] == "shift"
+    assert ctx.qmeta["B1"]["rc_shift_arm"] == "none"
