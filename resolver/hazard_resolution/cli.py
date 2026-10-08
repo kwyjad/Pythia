@@ -299,6 +299,16 @@ def sweep_and_resolve_zeros(
             "reliefweb": sweep,
             "retrieved_at": sweep["retrieved_at"],
         }
+        if isinstance(detector_evidence.get("gdacs"), dict):
+            # What this zero was weighed against: the detector's own list of
+            # the country's events in the month (usually none). The cache as
+            # a whole is cited by snapshot in the shared block.
+            from resolver.hazard_resolution.evidence_snapshots import events_in_window
+
+            evidence["gdacs"] = {
+                **detector_evidence["gdacs"],
+                "events_in_window": events_in_window(row.detail),
+            }
         if dry_run:
             tally.zeros += 1
             ledger(row, outcome="dry_run", reason=None, sweep=sweep)
@@ -688,9 +698,15 @@ def run_flood_month(
     if no_sweep:
         LOG.info("[cli] --no-sweep: skipping ReliefWeb silence checks and zeros")
     else:
+        # The cache listing is cited by snapshot, never copied into each
+        # zero: 20,048 flood zeros carried every GDACS URL twice (4.9 GB on
+        # 8 Oct 2026). Each zero adds its own country's events in the window
+        # (sweep_and_resolve_zeros, events_in_window).
+        from resolver.hazard_resolution.evidence_snapshots import summary_with_snapshot
+
         detector_evidence = {
             "gdacs": {
-                **raw_store_summary(con, "gdacs", hazard),
+                **summary_with_snapshot(con, "gdacs", hazard, store=not dry_run),
                 "query": {
                     "ym": ym,
                     "gdacs_trigger_level": rulebook.get("flood.gdacs_trigger_level"),

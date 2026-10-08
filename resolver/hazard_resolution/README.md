@@ -172,6 +172,13 @@ always reads the newest revision.
   sample title/URL is stored in the zero's provenance
   (`evidence_of_absence`), and a silent sweep also lands in the
   trigger row's `evidence_of_absence_json`.
+- **What a flood zero cites (Oct 2026)**: the GDACS events for its own
+  country and month (`evidence_of_absence.gdacs.events_in_window`, usually
+  empty) and a snapshot of the cache it was checked in
+  (`evidence_of_absence.gdacs.snapshot`: id, date, count, SHA-256). The
+  cache's full URL list is stored once per snapshot in
+  `haz_evidence_snapshots` (`evidence_snapshots.snapshot_urls`), never in
+  the row: copied into every zero, it had grown to 4.9 GB by October 2026.
 
 **Environment.** `RESOLVER_DB_URL` (or `--db`) targets the DB;
 `RELIEFWEB_APPNAME` is the ReliefWeb `appname` parameter (falls back to
