@@ -339,7 +339,10 @@ def test_fc_collect_resolves_the_epoch_from_stage_state_before_newest_hs_run() -
 
 def test_poller_rearm_dispatch_retries_before_breaking_the_chain() -> None:
     step = _step(WF_POLLER, "poll", "Reschedule next poll")
-    assert "for attempt in" in step["run"] and "gh workflow run poll_llm_batches.yml" in step["run"]
+    # The retry and the in-job hold live in scripts/ci/poller_rearm.py
+    # (tested in scripts/ci/tests/test_poller_rearm.py); the step must call it.
+    assert "python -m scripts.ci.poller_rearm" in step["run"]
+    assert "--job-limit-min" in step["run"]
 
 
 def _on(data: dict) -> dict:

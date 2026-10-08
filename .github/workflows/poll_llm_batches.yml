@@ -63,8 +63,11 @@ jobs:
   poll:
     runs-on: ubuntu-latest
     # The canary follows each batch for up to 10 minutes and needs the full
-    # dependency install; the poller itself stays inside 15.
-    timeout-minutes: ${{ (inputs.canary == true || inputs.canary == 'true') && 30 || 15 }}
+    # dependency install. A normal poll takes about six minutes; the limit is
+    # 240 because, when GitHub refuses the re-arm dispatch, the job keeps
+    # polling itself (scripts/ci/poller_rearm.py, up to 225 minutes) rather
+    # than ending the chain and waiting on a cron tick that can be hours late.
+    timeout-minutes: ${{ (inputs.canary == true || inputs.canary == 'true') && 30 || 240 }}
     steps:
       # Checked out before the gate so the gate itself can be the shared,
       # unit-tested decision core rather than a second inline copy of it.
@@ -72,6 +75,10 @@ jobs:
       # install + provider polling below.
       - name: Check out code
         uses: actions/checkout@v4
+
+      - name: Record job start
+        id: job_start
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       # Cheap activity gate: the pipeline is active only a few days per
       # month, but this cron fires year-round. scripts/ci/check_pipeline_active.py
@@ -207,25 +214,28 @@ jobs:
       # The self-rescheduling chain. `rearm` is true only while some pipeline
       # is genuinely in flight (waiting on batches, mid-stage, or just
       # dispatched) and under the chain cap — a completed or STALLED pipeline
-      # never re-arms, so this cannot spin. The sleep paces the chain well
-      # inside the job's 15-minute timeout.
+      # never re-arms, so this cannot spin. scripts/ci/poller_rearm.py sleeps
+      # five minutes, dispatches the next poll, and retries a refused dispatch
+      # with backoff for ten minutes. If GitHub still refuses (four HTTP 500s
+      # ended the chain at 15:12 on 7 Oct 2026), the job keeps polling itself
+      # every 5.5 minutes, dispatching stages as batches finish, and retries
+      # the re-arm after each poll, until 225 minutes into the job. The poll
+      # needs the same environment as the poll step for that reason.
       - name: Reschedule next poll
         if: steps.poll.outputs.rearm == 'true'
+        timeout-minutes: 235
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXT_DEPTH: ${{ steps.poll.outputs.chain_depth_next }}
+          JOB_STARTED_AT: ${{ steps.job_start.outputs.epoch }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PYTHIA_BATCH_MAX_WAIT_H: "24"
         run: |
           set -e
           echo "Pipeline still in flight — chaining next poll (depth ${NEXT_DEPTH})."
-          sleep 300
-          # One transient API error here ended the whole chain, and recovery
-          # was the throttled cron (gaps of one to three hours observed).
-          for attempt in 1 2 3 4; do
-            if gh workflow run poll_llm_batches.yml --ref main -f "chain_depth=${NEXT_DEPTH}"; then
-              exit 0
-            fi
-            echo "::warning title=Poller re-arm dispatch failed::attempt ${attempt} of 4; retrying"
-            sleep $((15 * attempt))
-          done
-          echo "::error title=Poller chain broken::could not dispatch the next poll after 4 attempts; the hourly cron is the backstop"
-          exit 1
+          python -m scripts.ci.poller_rearm \
+            --next-depth "${NEXT_DEPTH}" \
+            --job-started-at "${JOB_STARTED_AT}" \
+            --job-limit-min 225

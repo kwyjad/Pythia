@@ -118,6 +118,8 @@ on:
       - "resolver/tests/test_hazard_resolution_extraction.py"
       - "pythia/api/routes/costs.py"
       - "scripts/ci/poll_llm_batches.py"
+      - "scripts/ci/poller_rearm.py"
+      - "scripts/ci/tests/test_poller_rearm.py"
       - "scripts/ci/check_pipeline_active.py"
       - "scripts/ci/canonical_guard.py"
       - ".github/actions/guard-canonical-upload/**"
@@ -417,6 +419,7 @@ jobs:
             forecaster/tests/test_prompt_v3_order.py \
             forecaster/tests/test_prompt_cache_wiring.py \
             forecaster/tests/test_gemini_multipart.py \
+            scripts/ci/tests/test_poller_rearm.py \
             tests/test_poll_llm_batches_guard.py \
             tests/test_check_pipeline_active.py \
             tests/test_canonical_guard.py \
