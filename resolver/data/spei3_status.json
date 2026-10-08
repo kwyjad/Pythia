@@ -5,9 +5,9 @@
     "nearest_cell": 5890
   },
   "feed": "spei3_country_means",
-  "generated_at": "2026-09-14T11:01:01+00:00",
+  "generated_at": "2026-10-08T12:17:14+00:00",
   "last_failure": null,
-  "last_success_run_id": "34835609446",
+  "last_success_run_id": "37775311681",
   "months": 128,
   "months_owed": [],
   "newest_month": "2026-08",
@@ -25,8 +25,8 @@
   },
   "rows": 30336,
   "rows_by_dataset_type": {
-    "consolidated_dataset": 29625,
-    "intermediate_dataset": 711
+    "consolidated_dataset": 29862,
+    "intermediate_dataset": 474
   },
   "status": "ok"
 }
