@@ -3222,6 +3222,8 @@ class BundleData:
     # The interpreter report stored for this run, and why it needed a
     # correction pass if it did (Oct 2026). None = no interpretations table.
     interpretation: dict[str, Any] | None = None
+    # pythia/tools/ace_pa_eligibility.py: which ACE countries were asked ACE/PA.
+    ace_pa_eligibility: dict[str, Any] | None = None
 
     # Run summary stats (for executive summary bottom sections)
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
@@ -3519,6 +3521,14 @@ def _load_bundle_data(
     data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
     data.unparseable_forecast_calls = _unparseable_forecast_calls(con, data.forecaster_run_id)
     data.interpretation = _interpretation_for_run(con, data.forecaster_run_id)
+    try:
+        from pythia.tools.ace_pa_eligibility import latest_decision  # noqa: PLC0415
+
+        data.ace_pa_eligibility = (
+            latest_decision(con, data.hs_run_id) if data.hs_run_id else None
+        ) or {"absent": True}
+    except Exception as exc:  # noqa: BLE001 - a collector never fails the bundle
+        data.ace_pa_eligibility = {"error": str(exc)}
 
     return data
 
@@ -3678,6 +3688,27 @@ def _member_gap_summary(question_run_metrics: list[dict[str, Any]]) -> dict[str,
     }
 
 
+def _ace_pa_eligibility_check(elig: dict[str, Any]) -> dict[str, Any]:
+    """The health line for the ACE/PA eligibility decision of this HS run."""
+    if elig.get("error"):
+        return {"subsystem": "ACE/PA Eligibility", "status": "WARN",
+                "detail": f"decision unreadable: {elig['error']}"}
+    if elig.get("absent"):
+        return {"subsystem": "ACE/PA Eligibility", "status": "WARN",
+                "detail": "no ACE/PA eligibility decision stored for this HS run"}
+    asked = elig.get("asked") or []
+    not_asked = elig.get("not_asked") or []
+    detail = (
+        f"source={elig.get('source')}; asked for {len(asked)} ACE countr"
+        f"{'y' if len(asked) == 1 else 'ies'} ({', '.join(asked) or 'none'}), "
+        f"not asked for {len(not_asked)} (displacement not forecast)"
+    )
+    if elig.get("source") != "rule":
+        return {"subsystem": "ACE/PA Eligibility", "status": "WARN",
+                "detail": f"guard: {elig.get('reason')}; {detail}"}
+    return {"subsystem": "ACE/PA Eligibility", "status": "OK", "detail": detail}
+
+
 def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     """Return list of {subsystem, status, detail} dicts for the executive summary."""
     checks: list[dict[str, Any]] = []
@@ -3706,6 +3737,13 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         hs_status = "FAIL"
         hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
     checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
+
+    # Which ACE countries were asked conflict displacement (ACE/PA). A run
+    # that did not use the regular-reporter rule (the guard fell back to the
+    # previous run's list or to every ACE country) is a WARN naming why.
+    elig = data.ace_pa_eligibility
+    if elig is not None:
+        checks.append(_ace_pa_eligibility_check(elig))
 
     # The interpreter report, and why it needed a correction pass if it did.
     interp = data.interpretation
@@ -4664,7 +4702,10 @@ def emit_coverage_detail_markdown(data: BundleData, out_dir: Path) -> str:
     lines.append("## Question generation")
     lines.append("")
     lines.append("Metric rules per hazard:")
-    lines.append("- ACE → PA + FATALITIES (2 questions)")
+    lines.append(
+        "- ACE → FATALITIES, + PA only where IDMC reports the country regularly "
+        "(1-2; see the ACE/PA Eligibility health line)"
+    )
     lines.append("- DR → EVENT_OCCURRENCE [+ PHASE3PLUS_IN_NEED if a food-security country] (1-2)")
     lines.append("- FL → PA + EVENT_OCCURRENCE (2 questions)")
     lines.append("- TC → PA + EVENT_OCCURRENCE (2 questions)")

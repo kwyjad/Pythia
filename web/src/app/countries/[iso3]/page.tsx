@@ -5,6 +5,7 @@ import Link from "next/link";
 
 import { apiGet } from "../../../lib/api";
 import type { QuestionsResponse } from "../../../lib/types";
+import { displacementNotForecastWindows } from "../../../lib/conflict_displacement";
 import CountryQuestionsTable from "./CountryQuestionsTable";
 
 type CountryPageProps = {
@@ -147,6 +148,15 @@ const CountryPage = async ({ params, searchParams }: CountryPageProps) => {
       ) : (
         <div className="overflow-x-auto rounded-lg border border-slate-800">
           <CountryQuestionsTable rows={questions} />
+          {displacementNotForecastWindows(questions).length > 0 ? (
+            <p className="mt-2 text-xs text-fred-muted" data-testid="displacement-not-forecast">
+              Conflict displacement is not forecast for {countryName} in the window
+              {displacementNotForecastWindows(questions).length > 1 ? "s" : ""} ending{" "}
+              {displacementNotForecastWindows(questions).join(", ")}: it is asked only for
+              countries IDMC reports regularly. The conflict-deaths forecast still covers the
+              conflict; the missing question is not a forecast of no displacement.
+            </p>
+          ) : null}
         </div>
       )}
     </div>

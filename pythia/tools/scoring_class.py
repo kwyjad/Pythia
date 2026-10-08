@@ -12,8 +12,10 @@ how the forecast did on the months that happened to be reported, not how
 it did. On 7 Oct 2026, 31 of the 38 countries with a current ACE/PA
 question were not regular reporters.
 
-Owner decision (Oct 2026): keep asking every ACE/PA question and split
-them. Each resolution row of an ACE/PA question carries a scoring class,
+Owner decision (7 Oct 2026): keep asking every ACE/PA question and split
+them. Superseded on 8 Oct 2026: from the 13 Oct run ACE/PA is ASKED only
+for a regular reporter (``pythia/tools/ace_pa_eligibility.py``); questions
+already open stay and are split as below. Each resolution row of an ACE/PA question carries a scoring class,
 decided when it is resolved (so before it is scored) from the regular-
 reporter rule as it stands for that month:
 

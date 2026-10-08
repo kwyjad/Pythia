@@ -77,6 +77,10 @@ export type RiskIndexResponse = {
   normalize?: boolean | null;
   rows?: RiskIndexRow[];
   metric_type?: "binary" | "spd" | null;
+  // Countries with a conflict-deaths question but no conflict displacement
+  // question (asked only where IDMC reports regularly).
+  conflict_displacement_not_forecast?: { iso3: string; country_name?: string | null }[];
+  conflict_displacement_note?: string | null;
 };
 
 export type RiskView =
@@ -108,6 +112,7 @@ export type CountriesResponse = {
 export type RiskIndexRow = {
   iso3: string;
   country_name?: string | null;
+  conflict_displacement_forecast?: boolean | null;
   n_hazards_forecasted?: number | null;
   m1?: number | null;
   m2?: number | null;

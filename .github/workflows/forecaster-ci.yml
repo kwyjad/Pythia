@@ -181,6 +181,9 @@ on:
       # question. This file ran in no workflow until Oct 2026.
       - "scripts/create_questions_from_triage.py"
       - "tests/test_create_questions_from_triage.py"
+      - "tests/test_ace_pa_eligibility.py"
+      - "tests/test_api_risk_index_displacement.py"
+      - "pythia/tools/ace_pa_eligibility.py"
       # A run's question set apart from a question's origin (Oct 2026): the
       # link, its readers (forecaster, scenario writer, Sibyl selection, the
       # bundles) and the deviation is_test rule.
@@ -424,6 +427,8 @@ jobs:
             tests/test_check_pipeline_active.py \
             tests/test_canonical_guard.py \
             tests/test_create_questions_from_triage.py \
+            tests/test_ace_pa_eligibility.py \
+            tests/test_api_risk_index_displacement.py \
             tests/test_run_questions_link.py \
             pythia/tests/test_api_test_run_on_production_question.py \
             tests/test_api_test_toggle.py \

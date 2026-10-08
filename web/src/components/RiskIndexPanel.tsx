@@ -14,6 +14,7 @@ import type {
   RunSummaryResponse,
 } from "../lib/types";
 import RiskIndexMap from "./RiskIndexMap";
+import { notForecastSet } from "../lib/conflict_displacement";
 import RiskIndexTable from "./RiskIndexTable";
 import RunMonthSelector from "./RunMonthSelector";
 import RunSelector from "./RunSelector";
@@ -124,6 +125,9 @@ export default function RiskIndexPanel({
   const [view, setView] = useState<RiskView>("ALL_METRICS_SUMMARY");
   const [rows, setRows] = useState(initialResponse.rows ?? []);
   const [targetMonth, setTargetMonth] = useState(initialResponse.target_month);
+  const [notForecast, setNotForecast] = useState(
+    initialResponse.conflict_displacement_not_forecast ?? []
+  );
   const [metric, setMetric] = useState(initialResponse.metric);
   const [countries, setCountries] = useState<CountriesRow[]>(countriesRows);
   const [isLoading, setIsLoading] = useState(false);
@@ -258,6 +262,7 @@ export default function RiskIndexPanel({
     });
     setRows(response.rows ?? []);
     setTargetMonth(response.target_month ?? null);
+    setNotForecast(response.conflict_displacement_not_forecast ?? []);
     setMetric(response.metric);
     setRunMonthFallback(
       Boolean(
@@ -488,6 +493,7 @@ export default function RiskIndexPanel({
                 heightClassName={resolvedMapHeightClassName}
                 riskRows={rows}
                 view={view}
+                displacementNotForecast={notForecastSet(notForecast)}
               />
             </div>
             <div className="space-y-2 overflow-y-auto" style={{maxHeight: resolvedMapHeightClassName.includes("720") ? "720px" : "520px"}} data-testid="risk-index-kpi-panel">
@@ -698,6 +704,14 @@ export default function RiskIndexPanel({
               stickyHeader
             />
           </div>
+          {notForecast.length > 0 ? (
+            <p className="text-xs text-fred-muted" data-testid="displacement-not-forecast">
+              Conflict displacement is forecast only for countries IDMC reports regularly. It is
+              not forecast for{" "}
+              {notForecast.map((c) => c.country_name || c.iso3).join(", ")}, so their
+              people-affected figure leaves it out; this is not a forecast of no displacement.
+            </p>
+          ) : null}
         </>
       )}
     </div>

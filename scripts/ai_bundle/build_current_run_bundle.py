@@ -1444,10 +1444,74 @@ STANDING_CAVEATS = [
 ]
 
 
+def _join_names(names: list[str]) -> str:
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def displacement_coverage(con, attention_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Which conflict countries in this run carry no conflict displacement
+    forecast, and why, in plain words.
+
+    ACE/PA is asked only where IDMC reports regularly
+    (``pythia/tools/ace_pa_eligibility.py``). A country with a conflict-deaths
+    question and no displacement question in this run is either NOT FORECAST
+    (no displacement question exists for the window) or NOT ASKED AGAIN (an
+    earlier run in the same epoch asked it, and that forecast stands as the
+    forecast of record, scored as indicative). Either way the report says so,
+    so a missing question never reads as no displacement risk.
+    """
+    fat = {str(r.get("question_id")) for r in attention_rows
+           if str(r.get("hazard_code") or "").upper() == "ACE"
+           and str(r.get("metric") or "").upper() == "FATALITIES"}
+    pa_in_run = {str(r.get("question_id")) for r in attention_rows
+                 if str(r.get("hazard_code") or "").upper() == "ACE"
+                 and str(r.get("metric") or "").upper() == "PA"}
+    not_forecast: list[str] = []
+    not_asked_again: list[str] = []
+    for qid in sorted(fat):
+        pa_qid = qid.replace("_ACE_FATALITIES_", "_ACE_PA_", 1)
+        if pa_qid == qid or pa_qid in pa_in_run:
+            continue
+        iso3 = qid.split("_", 1)[0]
+        exists = False
+        if table_exists(con, "questions"):
+            try:
+                exists = bool(con.execute(
+                    "SELECT 1 FROM questions WHERE question_id = ? LIMIT 1", [pa_qid]
+                ).fetchone())
+            except Exception:  # noqa: BLE001
+                exists = False
+        (not_asked_again if exists else not_forecast).append(iso3)
+    parts: list[str] = []
+    if not_forecast:
+        parts.append(
+            "Conflict displacement is forecast only for countries IDMC reports "
+            "regularly. It is not forecast for "
+            + _join_names([_names.country_name(i) for i in not_forecast])
+            + "; the conflict-death forecasts still cover them, and the "
+            "absence is not a forecast of no displacement."
+        )
+    if not_asked_again:
+        parts.append(
+            "Conflict displacement was not asked again in this run for "
+            + _join_names([_names.country_name(i) for i in not_asked_again])
+            + ", which IDMC does not report regularly; the earlier forecast for "
+            "this window stands, and it cannot be marked."
+        )
+    return {
+        "not_forecast": not_forecast,
+        "not_asked_again": not_asked_again,
+        "sentence": " ".join(parts),
+    }
+
+
 def build_blind_spots(
     attention_rows: list[dict[str, Any]],
     *,
     as_of: datetime | None = None,
+    displacement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = as_of or datetime.now(timezone.utc)
     # Previous complete month — the resolution pipeline's calendar cutoff.
@@ -1489,7 +1553,14 @@ def build_blind_spots(
             for (hz, metric), n in sorted(pairs.items())
         ],
         "no_baserate_questions": no_baserate,
-        "standing_caveats": STANDING_CAVEATS,
+        # The displacement line leads: it names countries, and the report
+        # prints the first three caveats on page one.
+        "standing_caveats": (
+            [displacement["sentence"]] if displacement and displacement.get("sentence") else []
+        ) + list(STANDING_CAVEATS),
+        "conflict_displacement": {
+            k: v for k, v in (displacement or {}).items() if k != "sentence"
+        },
     }
 
 
@@ -1724,6 +1795,22 @@ def build_bundle(
         # attention row with its tag, and the deltas read those rows.
         sibyl_section = build_sibyl_section(con, run_id, attention_rows)
         sector_block = build_sector_comparison(con, attention_rows)
+        displacement = displacement_coverage(con, attention_rows)
+        _missing = set(displacement["not_forecast"]) | set(displacement["not_asked_again"])
+        _named = sorted({
+            str(e.get("iso3")) for c in sector_block.get("comparisons") or []
+            for side in ("more_worried", "less_worried") for e in c.get(side) or []
+            if str(e.get("iso3")) in _missing
+        })
+        if _named:
+            # Fred's sector score sums expected excess across a country's
+            # forecasts; one with no displacement forecast scores lower by
+            # whatever displacement would have added.
+            sector_block["displacement_note"] = (
+                "Fred's score for " + _join_names([_names.country_name(i) for i in _named])
+                + " leaves out conflict displacement, which is not forecast for "
+                + ("it" if len(_named) == 1 else "them") + " this run."
+            )
 
         previous_run = _previous_run_id(con, run_id, include_test)
         current_month = _report_month(hs_run_id, "") or None
@@ -1745,7 +1832,7 @@ def build_bundle(
             top_n=top_n,
             current_month=current_month,
         )
-        blind_spots = build_blind_spots(attention_rows)
+        blind_spots = build_blind_spots(attention_rows, displacement=displacement)
         outlook = build_performance_outlook(
             con, questions, include_test=include_test,
             as_of=datetime.now(timezone.utc).strftime("%Y-%m-%d"),

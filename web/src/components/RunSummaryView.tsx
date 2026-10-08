@@ -147,8 +147,9 @@ function CoverageFunnel({ data }: Props) {
         <p>
           Each country/hazard pair can produce multiple forecast questions because
           different metrics apply to each hazard type. For example, an Armed
-          Conflict (ACE) pair generates both a Fatalities and a People Affected
-          question. Flood and Tropical Cyclone pairs each produce a People
+          Conflict (ACE) pair generates a Fatalities question, and a People
+          Affected (conflict displacement) question only where IDMC reports the
+          country regularly. Flood and Tropical Cyclone pairs each produce a People
           Affected question and an Event Occurrence question. Drought pairs
           produce a Phase 3+ Population question (for FEWS NET countries) or an
           Event Occurrence question.

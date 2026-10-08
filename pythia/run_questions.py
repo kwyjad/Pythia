@@ -281,8 +281,14 @@ def latest_hs_run_with_questions(con) -> Optional[str]:
     return str(row[0]) if row and row[0] else None
 
 
-def backfill_run_questions(con) -> Dict[str, Any]:
+def backfill_run_questions(con, *, exclude: Optional[List[str]] = None) -> Dict[str, Any]:
     """Reconstruct the links of runs written before the table. Idempotent.
+
+    ``exclude`` names runs never to reconstruct: question creation passes the
+    run it is creating, which has no links YET. Reconstructing it from its
+    triage linked every existing question the triage covered, including the
+    ACE/PA questions the run had decided not to ask (Oct 2026), so the
+    forecaster asked them again.
 
     For every ``hs_runs`` row with no link yet: the questions whose origin is
     that run, plus the questions its triage asked for (a ``need_full_spd`` row
@@ -306,6 +312,8 @@ def backfill_run_questions(con) -> Dict[str, Any]:
         ORDER BY h.hs_run_id
         """
     ).fetchall()
+    skip = {str(r) for r in (exclude or []) if r}
+    runs = [r for r in runs if str(r[0]) not in skip]
     triage_cols = _columns(con, "hs_triage") if table_exists(con, "hs_triage") else set()
     has_triage = bool(triage_cols)
     track_expr = "t.track" if "track" in triage_cols else "NULL"
