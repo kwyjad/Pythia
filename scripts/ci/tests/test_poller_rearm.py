@@ -132,3 +132,19 @@ def test_workflow_uses_the_helper_and_its_job_limit_covers_the_loop():
     job_limit = int(m.group(1))
     loop = re.search(r"--job-limit-min (\d+)", step)
     assert loop and int(loop.group(1)) + 10 <= job_limit
+
+
+def test_a_held_poll_shares_no_group_with_the_stages_or_the_diagnostics():
+    """A poll held in-job for up to 225 minutes must not block or cancel a
+    pipeline stage (pythia-resolver-db), and a diagnostic dispatch must not
+    queue behind it where the next cron tick would cancel it."""
+    poll = (REPO / ".github/workflows/poll_llm_batches.yml").read_text()
+    stage = (REPO / ".github/workflows/pythia_pipeline_stage.yml").read_text()
+    head = poll[poll.index("\nconcurrency:"):poll.index("\njobs:")]
+    assert "pythia-resolver-db" not in head
+    assert "cancel-in-progress: false" in head
+    assert "'poll-llm-batches'" in head and "'poll-llm-batches-diagnostic'" in head
+    for name in ("inputs.canary", "inputs.inspect_batches", "inputs.inspect_recent"):
+        assert name in head
+    assert re.search(r"concurrency:\s*\n\s*group: pythia-resolver-db", stage)
+    assert "pythia-resolver-db" not in poll.split("\njobs:", 1)[1]

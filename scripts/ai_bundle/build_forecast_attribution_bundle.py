@@ -792,6 +792,10 @@ def build_rc_shift_arms(
         q = qmeta.get(qid)
         if q is None or not arm:
             continue
+        if str(q.get("metric") or "").upper() == "EVENT_OCCURRENCE":
+            # Stamped until 2026-10-08, never treated: the RC guidance is
+            # SPD-only, so a binary question belongs to neither arm.
+            continue
         anchor, _src, _d = _anchor_for(deviation.get(qid))
         if not anchor or len(anchor) != len(post) or sum(post) <= 0:
             continue

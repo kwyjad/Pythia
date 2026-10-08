@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import weakref
 import csv
 import functools
 import importlib
@@ -2186,7 +2187,7 @@ def _stamp_advice_arm(run_id: str, question_id: str, question: Optional[dict] = 
 
 
 def _stamp_rc_shift_arm(run_id: str, question_id: str, question: Optional[dict] = None) -> None:
-    """Record the RC split-test arm on a Track 1 question's member rows.
+    """Record the RC split-test arm on a Track 1 SPD question's member rows.
 
     ``forecasts_raw.rc_shift_arm`` is ``shift`` or ``control``; nothing is
     written when the test is off or the question is not Track 1, so the
@@ -2200,6 +2201,10 @@ def _stamp_rc_shift_arm(run_id: str, question_id: str, question: Optional[dict] 
     except (TypeError, ValueError):
         track = 0
     if track != 1:
+        return
+    if str((question or {}).get("metric") or "").upper() == "EVENT_OCCURRENCE":
+        # The shift guidance is in the SPD prompt only; a binary question
+        # never receives it, so it is in neither arm (stamped until 2026-10-08).
         return
     try:
         con = connect(read_only=False)
@@ -3249,13 +3254,31 @@ async def _call_spd_model(
 # that follows. Keyed by event loop because asyncio primitives are bound to
 # the loop that created them and the v2 pipeline runs one loop per batch.
 
-_CACHE_WARM_GATES: dict[tuple, asyncio.Lock] = {}
-_CACHE_WARMED: set[tuple] = set()
+#
+# Held per LOOP OBJECT, weakly: the key carries a loop token so a reused
+# address cannot alias, but a plain module dict kept every closed loop's
+# Lock and warmed set for the life of the process (found 2026-10-08).
+_CACHE_WARM_GATES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+_CACHE_WARMED: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, set[tuple]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _reset_cache_warm_gates() -> None:
     _CACHE_WARM_GATES.clear()
     _CACHE_WARMED.clear()
+
+
+def _warm_state(loop: asyncio.AbstractEventLoop) -> tuple[dict, set]:
+    gates = _CACHE_WARM_GATES.get(loop)
+    if gates is None:
+        gates = _CACHE_WARM_GATES[loop] = {}
+    warmed = _CACHE_WARMED.get(loop)
+    if warmed is None:
+        warmed = _CACHE_WARMED[loop] = set()
+    return gates, warmed
 
 
 class _prompt_cache_warm_gate:
@@ -3264,14 +3287,19 @@ class _prompt_cache_warm_gate:
     def __init__(self, key: tuple | None) -> None:
         self._key = key
         self._held: asyncio.Lock | None = None
+        self._warmed: set[tuple] = set()
 
     async def __aenter__(self) -> None:
         key = self._key
-        if key is None or key in _CACHE_WARMED:
+        if key is None:
             return
-        lock = _CACHE_WARM_GATES.setdefault(key, asyncio.Lock())
+        gates, warmed = _warm_state(asyncio.get_running_loop())
+        self._warmed = warmed
+        if key in warmed:
+            return
+        lock = gates.setdefault(key, asyncio.Lock())
         await lock.acquire()
-        if key in _CACHE_WARMED:
+        if key in warmed:
             # Warmed while we waited: release and run concurrently.
             lock.release()
             return
@@ -3279,7 +3307,7 @@ class _prompt_cache_warm_gate:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._held is not None:
-            _CACHE_WARMED.add(self._key)
+            self._warmed.add(self._key)
             self._held.release()
             self._held = None
 

@@ -1699,16 +1699,12 @@ def _load_fewsnet_projection(
         if not rows:
             return ""
 
-        any_range = any(
-            v is not None and h is not None and float(h) > float(v) for _ym, v, _a, h in rows
-        )
         lines = [
             "FEWS NET MOST LIKELY PROJECTION (phase3plus_projection):",
             "This is FEWS NET's forward-looking 'Most Likely' scenario for IPC Phase 3+ "
             "population. Use as a moderate-to-strong signal for the direction of change.",
-            # The upper-bound clause only where a row below carries one.
-            "Each figure is the LOWER bound of the range FEWS NET publishes"
-            + ("; the upper bound follows \"to\" where FEWS NET gave one." if any_range else "."),
+            "Each figure is the LOWER bound of the range FEWS NET publishes; the upper "
+            "bound follows \"to\" where FEWS NET gave one.",
             "",
             "  Month      | Phase 3+ Population | Analysis Date",
             "  -----------|---------------------|-------------",

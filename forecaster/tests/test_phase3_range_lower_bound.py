@@ -82,3 +82,30 @@ def test_the_projection_table_carries_the_range(monkeypatch):
     out = prompts._load_fewsnet_projection("SOM", ["2026-12", "2027-01"])
     assert "1,500,000 to 2,490,000" in out
     assert "LOWER bound" in out
+    assert "upper bound follows" in out
+
+
+def test_no_upper_bound_sentence_when_no_figure_has_one(monkeypatch):
+    """Until the November 2026 ingest no row carried value_high, and every
+    Phase 3+ prompt still promised an upper bound "after to"."""
+    summary = _summary(monkeypatch, with_high_column=False)
+    text = _format_base_rate_for_prompt(summary, "SOM", "DR", metric="PHASE3PLUS_IN_NEED")
+    assert "LOWER bound" in text and "resolves on the lower bound" in text
+    assert "upper bound" not in text
+
+    from forecaster import prompts
+    from resolver.db import duckdb_io
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE facts_resolved (ym TEXT, iso3 TEXT, metric TEXT, value DOUBLE, "
+        "as_of_date TEXT, value_high DOUBLE)"
+    )
+    con.execute(
+        "INSERT INTO facts_resolved VALUES ('2026-12', 'SOM', 'phase3plus_projection', "
+        "1500000, '2027-01-31', NULL)"
+    )
+    monkeypatch.setattr(duckdb_io, "get_db", lambda url: con)
+    monkeypatch.setattr(duckdb_io, "close_db", lambda c: None)
+    out = prompts._load_fewsnet_projection("SOM", ["2026-12", "2027-01"])
+    assert "LOWER bound" in out and "upper bound" not in out
