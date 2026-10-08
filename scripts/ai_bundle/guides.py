@@ -229,11 +229,21 @@ and never vote, carry calibration weight or receive advice. Each member row
 says what was done to it in `forecasts_raw.recalibration_json`.
 
 **One run per question.** A question forecast in several runs has score
-and forecast rows for each. `rollups.csv`, `forecast_vs_outcome.csv`, the
-digest and every `questions/*.json` score list use the LATEST run only;
-`scores_flat.csv` keeps every run and says which is latest
+and forecast rows for each: question ids are keyed by epoch, so a run whose
+window opens in the same month re-asks the same ids (the 13 Oct 2026 run
+re-asked the 1 Oct questions, epoch 2026-11). `rollups.csv`,
+`forecast_vs_outcome.csv`, the digest and every `questions/*.json` score list
+use the question's FORECAST OF RECORD only: its latest PRODUCTION run, so a
+question a later run did not ask again keeps its earlier forecast, and a test
+run never stands in (`pythia/tools/forecast_of_record.py`).
+`scores_flat.csv` keeps every run and says which is the record
 (`is_latest_run`), and `questions_index.csv` carries `n_runs`, `is_rerun`
-and `latest_run_id`.
+and `latest_run_id`. The experiment arms (`advice_arm`, `rc_shift_arm`, the
+prompt versions) are hashed on the question id, so a question has the same
+arm in every run of its epoch; every arm comparison here counts a question
+ONCE per epoch, from its forecast of record. To study one run on its own
+(the 1 Oct 2026 RC split, say), select it by `run_id` in `scores_flat.csv`,
+or build the forecast attribution bundle for that run.
 
 **RPS beside Brier.** For SPD metrics the digest reports RPS (stored as
 `score_type='crps'`) next to Brier. Brier ignores bucket ORDER — one bucket
@@ -533,7 +543,8 @@ score and RC level recorded for the cell, or `not assessed`.
 
 **`experiments.csv`** — for each flag holding more than one value
 (`lineup_id`, `base_rate_block_version`, `rc_guidance`, `advice_arm`,
-`recalibration_mode`, `input_partial_month`), within (hazard, metric, track)
+`rc_shift_arm`, `recalibration_mode`, `input_partial_month`), within
+(hazard, metric, track)
 and score type: each arm against the most common one. Arms hold different
 questions, so each question is first paired with climatology on its own
 horizons (primary minus `__ext_climatology`) and the arms are compared on
@@ -895,6 +906,13 @@ _ATTRIBUTION_FILES = """\
   beside the model's `rc_assessment` verdict (accepted / partial / rebutted /
   absent) and the mass it moved on signals classed `rc_flag`. A model that
   reports acceptance and moves nothing is a finding.
+- `attribution/rc_shift_arms.csv` — per RC split-test arm and (hazard,
+  metric), how far each member's month-1 SPD moved from the base-rate anchor.
+  It describes THIS RUN only, one row per (question, member) it forecast.
+  The arm is a hash of the question id, so a question re-asked by a later
+  run in the same epoch keeps its arm; an analysis across runs counts each
+  question once per epoch, from its forecast of record (the scored bundle's
+  `experiments.csv` does), and never adds two runs' tables together.
 - `attribution/trace_quality.csv` — `trace_validation.py` scores per model
   per question plus trace presence and update count. The `prior_quality`
   component runs WITHOUT the original base-rate summary and returns its

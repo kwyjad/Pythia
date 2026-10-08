@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+from pythia.tools.forecast_of_record import record_run_clause
 from pythia.tools.scoring_class import scored_only_clause
 from pythia.config import load as load_cfg
 from resolver.db import duckdb_io
@@ -165,6 +166,10 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
     # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
     # selected sample and never moves a weight.
     sql += scored_only_clause(conn, "s", prefix="        AND ") + "\n"
+    # One run per question: its forecast of record (the latest production
+    # run that forecast it). A same-epoch rerun (13 Oct 2026 re-asked most of
+    # the 1 Oct questions) would otherwise weigh a question once per run.
+    sql += "        " + record_run_clause(conn, "s").strip() + "\n"
     rows = conn.execute(sql, [as_of_month]).fetchall()
 
     samples: List[Sample] = []

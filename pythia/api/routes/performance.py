@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
+from pythia.tools.forecast_of_record import record_run_clause
 from pythia.tools.scoring_class import has_scoring_class, scored_only_clause, scored_only_sql
 
 from pythia.api.core import (
@@ -301,7 +302,13 @@ def performance_scores(
         except Exception:
             logger.debug("Failed to compute track counts for performance")
 
-    # Query 1 -- summary rows (all models including ensemble)
+    # Query 1 -- summary rows (all models including ensemble). One run per
+    # question: its forecast of record (pythia/tools/forecast_of_record.py).
+    # A same-epoch rerun (13 Oct 2026 after 1 Oct) would otherwise weigh a
+    # re-asked question twice in every mean; every run still appears in the
+    # per-run rows below.
+    _record = record_run_clause(con, "s", include_test=include_test)
+
     sql_summary = f"""
         SELECT
           q.hazard_code,
@@ -313,7 +320,7 @@ def performance_scores(
           {_agg}
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
-        WHERE 1=1 {metric_filter} {track_filter}{_tf}
+        WHERE 1=1 {metric_filter} {track_filter}{_tf}{_record}
         GROUP BY q.hazard_code, UPPER(q.metric),
                  CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END,
                  s.score_type, s.model_name
@@ -611,7 +618,11 @@ def sibyl_comparison(
     sib_run_filter = ""
     if sibyl_run_id and _table_exists(con, "sibyl_forecasts"):
         sib_run_filter = (
-            "AND s.question_id IN (SELECT question_id FROM sibyl_forecasts "
+            "AND (s.question_id, s.run_id) IN (SELECT question_id, run_id FROM sibyl_forecasts "
+            "WHERE sibyl_run_id = :srid)"
+            if _table_has_columns(con, "sibyl_forecasts", ["run_id"])
+            and _table_has_columns(con, "scores", ["run_id"])
+            else "AND s.question_id IN (SELECT question_id FROM sibyl_forecasts "
             "WHERE sibyl_run_id = :srid)"
         )
         params["srid"] = sibyl_run_id
@@ -622,6 +633,7 @@ def sibyl_comparison(
     if has_sf:
         _tf_sf = _test_filter(include_test, "sf")
         sf_run_filter = "AND sf.sibyl_run_id = :srid" if sibyl_run_id else ""
+        _sf_run = "sf.run_id" if _table_has_columns(con, "sibyl_forecasts", ["run_id"]) else "NULL"
         meta_cte = f"""
         , sf_pick AS (
           SELECT sf.question_id,
@@ -629,8 +641,9 @@ def sibyl_comparison(
                  sf.js_divergence_inter_trial,
                  sf.volatility_score,
                  sf.cost_usd,
+                 {_sf_run} AS run_id,
                  ROW_NUMBER() OVER (
-                   PARTITION BY sf.question_id ORDER BY sf.created_at DESC
+                   PARTITION BY sf.question_id, {_sf_run} ORDER BY sf.created_at DESC
                  ) AS rn
           FROM sibyl_forecasts sf
           WHERE 1=1 {sf_run_filter}{_tf_sf}
@@ -640,7 +653,11 @@ def sibyl_comparison(
             "sf.js_divergence_vs_standard, sf.js_divergence_inter_trial, "
             "sf.volatility_score, sf.cost_usd"
         )
-        meta_join = "LEFT JOIN sf_pick sf ON sf.question_id = sib.question_id AND sf.rn = 1"
+        meta_join = (
+            "LEFT JOIN sf_pick sf ON sf.question_id = sib.question_id AND sf.rn = 1"
+            + (" AND sf.run_id IS NOT DISTINCT FROM sib.run_id"
+               if _sf_run != "NULL" and _table_has_columns(con, "scores", ["run_id"]) else "")
+        )
     else:
         meta_cte = ""
         meta_select = (
@@ -649,16 +666,29 @@ def sibyl_comparison(
         )
         meta_join = ""
 
-    # One run per question, the latest, on BOTH sides: a question forecast
-    # in several runs has score rows for each, and without this the Sibyl
-    # side contributed one pair per run while the standard side kept an
-    # arbitrary one of them (the ROW_NUMBER below ties across runs).
+    # One run per question on BOTH sides, and the SAME run: Sibyl's latest
+    # production forecast of the question, against the standard forecast of
+    # that run. A question forecast in several runs has score rows for each;
+    # without a run filter the Sibyl side contributed one pair per run. With
+    # MAX(run_id) over every model, a same-epoch rerun that re-asked a
+    # question without Sibyl (13 Oct 2026 after 1 Oct) dropped the question
+    # from the comparison, and a test run made after production did the same.
+    # Pairing within one run keeps the comparison fair: both forecasts were
+    # made from the same evidence on the same day.
+    _has_score_run = _table_has_columns(con, "scores", ["run_id"])
+    _ls_test = (
+        "" if include_test or not _table_has_columns(con, "scores", ["is_test"])
+        else " AND NOT COALESCE(_ls.is_test, FALSE)"
+    )
     _latest = (
-        " AND (s.run_id IS NULL OR s.run_id = (SELECT MAX(_lr.run_id) FROM scores _lr "
-        "WHERE _lr.question_id = s.question_id AND _lr.run_id IS NOT NULL))"
-        if _table_has_columns(con, "scores", ["run_id"])
+        f" AND s.run_id = (SELECT MAX(_ls.run_id) FROM scores _ls "
+        f"WHERE _ls.question_id = s.question_id AND _ls.model_name = '{_SIBYL_MODEL_NAME}' "
+        f"AND _ls.run_id IS NOT NULL{_ls_test})"
+        if _has_score_run and not sib_run_filter
         else ""
     )
+    _run_col = "s.run_id" if _has_score_run else "NULL"
+    _same_run = " AND std.run_id IS NOT DISTINCT FROM sib.run_id" if _has_score_run else ""
 
     # A Sibyl forecast that rested on no evidence (sibyl_forecasts.evidence_ok
     # FALSE — the July 2026 run, whose searches all failed) keeps its score
@@ -682,20 +712,22 @@ def sibyl_comparison(
 
     sql = f"""
     WITH sib AS (
-      SELECT s.question_id, s.horizon_m, s.score_type, s.value AS sibyl_value
+      SELECT s.question_id, s.horizon_m, s.score_type, s.value AS sibyl_value,
+             {_run_col} AS run_id
       FROM scores s
       WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}{_latest}{_evidence}{_scored}
     ),
     std_ranked AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
+             {_run_col} AS run_id,
              ROW_NUMBER() OVER (
-               PARTITION BY s.question_id, s.horizon_m, s.score_type
+               PARTITION BY s.question_id, s.horizon_m, s.score_type, {_run_col}
                ORDER BY CASE s.model_name
                  {" ".join(f"WHEN '{m}' THEN {i}" for i, m in enumerate(pref))}
                  ELSE 99 END
              ) AS rn
       FROM scores s
-      WHERE s.model_name IN ({pref_in}) {baseline_filter}{_tf_s}{_latest}
+      WHERE s.model_name IN ({pref_in}) {baseline_filter}{_tf_s}
     ),
     std AS (SELECT * FROM std_ranked WHERE rn = 1)
     {meta_cte}
@@ -708,7 +740,7 @@ def sibyl_comparison(
     FROM sib
     JOIN std ON std.question_id = sib.question_id
             AND std.horizon_m = sib.horizon_m
-            AND std.score_type = sib.score_type
+            AND std.score_type = sib.score_type{_same_run}
     JOIN questions q ON q.question_id = sib.question_id
     {meta_join}
     ORDER BY q.hazard_code, sib.question_id, sib.score_type, sib.horizon_m

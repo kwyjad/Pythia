@@ -74,30 +74,27 @@ def open_db(db: str) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def latest_run_clause(con, alias: str = "s", table: str = "scores") -> str:
-    """SQL keeping only the LATEST run of each question (plus run-less rows).
+def latest_run_clause(con, alias: str = "s", table: str = "scores",
+                      include_test: bool = False) -> str:
+    """SQL keeping only each question's forecast of record (plus run-less rows).
 
     A question forecast in several runs (reruns, backfills, a same-epoch
-    test run adopted by production) has score and forecast rows for every
-    one of them; the Sept 2026 scored bundle carried questions forecast in up
-    to nine runs, each weighing on every mean and rollup. The latest
-    ``run_id`` per question in ``table`` is the forecast that stands. Rows
-    with no run id (the ``__ext_*`` reference forecasters) are kept. Empty
-    when the table has no ``run_id`` column.
+    rerun such as 13 October 2026 re-asking the 1 October questions) has
+    score and forecast rows for every one of them; the Sept 2026 scored
+    bundle carried questions forecast in up to nine runs, each weighing on
+    every mean and rollup. The run of record is the latest PRODUCTION run
+    that wrote a ``forecasts_ensemble`` row for the question
+    (``pythia/tools/forecast_of_record.py``); ``table`` is the fallback
+    authority on a database without that table. Rows with no run id (the
+    ``__ext_*`` reference forecasters) are kept. Empty when the table has no
+    ``run_id`` column.
     """
     if not column_exists(con, table, "run_id"):
         return ""
-    # The latest PRODUCTION run: a same-epoch test run forecast later than
-    # the production one must not become "the forecast that stands".
-    not_test = (
-        " AND NOT COALESCE(_lr.is_test, FALSE)"
-        if column_exists(con, table, "is_test") else ""
-    )
-    return (
-        f" AND ({alias}.run_id IS NULL OR {alias}.run_id = ("
-        f"SELECT MAX(_lr.run_id) FROM {table} _lr "
-        f"WHERE _lr.question_id = {alias}.question_id AND _lr.run_id IS NOT NULL{not_test}))"
-    )
+    from pythia.tools.forecast_of_record import record_run_clause  # noqa: PLC0415
+
+    authority = "forecasts_ensemble" if column_exists(con, "forecasts_ensemble", "run_id") else table
+    return record_run_clause(con, alias, include_test=include_test, authority=authority)
 
 
 def rows_as_dicts(

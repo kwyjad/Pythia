@@ -151,15 +151,21 @@ def _resolve_run_id(con, include_test: bool) -> str | None:
 
 
 def _previous_run_id(con, run_id: str, include_test: bool) -> str | None:
-    """The run this one is compared against: the latest PRODUCTION run of the
-    previous window epoch.
+    """The run this one is compared against, and so supersedes.
+
+    The latest earlier PRODUCTION run in the SAME window epoch if there is
+    one, else the latest production run of the previous epoch. Question ids
+    are epoch-keyed, so a same-epoch rerun re-asks the earlier run's
+    questions: the 13 Oct 2026 run (epoch 2026-11) supersedes the 1 Oct run,
+    and comparing it with 15 Sept (epoch 2026-10) would report as "movement"
+    a month the 1 Oct report already described.
 
     "The newest run id below this one whose questions are not test" picked a
-    test run: question ids are epoch-keyed, so a same-epoch test run forecasts
-    production questions, and the 1 Oct 2026 report compared itself with
-    fc_1789641908, a 13-question test run of 17 Sept, rather than the 15 Sept
-    production run (Oct 2026). A run is a test run by its OWN forecast rows'
-    ``is_test``; ``include_test`` lets a test run compare with test runs.
+    test run: a same-epoch test run forecasts production questions, and the
+    1 Oct 2026 report compared itself with fc_1789641908, a 13-question test
+    run of 17 Sept, rather than the 15 Sept production run (Oct 2026). A run
+    is a test run by its OWN forecast rows' ``is_test``; ``include_test``
+    lets a test run compare with test runs.
     """
     if not table_exists(con, "forecasts_raw"):
         return None
@@ -183,6 +189,10 @@ def _previous_run_id(con, run_id: str, include_test: bool) -> str | None:
         "GROUP BY fr.run_id" + test_filter + " ORDER BY fr.run_id DESC",
         [run_id],
     )
+    if ws:
+        for r in rows:  # newest first: an earlier run in this epoch
+            if r.get("ws") and str(r["ws"]) == ws:
+                return str(r["run_id"])
     for r in rows:
         if not ws or (r.get("ws") and str(r["ws"]) < ws):
             return str(r["run_id"])
@@ -1379,7 +1389,9 @@ def build_performance_outlook(
             rows = rows_as_dicts(
                 con,
                 "SELECT MAX(run_id) AS run_id FROM scores WHERE run_id IS NOT NULL "
-                "AND run_id <> ''",
+                "AND run_id <> ''"
+                + ("" if include_test or not column_exists(con, "scores", "is_test")
+                   else " AND NOT COALESCE(is_test, FALSE)"),
             )
             scored_run_id = str(rows[0]["run_id"]) if rows and rows[0].get("run_id") else None
         except Exception as exc:  # noqa: BLE001

@@ -141,23 +141,17 @@ def _latest_run_clause(conn: Any, table: str, alias: str) -> str:
     if not (_has_column(conn, table, "run_id")
             and _has_column(conn, "forecasts_ensemble", "run_id")):
         return ""
-    # The latest PRODUCTION run: question ids are epoch-keyed, so a test run
-    # in the same epoch can forecast a production question after its
-    # production run (SOM_ACE_FATALITIES_2026-08: production 15 July, test
-    # runs to 30 July), and taking it made a test forecast the one that stood.
-    not_test = (
-        " AND NOT COALESCE(_lr.is_test, FALSE)"
-        if _has_column(conn, "forecasts_ensemble", "is_test") else ""
-    )
+    # The latest PRODUCTION run (pythia/tools/forecast_of_record.py): a
+    # same-epoch test run forecasting a production question after its
+    # production run must not become the forecast that stands
+    # (SOM_ACE_FATALITIES_2026-08: production 15 July, test runs to 30 July).
+    from pythia.tools.forecast_of_record import record_run_clause  # noqa: PLC0415
+
     score_test = (
         f" AND NOT COALESCE({alias}.is_test, FALSE)"
         if table == "scores" and _has_column(conn, "scores", "is_test") else ""
     )
-    return (
-        f" AND ({alias}.run_id IS NULL OR {alias}.run_id = ("
-        f"SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr "
-        f"WHERE _lr.question_id = {alias}.question_id{not_test})){score_test}"
-    )
+    return record_run_clause(conn, alias) + score_test
 
 
 def _scored(conn: Any, alias: str) -> str:
@@ -1078,7 +1072,7 @@ def _compute_eiv_accuracy(
               AND COALESCE(q.is_test, FALSE) = FALSE
               AND e.model_name IN
                   ('ensemble_mean_v2', 'track2_flash', '__ensemble__')
-            """ + _scored(conn, "e"),
+            """ + _scored(conn, "e") + _latest_run_clause(conn, "eiv_scores", "e"),
             [hz, m],
         ).fetchone()
     except Exception as exc:

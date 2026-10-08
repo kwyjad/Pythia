@@ -306,30 +306,33 @@ def rescore_trace_prior(record: dict[str, Any]) -> None:
 
 
 def _forecast_run_id_for_question(con, qid: str, include_test: bool) -> str | None:
-    """The forecaster run whose forecasts were scored for this question."""
-    if column_exists(con, "scores", "run_id"):
+    """The question's forecast of record: its latest production run
+    (``pythia/tools/forecast_of_record.py``).
+
+    This picked the run with the most score rows, so after a same-epoch
+    rerun two runs scored on the same horizons tied and the record could
+    join the older run's members and prompts to the newer run's scores.
+    """
+    if table_exists(con, "forecasts_ensemble") and column_exists(con, "forecasts_ensemble", "run_id"):
+        from pythia.tools.forecast_of_record import record_run_subquery  # noqa: PLC0415
+
         rows = rows_as_dicts(
-            con,
-            "SELECT run_id, COUNT(*) AS n FROM scores WHERE question_id = ? "
-            "AND run_id IS NOT NULL AND run_id <> '' GROUP BY run_id ORDER BY n DESC",
+            con, "SELECT " + record_run_subquery(con, "?", include_test=include_test) + " AS run_id",
             [qid],
         )
-        if rows:
+        if rows and rows[0].get("run_id"):
             return str(rows[0]["run_id"])
-    if table_exists(con, "forecasts_ensemble"):
-        # Honor include_test in the fallback: a production question can carry
-        # a NEWER test-run forecast row (same-epoch reuse), and picking it
-        # would join the record's prompts/members to the wrong run.
+    if column_exists(con, "scores", "run_id"):
         test_clause = ""
-        if not include_test and column_exists(con, "forecasts_ensemble", "is_test"):
+        if not include_test and column_exists(con, "scores", "is_test"):
             test_clause = " AND COALESCE(is_test, FALSE) = FALSE"
         rows = rows_as_dicts(
             con,
-            "SELECT run_id FROM forecasts_ensemble WHERE question_id = ? "
-            f"{test_clause} ORDER BY created_at DESC LIMIT 1",
+            "SELECT MAX(run_id) AS run_id FROM scores WHERE question_id = ? "
+            f"AND run_id IS NOT NULL AND run_id <> ''{test_clause}",
             [qid],
         )
-        if rows:
+        if rows and rows[0].get("run_id"):
             return str(rows[0]["run_id"])
     return None
 
@@ -628,7 +631,7 @@ def build_question_record(
         record["scores"] = rows_as_dicts(
             con,
             "SELECT s.horizon_m, s.model_name, s.score_type, s.value FROM scores s "
-            "WHERE s.question_id = ?" + latest_run_clause(con, "s")
+            "WHERE s.question_id = ?" + latest_run_clause(con, "s", include_test=include_test)
             + " ORDER BY s.model_name, s.score_type, s.horizon_m",
             [qid],
         )
@@ -704,8 +707,7 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
         + (", r.source_desc" if has_source_desc else ", NULL AS source_desc")
         + (", s.run_id" if has_run_id else ", NULL AS run_id")
         + (
-            ", (s.run_id IS NULL OR s.run_id = (SELECT MAX(_lr.run_id) FROM scores _lr "
-            "WHERE _lr.question_id = s.question_id AND _lr.run_id IS NOT NULL)) AS is_latest_run"
+            ", (TRUE" + latest_run_clause(con, "s") + ") AS is_latest_run"
             if has_run_id else ", TRUE AS is_latest_run"
         )
         + " FROM scores s JOIN questions q ON q.question_id = s.question_id "

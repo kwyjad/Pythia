@@ -270,11 +270,12 @@ def _member_rows(con) -> List[Tuple]:
     hazard, metric, brbv, rcg, resolved_value) for fittable member rows."""
     brbv = "fr.base_rate_block_version" if _has_col(con, "forecasts_raw", "base_rate_block_version") else "NULL"
     rcg = "fr.rc_guidance" if _has_col(con, "forecasts_raw", "rc_guidance") else "NULL"
-    latest = (
-        " AND fr.run_id = (SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr "
-        "WHERE _lr.question_id = fr.question_id)"
-        if _has_col(con, "forecasts_ensemble", "run_id") else ""
-    )
+    # The question's forecast of record: its latest PRODUCTION run. The
+    # MAX(run_id) here took a same-epoch test run's members when one had run
+    # after production (pythia/tools/forecast_of_record.py).
+    from pythia.tools.forecast_of_record import record_run_clause  # noqa: PLC0415
+
+    latest = record_run_clause(con, "fr", keep_runless=False)
     # An indicative ACE/PA month is a selected sample and never fits a
     # factor (pythia/tools/scoring_class.py).
     from pythia.tools.scoring_class import scored_only_clause  # noqa: PLC0415
