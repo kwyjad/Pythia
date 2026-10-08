@@ -6595,7 +6595,8 @@ def emit_operational_files(
 
     def _cache() -> list[dict[str, Any]]:
         rows = prompt_cache.collect(
-            con, predicate=data.predicate, params=list(data.predicate_params)
+            con, predicate=data.predicate, params=list(data.predicate_params),
+            stage_context=_read_stage_context(out_dir),
         )
         _write_csv(pc_path, prompt_cache.FIELDNAMES, rows)
         return rows
@@ -6793,6 +6794,18 @@ def build_flat_zip(
                 continue
             zf.write(file_path, rel.as_posix())
     return zip_path
+
+
+def _read_stage_context(out_dir: Path) -> dict[str, Any] | None:
+    """The forecast stage's context, when the Sibyl job placed it in the
+    bundle directory; None otherwise (a local run, or a missing artifact)."""
+
+    path = out_dir / "stage_context" / "stage_context.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - absent or unreadable is "no context"
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def ensure_stage_context_dir(out_dir: Path) -> Path:

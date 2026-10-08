@@ -39,8 +39,38 @@ FIELDNAMES = [
     "prompt_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
     "cached_tokens", "cache_hit_rate_pct", "estimated_saved_usd",
     "prompt_v3_order", "prompt_cache_enabled", "batch_prompt_cache",
-    "note",
+    "flags_source", "note",
 ]
+
+
+def resolve_flags(
+    stage_context: dict[str, Any] | None,
+    environ: dict[str, str] | None = None,
+) -> tuple[dict[str, str], str]:
+    """The cache flags the FORECAST stage ran with, and where they came from.
+
+    The bundle is built in the Sibyl job, whose own environment does not set
+    PYTHIA_BATCH_PROMPT_CACHE, so reading os.environ reported the flag as
+    unset beside a stage that ran with it on. The stage writes its flags into
+    the stage context (``cache_flags``, and the whole env snapshot); those
+    win. Only with no stage context does this job's environment answer, and
+    the source column says so.
+    """
+    ctx = stage_context or {}
+    explicit = ctx.get("cache_flags")
+    if isinstance(explicit, dict) and explicit:
+        return ({n: str(explicit.get(n, "<unset>")) for n in CACHE_FLAGS}, "stage_context")
+    snap = ((ctx.get("env_snapshot") or {}).get("env")) if isinstance(ctx.get("env_snapshot"), dict) else None
+    if isinstance(snap, dict) and snap:
+        return ({n: str(snap.get(n, "<unset>")) for n in CACHE_FLAGS}, "stage_context_env")
+    env = environ if environ is not None else os.environ
+    return ({n: env.get(n, "<unset>") for n in CACHE_FLAGS}, "bundle_job_env")
+
+
+def stage_cache_flags(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """What the stage writes into its context: the flags as it ran with them."""
+    env = environ if environ is not None else os.environ
+    return {n: env.get(n, "<unset>") for n in CACHE_FLAGS}
 
 
 def _price_detail(model_id: str) -> dict[str, float] | None:
@@ -52,10 +82,16 @@ def _price_detail(model_id: str) -> dict[str, float] | None:
         return None
 
 
-def collect(con, *, predicate: str | None, params: list[Any]) -> list[dict[str, Any]]:
+def collect(
+    con,
+    *,
+    predicate: str | None,
+    params: list[Any],
+    stage_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Per (phase, provider, model) cache rows. Never raises."""
 
-    flags = {name: os.getenv(name, "<unset>") for name in CACHE_FLAGS}
+    flags, flags_source = resolve_flags(stage_context)
     if not predicate:
         return []
     try:
@@ -125,6 +161,7 @@ def collect(con, *, predicate: str | None, params: list[Any]) -> list[dict[str, 
                 "prompt_v3_order": flags["PYTHIA_PROMPT_V3_ORDER"],
                 "prompt_cache_enabled": flags["PYTHIA_PROMPT_CACHE_ENABLED"],
                 "batch_prompt_cache": flags["PYTHIA_BATCH_PROMPT_CACHE"],
+                "flags_source": flags_source,
                 "note": note,
             }
         )

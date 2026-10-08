@@ -248,6 +248,67 @@ class TestGenerate:
             assert head == b"%PDF-"
 
 
+class TestTestRunNeverRepublishes:
+    """7 Oct 2026: a test run's Sibyl job rendered the newest PRODUCTION row
+    (the 1 October report, version 2) and publish replaced the release's
+    latest PDF with it. A run renders its own row or nothing, and a test row
+    never yields the file publish attaches."""
+
+    def _db(self, tmp_path):
+        path = tmp_path / "t.duckdb"
+        con = duckdb.connect(str(path))
+        _save(con, run_id="fc_prod", is_test=False)
+        _save(con, run_id="fc_test", is_test=True)
+        con.close()
+        return path
+
+    def _fake(self, monkeypatch):
+        rendered = []
+
+        def fake_render(html, out_path):
+            rendered.append(out_path.name)
+            out_path.write_bytes(b"%PDF-fake")
+
+        monkeypatch.setattr(pdf, "_render_pdf", fake_render)
+        return rendered
+
+    def test_a_test_run_renders_its_own_row_and_no_latest_pdf(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        path = self._db(tmp_path)
+        rendered = self._fake(monkeypatch)
+        out = tmp_path / "out"
+        result = pdf.generate_pdf(db=str(path), out_dir=str(out), run_id="fc_test")
+        assert result["status"] == "ok" and result["is_test"] is True
+        assert rendered and rendered[0].startswith("test_report__")
+        assert not (out / "interpreter_report_latest.pdf").exists()
+        assert not list(out.glob("report__*.pdf"))
+
+    def test_a_run_with_no_row_renders_nothing_rather_than_an_older_report(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        path = self._db(tmp_path)
+        rendered = self._fake(monkeypatch)
+        result = pdf.generate_pdf(db=str(path), out_dir=str(tmp_path / "out"), run_id="fc_other")
+        assert result["reason"] == "no_row"
+        assert rendered == []
+
+    def test_a_production_run_still_writes_the_latest_pdf(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        path = self._db(tmp_path)
+        self._fake(monkeypatch)
+        out = tmp_path / "out"
+        result = pdf.generate_pdf(db=str(path), out_dir=str(out), run_id="fc_prod")
+        assert result["status"] == "ok" and result["is_test"] is False
+        assert (out / "interpreter_report_latest.pdf").exists()
+
+    def test_the_sibyl_job_renders_by_run_id(self):
+        from pathlib import Path
+
+        wf = (Path(__file__).resolve().parents[2] / ".github/workflows/run_sibyl.yml").read_text()
+        step = wf[wf.index("- name: Render interpreter PDF"):]
+        step = step[:step.index("- name:", 10)]
+        assert '--run-id "${FORECASTER_RUN_ID}"' in step
+
+
 class TestMap:
     """The printed map. The dashboard draws its own with JavaScript, which a
     PDF cannot run, so this is the only map a printed report gets."""

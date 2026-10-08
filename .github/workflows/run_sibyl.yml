@@ -388,9 +388,19 @@ jobs:
           set +e
           sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 >/dev/null 2>&1
           pip install "weasyprint==70.0" >/dev/null 2>&1
+          # This run's own report or nothing. Without --run-id the renderer
+          # takes the newest PRODUCTION row, so on 7 Oct 2026 a test run
+          # re-rendered the 1 October report and publish shipped it as the
+          # latest PDF. A test row renders as test_report__*.pdf with no
+          # interpreter_report_latest.pdf, which publish never picks up.
+          if [ -z "${FORECASTER_RUN_ID:-}" ]; then
+            echo "::warning::No forecaster run id resolved; not rendering a report PDF."
+            exit 0
+          fi
           python -m interpreter.pdf \
             --db "${RESOLVER_DB_URL}" \
             --kind combined \
+            --run-id "${FORECASTER_RUN_ID}" \
             --out-dir interpreter_out
           exit 0
 
@@ -404,6 +414,7 @@ jobs:
           name: pythia-interpreter-report
           path: |
             interpreter_out/report__*.pdf
+            interpreter_out/test_report__*.pdf
             interpreter_out/interpreter_report_latest.pdf
             interpreter_out/report_*_v*.md
             interpreter_out/report__*.html

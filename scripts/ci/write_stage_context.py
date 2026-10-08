@@ -86,6 +86,15 @@ def build_context(
         payload["env_snapshot"] = env_config.collect(repo_root=repo_root, environ=env)
     except Exception as exc:  # noqa: BLE001
         payload["env_snapshot"] = {"error": f"{type(exc).__name__}: {exc}"}
+    # The prompt-cache flags as this stage ran with them, named on their own:
+    # the bundle is built in the Sibyl job, whose environment does not set
+    # them, and its prompt-cache section reads them from here.
+    try:
+        from scripts.debug_bundle import prompt_cache  # noqa: PLC0415
+
+        payload["cache_flags"] = prompt_cache.stage_cache_flags(env)
+    except Exception as exc:  # noqa: BLE001
+        payload["cache_flags"] = {"error": f"{type(exc).__name__}: {exc}"}
     return payload
 
 

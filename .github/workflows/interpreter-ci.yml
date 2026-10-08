@@ -28,6 +28,8 @@ on:
       # Self-reference (same rule as forecaster-ci): a PR editing this
       # workflow's own test list must run the list it edited.
       - ".github/workflows/interpreter-ci.yml"
+      # test_pdf.py pins how the Sibyl job renders the report (by run id).
+      - ".github/workflows/run_sibyl.yml"
 
   workflow_dispatch: {}
 
