@@ -709,6 +709,20 @@ def get_risk_index(
         row["country_name"] = _country_name(row.get("iso3", ""))
         row["metric_type"] = "spd"
 
+    # Conflict displacement (ACE/PA) is asked only where IDMC reports
+    # regularly (pythia/tools/ace_pa_eligibility.py). A PA total without it
+    # is lower by whatever conflict displacement would have added, so say
+    # which countries lack it rather than let a missing question read as no
+    # displacement risk.
+    not_forecast: List[Dict[str, Any]] = []
+    if is_pa and hazard_code_upper in (None, "ACE"):
+        missing = _ace_pa_not_forecast(con, target_month, include_test)
+        for row in rows:
+            row["conflict_displacement_forecast"] = str(row.get("iso3") or "").upper() not in missing
+        not_forecast = [
+            {"iso3": iso, "country_name": _country_name(iso)} for iso in sorted(missing)
+        ]
+
     return {
         "metric": metric_upper,
         "target_month": target_month,
@@ -719,7 +733,42 @@ def get_risk_index(
         "model": model_override,
         "rows": rows,
         "metric_type": "spd",
+        "conflict_displacement_not_forecast": not_forecast,
+        "conflict_displacement_note": CONFLICT_DISPLACEMENT_NOTE if not_forecast else None,
     }
+
+
+CONFLICT_DISPLACEMENT_NOTE = (
+    "Conflict displacement is forecast only for countries IDMC reports regularly. "
+    "For the countries listed it is not forecast, so their people-affected figure "
+    "leaves it out; this is not a forecast of no displacement."
+)
+
+
+def _ace_pa_not_forecast(con, target_month: Optional[str], include_test: bool) -> set:
+    """ISO3s with a conflict-deaths (ACE/FATALITIES) question for the window
+    ending ``target_month`` and no conflict displacement (ACE/PA) question."""
+    if not target_month or not _table_exists(con, "questions"):
+        return set()
+    tf = _test_filter(include_test, "q")
+    try:
+        rows = _execute(
+            con,
+            f"""
+            SELECT upper(q.iso3) FROM questions q
+            WHERE upper(q.hazard_code) = 'ACE' AND upper(q.metric) = 'FATALITIES'
+              AND q.target_month = :tm{tf}
+              AND NOT EXISTS (
+                SELECT 1 FROM questions p
+                WHERE upper(p.hazard_code) = 'ACE' AND upper(p.metric) = 'PA'
+                  AND upper(p.iso3) = upper(q.iso3) AND p.target_month = q.target_month
+              )
+            """,
+            {"tm": target_month},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - a note, never a reason to fail the index
+        return set()
+    return {str(r[0]) for r in rows if r[0]}
 
 
 @router.get("/v1/rankings")

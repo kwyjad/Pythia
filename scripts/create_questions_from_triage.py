@@ -19,6 +19,7 @@ import duckdb
 from pythia.db.schema import ensure_schema
 from pythia.run_questions import backfill_run_questions, record_run_question
 from pythia.test_mode import is_test_mode
+from pythia.tools import ace_pa_eligibility
 from pythia.tools.question_repairs import repair_questions_pointing_at_test_scans  # noqa: F401  re-exported
 
 
@@ -475,8 +476,12 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
     try:
         ensure_schema(con)
         repair_questions_pointing_at_test_scans(con)
+        run_id = _select_hs_run_id(con, hs_run_id)
         try:
-            backfill = backfill_run_questions(con)
+            # Never the run being created: it has no links yet, and
+            # reconstructing it from its triage would link questions this run
+            # decides not to ask (pythia/tools/ace_pa_eligibility.py).
+            backfill = backfill_run_questions(con, exclude=[run_id] if run_id else None)
             if backfill.get("runs_examined"):
                 print(
                     "run_questions backfill: "
@@ -486,7 +491,6 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                 )
         except Exception as exc:  # noqa: BLE001 - a backfill must never stop question creation
             print(f"run_questions backfill skipped: {exc}")
-        run_id = _select_hs_run_id(con, hs_run_id)
         if not run_id:
             print("create_questions_from_triage: no hs_run_id found; nothing to do.")
             return 0
@@ -502,6 +506,13 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
         updated = 0
         today = date.today()
         epoch_label, target_month, opening, closing = _compute_target_and_window(today)
+
+        # ACE/PA only for a regular IDMC reporter (owner decision 2026-10-08;
+        # pythia/tools/ace_pa_eligibility.py). Existing questions are left
+        # alone: an open one for an irregular country keeps its forecast.
+        ace_pa = ace_pa_eligibility.decide(con, window_start=epoch_label, hs_run_id=run_id)
+        ace_pa_asked: List[str] = []
+        ace_pa_not_asked: List[str] = []
 
         for th in triaged:
             metrics = _metrics_for_hazard(th.hazard_code)
@@ -535,6 +546,10 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                 else:
                     updated += 1
 
+                if not ace_pa.admits(th.iso3):
+                    ace_pa_not_asked.append(th.iso3)
+                    continue
+                ace_pa_asked.append(th.iso3)
                 if _upsert_question(
                     con,
                     question_id=f"{th.iso3}_ACE_PA_{epoch_label}",
@@ -609,6 +624,14 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     inserted += 1
                 else:
                     updated += 1
+
+        try:
+            ace_pa_eligibility.record(
+                con, ace_pa, hs_run_id=run_id, asked=ace_pa_asked,
+                not_asked=ace_pa_not_asked, is_test=_is_test,
+            )
+        except Exception as exc:  # noqa: BLE001 - the record must never stop question creation
+            print(f"::warning::ACE/PA eligibility could not be recorded: {exc}")
 
         total = inserted + updated
         print(

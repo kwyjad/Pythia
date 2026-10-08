@@ -723,6 +723,8 @@ def _sibyl_lines(extras: dict[str, Any]) -> list[str]:
                 lines.append(f"- {fact}")
             lines.append("")
 
+    if block.get("displacement_note"):
+        lines += [block["displacement_note"], ""]
     if block.get("caveat"):
         lines += [f"*{block['caveat']}*", ""]
     return lines
@@ -821,6 +823,8 @@ def _sector_lines(extras: dict[str, Any]) -> list[str]:
                     f"{entry.get('sector_rank')}, a gap of {abs(gap)} places."
                 )
             lines.append("")
+    if block.get("displacement_note"):
+        lines += [block["displacement_note"], ""]
     if block.get("caveat"):
         lines += [f"*{block['caveat']}*", ""]
     return lines

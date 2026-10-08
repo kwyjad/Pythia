@@ -1,5 +1,6 @@
 "use client";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { withDisplacementNote } from "../lib/conflict_displacement";
 
 import { classifyJenks, jenksBreaks } from "../lib/jenks";
 import type { CountriesRow, RiskIndexRow, RiskView } from "../lib/types";
@@ -22,6 +23,9 @@ type RiskIndexMapProps = {
   legendItems?: Array<{ label: string; color: string }>;
   onCountryClick?: (iso3: string) => void;
   showRcOverlay?: boolean;
+  // Countries whose conflict displacement is not forecast (no ACE/PA
+  // question); their tooltip says so rather than reading as no risk.
+  displacementNotForecast?: Set<string>;
 };
 
 const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
@@ -162,6 +166,7 @@ export default function RiskIndexMap({
   legendItems,
   onCountryClick,
   showRcOverlay = true,
+  displacementNotForecast,
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
@@ -656,6 +661,7 @@ export default function RiskIndexMap({
         } else if (!inCountryListIso3.has(iso3)) {
           valueLabel = "Not in country list";
         }
+        valueLabel = withDisplacementNote(valueLabel, iso3, displacementNotForecast);
         const rect = container.getBoundingClientRect();
         setTooltip({
           x: event.clientX - rect.left + 12,
@@ -1028,6 +1034,7 @@ export default function RiskIndexMap({
     valueLabelFor,
     onCountryClick,
     showRcOverlay,
+    displacementNotForecast,
   ]);
 
   return (
