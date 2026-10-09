@@ -162,7 +162,7 @@ You forecast two months of this window: MONTH 1 ({month_1}) and MONTH 6 ({month_
 {resolver_card}
 
 === REFERENCE (your prior) ===
-{base_rate_block}{resolver_reading_block}{track_record_block}"""
+{base_rate_block}{track_record_block}"""
 
 _TASK = """=== YOUR TASK EACH STEP ===
 Decide your next actions and update your belief state.
@@ -359,8 +359,6 @@ class TrialResult:
     # measure), and one row per tool result for sibyl_evidence. The rows are
     # written by sibyl.run on the main thread and never go to trials_json.
     resolver_status: Optional[str] = None
-    # Where the nowcast plan slot ended (Oct 2026, review Part 5).
-    nowcast_status: Optional[str] = None
     evidence_rows: List[Dict[str, Any]] = field(default_factory=list)
     # Research depth (Oct 2026, Part 1 of the review): tool calls made, the
     # documents counted as read (each URL and each document text once), and
@@ -416,7 +414,6 @@ class TrialResult:
             "role": self.role,
             "outlier_dropped": self.outlier_dropped,
             "resolver_status": self.resolver_status,
-            "nowcast_status": self.nowcast_status,
             "n_tool_calls": self.n_tool_calls,
             "docs_read_urls": list(self.docs_read_urls),
             "submit_gate_unmet": self.submit_gate_unmet,
@@ -471,7 +468,6 @@ def build_step_prompt(
     track_record: str = "",
     lessons: str = "",
     trial_brief: str = "",
-    resolver_reading: str = "",
 ):
     """Build a step's prompt as ``(text, is_cache_breakpoint)`` segments.
 
@@ -507,9 +503,6 @@ def build_step_prompt(
         month_6=(forecast_months[min(5, len(forecast_months) - 1)] if forecast_months else "month 6"),
         zero_note=_zero_note(question),
         base_rate_block=base_rate.prompt_text,
-        # The resolving source's latest reading (sibyl/resolver_reading.py),
-        # pre-rendered with its heading; '' leaves the prompt unchanged.
-        resolver_reading_block=resolver_reading or "",
         # The lessons block (sibyl/postmortem.py) comes pre-rendered with its
         # own heading, and is '' when there is nothing to show.
         track_record_block=render_track_record(track_record) + (lessons or ""),
@@ -669,7 +662,6 @@ def run_trial(
     model_id: Optional[str] = None,
     cost_kind: Optional[str] = None,
     trial_brief: str = "",
-    resolver_reading: str = "",
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -743,7 +735,6 @@ def run_trial(
                 track_record=track_record,
                 lessons=lessons,
                 trial_brief=trial_brief,
-                resolver_reading=resolver_reading,
             )
             prompt = "".join(text for text, _ in segments)
             # The injectable test seam takes a plain prompt string; the
@@ -950,7 +941,6 @@ def run_trial(
     ):
         result.submit_gate_unmet = True
     result.resolver_status = (belief.plan.get("resolver") or {}).get("status")
-    result.nowcast_status = (belief.plan.get("nowcast") or {}).get("status")
     result.n_transcript_stubbed = transcript.n_stubbed
     # A trial that ran out of steps without submitting still counts: the
     # belief state was updated every step, so the latest quantiles stand.

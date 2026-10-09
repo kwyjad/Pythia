@@ -99,6 +99,8 @@ def process_measures(outcomes: Sequence[Any]) -> Dict[str, Optional[float]]:
     """The process figures over a run's question outcomes.
 
     * share_resolver_done: trials whose resolver plan slot ended 'done'.
+    * share_nowcast_done: trials whose nowcast plan slot ended 'done' (Oct
+      2026, review Part 5: the slot the resolver reading feeds).
     * docs_per_trial: documents read per trial.
     * share_ledger_dated_figure: ledger items carrying a date AND a figure
       (a quote holding a digit).
@@ -122,6 +124,7 @@ def process_measures(outcomes: Sequence[Any]) -> Dict[str, Optional[float]]:
     trials = [t for o in outcomes for t in (getattr(o, "trials", None) or [])]
     n_trials = len(trials)
     resolver_done = sum(1 for t in trials if getattr(t, "resolver_status", None) == "done")
+    nowcast_done = sum(1 for t in trials if getattr(t, "nowcast_status", None) == "done")
     docs = sum(int(getattr(t, "n_docs_read", 0) or 0) for t in trials)
     items = [it for t in trials for it in (getattr(t, "ledger", None) or [])]
     dated_fig = sum(
@@ -156,6 +159,7 @@ def process_measures(outcomes: Sequence[Any]) -> Dict[str, Optional[float]]:
     gate_unmet = sum(1 for t in trials if getattr(t, "submit_gate_unmet", False))
     return {
         "share_resolver_done": _share(resolver_done, n_trials),
+        "share_nowcast_done": _share(nowcast_done, n_trials),
         "docs_per_trial": _share(docs, n_trials),
         "share_ledger_dated_figure": _share(dated_fig, len(items)),
         "share_forecasts_at_floor": _share(at_floor, len(written)),

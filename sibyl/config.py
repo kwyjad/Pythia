@@ -213,10 +213,15 @@ STANDARD_MODEL_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_
 # active filters instead of no-ops.
 BACKTEST_MODE = _env_bool("SIBYL_BACKTEST_MODE", False)
 
-# --- Optional authoritative live lookups (extension point) -------------------
-# Disabled by design: Sibyl's independence from the structured Pythia
-# connectors is the point of the parallel track. When enabled (future), any
-# lookup must be clamped to asOf by sibyl/leakage.py.
+# --- The resolving source's latest reading (Oct 2026, review Part 5) --------
+# One reading per question, taken on the main thread before its trials and
+# shown to every lane (sibyl/resolver_reading.py): the newest Phase 3+ rows
+# for drought, the last six months of resolving rows and GDACS alerts for
+# flood and cyclone. Nothing in backtest. Off -> the prompt is unchanged.
+RESOLVER_READING = _env_bool("SIBYL_RESOLVER_READING", True)
+# The live month-to-date ACLED read for conflict deaths. Off in code; on in
+# run_sibyl.yml, which holds the ACLED credentials at step scope. With it off
+# a conflict question shows no reading.
 LIVE_LOOKUPS_ENABLED = _env_bool("SIBYL_LIVE_LOOKUPS_ENABLED", False)
 
 # --- Search ------------------------------------------------------------------

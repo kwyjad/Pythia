@@ -402,10 +402,11 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             brave_cost_usd, leakage_json, created_at, is_test, selection_pass,
             base_rate_json, advice_arm, advice_as_of_month, evidence_ok,
             reference_json, raw_by_month_json, final_by_month_json,
-            extraction_cost_usd, extra_trials_rule, trial_checks_json
+            extraction_cost_usd, extra_trials_rule, trial_checks_json,
+            resolver_reading_json
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?)
+                  ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -445,6 +446,7 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             record.get("extraction_cost_usd", 0.0),
             record.get("extra_trials_rule"),
             _json_or_none(record.get("trial_checks") or None),
+            _json_or_none(record.get("resolver_reading") or None),
         ],
     )
 
@@ -472,10 +474,11 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             reference_weight, reference_weight_source, shadow_status, shadow_model,
             n_shadow_trials, n_shadow_series, n_shadow_skipped, shadow_cost_usd,
             median_docs_per_trial, share_trials_under_doc_gate, steps_per_trial,
-            tool_calls_per_trial, share_docs_wikipedia, n_submit_gate_unmet
+            tool_calls_per_trial, share_docs_wikipedia, n_submit_gate_unmet,
+            n_resolver_live_ok, n_resolver_live_failed, share_nowcast_done
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -520,5 +523,8 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("tool_calls_per_trial"),
             record.get("share_docs_wikipedia"),
             record.get("n_submit_gate_unmet"),
+            record.get("n_resolver_live_ok"),
+            record.get("n_resolver_live_failed"),
+            record.get("share_nowcast_done"),
         ],
     )

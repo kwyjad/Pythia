@@ -48,6 +48,8 @@ PROCESS_MEASURES = (
     # Research depth (Oct 2026, review Part 1).
     "median_docs_per_trial", "share_trials_under_doc_gate", "steps_per_trial",
     "tool_calls_per_trial", "share_docs_wikipedia", "n_submit_gate_unmet",
+    # The resolving source's reading (Oct 2026, review Part 5).
+    "share_nowcast_done", "n_resolver_live_ok", "n_resolver_live_failed",
 )
 #: The shadow arm (sibyl/shadow.py, Oct 2026): NULL on earlier runs.
 SHADOW_FIELDS = (
@@ -365,6 +367,8 @@ def sibyl_question_detail(
         ("raw_by_month_json", "raw_by_month"),
         ("final_by_month_json", "final_by_month"),
         ("trial_checks_json", "trial_checks"),
+        # Part 5: the resolving source's reading shown to the trials.
+        ("resolver_reading_json", "resolver_reading"),
     ):
         rec[dst_key] = _maybe_json(rec.pop(src_key, None))
 

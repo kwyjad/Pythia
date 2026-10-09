@@ -40,6 +40,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from datetime import date
 from typing import Any, Dict, List, Optional
 
@@ -73,6 +74,7 @@ from sibyl.evidence import backfill_evidence_ok
 from sibyl.leakage import LeakageStats
 from sibyl.measure import process_measures, reference_weight, write_evidence
 from sibyl.postmortem import lessons_block_for
+from sibyl.resolver_reading import LIVE_OK, LIVE_UNAVAILABLE, ResolverReading, build_resolver_reading
 from sibyl.shadow import ShadowContext, run_shadow_phase, shadow_setup
 from sibyl.reconcile import RECONCILE_LANE, build_brief as build_reconcile_brief
 from sibyl.reconcile import median_inside as reconcile_median_inside
@@ -144,6 +146,8 @@ class QuestionOutcome:
     # production work of the whole run (sibyl/shadow.py). None for a control
     # and for a question that produced no forecast.
     shadow_ctx: Optional[ShadowContext] = None
+    # The resolving source's latest reading, shown to every trial (Part 5).
+    resolver_reading: ResolverReading = field(default_factory=ResolverReading)
 
 
 def _write_log(**kw: Any) -> None:
@@ -253,6 +257,14 @@ def process_question(
             track_record = advice.text if advice is not None else ""
             lessons = lessons_block
 
+    # The resolving source's latest reading (sibyl/resolver_reading.py): one
+    # read on this thread before any trial starts, the same block for every
+    # lane, controls included. Nothing in backtest.
+    reading = build_resolver_reading(
+        con, question, as_of, forecast_keys=forecast_keys, country_name=country,
+    )
+    outcome.resolver_reading = reading
+
     is_control = question.is_control
 
     briefs: Dict[str, str] = {}
@@ -273,6 +285,7 @@ def process_question(
             lessons=lessons,
             log_sink=sink,
             trial_brief=briefs.get(lane, ""),
+            resolver_reading=reading.text,
         )
 
     def _batch(jobs, role: str) -> None:
@@ -520,6 +533,7 @@ def process_question(
             "evidence_ok": True,
             "extra_trials_rule": outcome.extra_trials_rule,
             "trial_checks": outcome.trial_checks,
+            "resolver_reading": reading.record or None,
         },
     )
     outcome.status = "ok"
@@ -541,6 +555,7 @@ def process_question(
                 lane="C",
                 lessons=lessons,
                 log_sink=sink,
+                resolver_reading=reading.text,
                 provider=provider,
                 model_id=model_id,
                 cost_kind=COST_KIND_SHADOW,
@@ -570,6 +585,7 @@ def _persist_non_ok(
     trials: Optional[List[TrialResult]] = None,
     extra_trials_rule: Optional[str] = None,
     trial_checks: Optional[Dict[str, Any]] = None,
+    resolver_reading: Optional[Dict[str, Any]] = None,
 ) -> None:
     qcost = tracker.question_breakdown(question.question_id)
     persist_sibyl_forecast(
@@ -604,8 +620,17 @@ def _persist_non_ok(
             "evidence_ok": (False if trials else None),
             "extra_trials_rule": extra_trials_rule,
             "trial_checks": trial_checks,
+            "resolver_reading": resolver_reading or None,
         },
     )
+
+
+def _reading_evidence(outcome: "QuestionOutcome") -> List[Any]:
+    """The reading's evidence row as a pseudo-trial (index -1, step 0)."""
+    row = outcome.resolver_reading.evidence_row()
+    if row is None:
+        return []
+    return [SimpleNamespace(trial_index=-1, role="resolver_reading", evidence_rows=[row])]
 
 
 def run_sibyl(
@@ -735,7 +760,8 @@ def run_sibyl(
             outcomes.append(outcome)
             n_evidence_rows += write_evidence(
                 con, sibyl_run_id=sibyl_run_id, question_id=question.question_id,
-                trials=outcome.trials, is_test=_is_test_mode(),
+                trials=list(outcome.trials) + _reading_evidence(outcome),
+                is_test=_is_test_mode(),
             )
             if outcome.status == "ok":
                 n_forecast += 1
@@ -757,6 +783,7 @@ def run_sibyl(
                     tracker=tracker, trials=outcome.trials,
                     extra_trials_rule=outcome.extra_trials_rule,
                     trial_checks=outcome.trial_checks,
+                    resolver_reading=outcome.resolver_reading.record,
                 )
 
         # The cap can also fire during the LAST question's trials (no
@@ -774,6 +801,11 @@ def run_sibyl(
         tool_counts["n_docs_read"] = sum(
             int(t.n_docs_read or 0) for o in outcomes for t in o.trials
         )
+        # The live resolver reads (Part 5): taken, and refused or unreadable.
+        tool_counts["n_resolver_live_ok"] = sum(
+            1 for o in outcomes if o.resolver_reading.live == LIVE_OK)
+        tool_counts["n_resolver_live_failed"] = sum(
+            1 for o in outcomes if o.resolver_reading.live == LIVE_UNAVAILABLE)
 
         # The shadow arm runs only after every question's production trials,
         # so it can never take budget or time production needed.

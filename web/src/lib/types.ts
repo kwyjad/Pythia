@@ -506,6 +506,9 @@ export type SibylRun = {
   tool_calls_per_trial?: number | null;
   share_docs_wikipedia?: number | null;
   n_submit_gate_unmet?: number | null;
+  share_nowcast_done?: number | null;
+  n_resolver_live_ok?: number | null;
+  n_resolver_live_failed?: number | null;
   // The shadow arm (Oct 2026): whether it ran, on what, and its own spend.
   shadow_status?: string | null;
   shadow_model?: string | null;
