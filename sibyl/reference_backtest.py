@@ -76,6 +76,18 @@ INTERVAL = (0.05, 0.95)
 DR_WEIGHTS = (0.0, 0.25, 0.5, 0.75, 0.9, 1.0)
 CONFLICT_POOL_WEIGHTS = (0.5, 0.75, 0.9)
 PA_MIN_FORECASTS = 100
+# A PA month with no record is unresolved, so every scored flood or cyclone
+# outcome is a REPORTED event, while the references put most of their mass on
+# "zero or no record". The scores are biased against every non-uniform
+# candidate by construction and are no verdict on the reference; the two-part
+# scores (`sibyl_variant_scores`) are what measure it.
+PA_SELECTED_CLASSES = ("FL", "TC")
+PA_SELECTION_NOTE = (
+    "**Read with care.** A month with no record is unresolved, so every scored outcome "
+    "here is a reported event, while the references put most of their mass on \"zero or "
+    "no record\". The scores are biased against every non-uniform candidate by "
+    "construction and say nothing about whether the reference is right; Sibyl's "
+    "two-part scores are the measure of that.")
 FORECAST_DAY = 13
 LAGS = (1, 2, 3)
 
@@ -451,8 +463,10 @@ def render_markdown(rows: Sequence[Dict[str, Any]], manifest: Dict[str, Any]) ->
             groups.setdefault((r["class"], r["lag"]), []).append(r)
     for (cls, lag), rs in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1] or 0)):
         title = f"## {cls}" + (f", assumed publication lag {lag} month(s)" if lag else "")
-        lines += [title, "", f"Brier by horizon (production: `{PRODUCTION.get(cls)}`).", "",
-                  "| candidate | h | n | mean [90%] | minus production [90%] |",
+        lines += [title, "", f"Brier by horizon (production: `{PRODUCTION.get(cls)}`).", ""]
+        if cls in PA_SELECTED_CLASSES:
+            lines += [PA_SELECTION_NOTE, ""]
+        lines += ["| candidate | h | n | mean [90%] | minus production [90%] |",
                   "|---|---|---|---|---|"]
         for r in sorted(rs, key=lambda r: (r["candidate"], str(r["horizon"]))):
             if r.get("status") != "ok":

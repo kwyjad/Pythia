@@ -167,6 +167,20 @@ def test_flood_below_a_hundred_forecasts_is_too_few(tmp_path):
     assert {r["candidate"] for r in fl} == {"per_month", "pooled", "uniform"}
 
 
+def test_flood_and_cyclone_sections_carry_the_selection_caveat(tmp_path):
+    fl_dir, ace_dir = tmp_path / "fl", tmp_path / "ace"
+    fl_dir.mkdir()
+    ace_dir.mkdir()
+    con = _db(fl_dir)
+    _facts(con, "BGD", "FL", "affected", "2018-01",
+           [50000 if i % 12 in (6, 7) else None for i in range(60)])
+    rows, man = rb.run_backtest(con, start="2021-01", end="2021-06", classes=["FL"])
+    assert rb.PA_SELECTION_NOTE in rb.render_markdown(rows, man).split("## FL", 1)[1]
+    rows, man = rb.run_backtest(_conflict_db(ace_dir), start="2021-01", end="2021-01",
+                                classes=["ACE"])
+    assert rb.PA_SELECTION_NOTE not in rb.render_markdown(rows, man)
+
+
 # --- outputs ----------------------------------------------------------------------
 
 def test_the_cli_writes_three_files(tmp_path):

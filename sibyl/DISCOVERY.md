@@ -964,6 +964,31 @@ Not done:
 - The drought knowability uses assumed lags, not the `publication_date`
   column, which is mostly the date we first saw a row (Group E).
 
+First run (workflow run 37905625536, canonical DB of 9 Oct 2026, forecasts
+2021-03 to 2025-06, about four minutes):
+
+- Conflict, 11,829 country-forecasts over 233 countries: production
+  (`pool_0.75`) Brier 0.260, `conflictology12` 0.264 (worse by 0.0034,
+  interval 0.0025 to 0.0043), `level_transition` 0.275, `level_volatility`
+  0.320. `pool_0.5` is within noise of production. The quoted figures were
+  NOT reproduced: the order is the same, but the levels (0.390 / 0.384 /
+  0.470) and the sample (8,371) are not. The likeliest reason is that the
+  quoted run left out quiet countries, whose all-zero months score low
+  Brier; with the script gone this cannot be settled, and the gap between
+  references is what matters.
+- Drought, about 8,100 forecast-horizons per lag: weight 0 (history only)
+  is clearly worst (0.07 to 0.08 Brier above production) and 0.25 is worse
+  too; 0.5, 0.75 and 0.9 are within noise of one another. Fitted on
+  forecasts to 2023-12, the non-increasing schedule is [0.75, 0.75, 0.75,
+  0.5, 0.5, 0.5] at lag 1, [0.75, 0.75, 0.5, 0.5, 0.5, 0.5] at lag 2 and
+  [0.75, 0.5, 0.5, 0.5, 0.5, 0.5] at lag 3. Out of sample (about 1,700
+  forecast-horizons a lag) it beats the flat 0.5 by 0.004, 0.002 and 0.001
+  Brier, every interval spanning zero. So: no evidence to change the flat
+  weight, and some that more weight on persistence at month 1 helps.
+- Flood: 105 forecasts, `per_month` 1.49 against uniform 0.83. Biased by
+  construction (every scored month is a reported event) and stated as such
+  in the report. Cyclone: 35 forecasts, too few.
+
 Cost: none in model spend. A few minutes of runner time per dispatch.
 
 Tests: `tests/test_sibyl_reference_backtest.py`.
