@@ -411,6 +411,24 @@ export type SibylVariantComparison = {
   n_questions: number;
   aggregate: SibylComparisonAggregate;
   by_selection_pass: Record<string, SibylComparisonAggregate>;
+  // Rearranged variants (Oct 2026): variant minus Sibyl with a 90% interval,
+  // "not_yet" below the question threshold.
+  paired?: SibylVariantPaired;
+};
+
+export type SibylPairedStat = {
+  status: "ok" | "not_yet";
+  n_questions: number;
+  min_questions?: number;
+  mean_diff?: number | null;
+  lo?: number | null;
+  hi?: number | null;
+};
+
+export type SibylVariantPaired = {
+  all: Record<string, SibylPairedStat>;
+  where_different?: Record<string, SibylPairedStat>;
+  n_questions_different?: number;
 };
 
 export type QuestionBundleResponse = {

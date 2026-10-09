@@ -340,6 +340,21 @@ const VARIANT_LABELS: Record<string, string> = {
   vs_conflictology12: "Sibyl vs 12-month conflictology",
   vs_raw: "Sibyl vs its raw pool",
   raw_vs_sibyl_ref: "Raw pool vs reference",
+  abc_vs_sibyl: "Production trials only (no extra trials) vs Sibyl",
+  w25_vs_sibyl: "Reference weight 0.25 vs Sibyl",
+  w50_vs_sibyl: "Reference weight 0.5 vs Sibyl",
+  w75_vs_sibyl: "Reference weight 0.75 vs Sibyl",
+  dw_vs_sibyl: "Weight by trial disagreement vs Sibyl",
+  noguard_vs_sibyl: "No outlier guard vs Sibyl",
+};
+
+// Variant minus Sibyl on Brier with its 90% interval, or "not yet".
+const pairedText = (v: SibylVariantComparison): string | null => {
+  const b = v.paired?.all?.brier;
+  if (!b) return null;
+  if (b.status !== "ok") return `not yet (${b.n_questions} of ${b.min_questions ?? 20})`;
+  const f = (x: number | null | undefined) => (x === null || x === undefined ? "—" : x.toFixed(4));
+  return `${f(b.mean_diff)} (${f(b.lo)} to ${f(b.hi)})`;
 };
 
 export const SibylVariantsTable = ({
@@ -347,7 +362,9 @@ export const SibylVariantsTable = ({
 }: {
   variants: Record<string, SibylVariantComparison> | undefined;
 }) => {
-  const entries = Object.entries(variants ?? {}).filter(([, v]) => v.n_questions > 0);
+  const entries = Object.entries(variants ?? {}).filter(
+    ([, v]) => v.n_questions > 0 || v.paired !== undefined,
+  );
   if (!entries.length) return null;
   const passes = Array.from(
     new Set(entries.flatMap(([, v]) => Object.keys(v.by_selection_pass ?? {}))),
@@ -364,6 +381,7 @@ export const SibylVariantsTable = ({
             <th className="px-2 py-1 text-left">Comparison</th>
             <th className="px-2 py-1 text-right">Questions</th>
             <th className="px-2 py-1 text-right">Mean Δ Brier</th>
+            <th className="px-2 py-1 text-right">Paired, 90% interval</th>
             {passes.map((p) => (
               <th key={p} className="px-2 py-1 text-right">Δ {p}</th>
             ))}
@@ -379,6 +397,7 @@ export const SibylVariantsTable = ({
                 <td className={`px-2 py-1 text-right ${deltaColor(b?.mean_delta)}`}>
                   {fmt4(b?.mean_delta)}
                 </td>
+                <td className="px-2 py-1 text-right text-fred-muted">{pairedText(v) ?? "—"}</td>
                 {passes.map((p) => {
                   const pb = v.by_selection_pass?.[p]?.spd?.brier as SibylComparisonStat | undefined;
                   return (

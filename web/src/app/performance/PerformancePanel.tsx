@@ -113,6 +113,18 @@ const isExternalBenchmark = (name: string | null): boolean => {
   return name.startsWith("__ext_");
 };
 
+/** Sibyl's rearranged variants (sibyl/score_variants.py, Oct 2026): scored
+ * measurements of trials already run, shown in the Sibyl section's "What the
+ * research added" table and kept out of Detailed Scores. */
+export const SIBYL_REARRANGED_MODELS = new Set([
+  "__ext_sibyl_abc",
+  "__ext_sibyl_w25",
+  "__ext_sibyl_w50",
+  "__ext_sibyl_w75",
+  "__ext_sibyl_dw",
+  "__ext_sibyl_noguard",
+]);
+
 /** Pick the preferred ensemble model name from available model names. */
 const pickDefaultEnsemble = (models: string[]): string | null => {
   const bayesmc = models.find((m) =>
@@ -675,7 +687,7 @@ export default function PerformancePanel({
 
   const modelRows = useMemo((): PivotedRow[] => {
     const pivoted = buildPivoted(
-      data.summary_rows,
+      data.summary_rows.filter((r) => !SIBYL_REARRANGED_MODELS.has(r.model_name ?? "")),
       (r) => r.model_name ?? "__null__",
       (k) => displayModelName(k === "__null__" ? null : k),
     );

@@ -742,3 +742,40 @@ of a Sibyl run.
 
 Tests: `tests/test_sibyl_failure_types.py`, a case in
 `tests/test_api_sibyl_routes.py`.
+
+## 2026-10-09 — Review Part 3: score more variants on the trials already run
+
+Evidence: Sibyl resolves 25 questions a month, so it learns slowly. Any rule
+that only rearranges trials already paid for can be scored at no model cost;
+`sibyl/score_variants.py` already did this for the raw pool, the reference
+and the shadow arm.
+
+Changed (`sibyl/score_variants.py`), for the latest evidence-backed forecast
+of each question, rebuilt from `trials_json`, `reference_json` and the run's
+recorded weight through `pool_months`, `publish_vectors` and the outlier
+guard:
+
+- `__ext_sibyl_abc`: production trials only, no extra trials (guard re-run).
+- `__ext_sibyl_w25`, `_w50`, `_w75`: fixed reference weights.
+- `__ext_sibyl_dw`: 0.75 when the largest pairwise month-1 JSD among the
+  pooled trials is above `SIBYL_DW_HIGH_JSD` (0.10), 0.25 below
+  `SIBYL_DW_LOW_JSD` (0.03), else 0.5. Fixed in config, never fitted.
+- `__ext_sibyl_noguard`: the outlier guard off.
+- Single-trial series `lane_A` .. `lane_E`, `lane_R` in `sibyl_variant_scores`.
+- Stale rows are deleted when the latest forecast no longer supports them.
+- `variant_comparison(con)`: each variant minus `sibyl` with a 90% interval
+  over questions, "not yet" below `SIBYL_VARIANT_MIN_QUESTIONS` (20); abc
+  and noguard also on the questions where they differ from what was
+  published. In `findings.variants`, the `variants` block of
+  `/v1/performance/sibyl_comparison`, and the "What the research added"
+  table.
+
+Not done: nothing adopts a variant. The Performance page's Detailed Scores
+table keeps the new names out (`SIBYL_REARRANGED_MODELS`); `__ext_sibyl_raw`
+and `__ext_sibyl_ref` were already shown there as external rows and are left
+as they were.
+
+Cost: none in model spend; a few seconds of arithmetic in the calibration
+workflow.
+
+Tests: `tests/test_sibyl_variants.py`.

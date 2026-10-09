@@ -767,7 +767,19 @@ _SIBYL_VARIANT_PAIRS = {
     "vs_conflictology12": (_SIBYL_MODEL_NAME, "__ext_conflictology12"),
     "raw_vs_sibyl_ref": ("__ext_sibyl_raw", "__ext_sibyl_ref"),
     "vs_raw": (_SIBYL_MODEL_NAME, "__ext_sibyl_raw"),
+    # Rearranged variants of the trials already run (Oct 2026, review Part 3):
+    # variant on the left, so a negative mean_delta means the variant won.
+    "abc_vs_sibyl": ("__ext_sibyl_abc", _SIBYL_MODEL_NAME),
+    "w25_vs_sibyl": ("__ext_sibyl_w25", _SIBYL_MODEL_NAME),
+    "w50_vs_sibyl": ("__ext_sibyl_w50", _SIBYL_MODEL_NAME),
+    "w75_vs_sibyl": ("__ext_sibyl_w75", _SIBYL_MODEL_NAME),
+    "dw_vs_sibyl": ("__ext_sibyl_dw", _SIBYL_MODEL_NAME),
+    "noguard_vs_sibyl": ("__ext_sibyl_noguard", _SIBYL_MODEL_NAME),
 }
+#: The rearranged-variant model names, kept out of the Detailed Scores table.
+SIBYL_REARRANGED_MODELS = tuple(
+    left for name, (left, _) in _SIBYL_VARIANT_PAIRS.items() if name.endswith("_vs_sibyl")
+)
 
 
 def _sibyl_variant_comparison(con, include_test: bool) -> Dict[str, Any]:
@@ -792,6 +804,7 @@ def _sibyl_variant_comparison(con, include_test: bool) -> Dict[str, Any]:
         )
         _tf_sf = _test_filter(include_test, "sf")
         _tf_s = _test_filter(include_test, "s")
+        _rearranged_sql = ", ".join(f"'{m}'" for m in SIBYL_REARRANGED_MODELS)
         rows = _execute(
             con,
             f"""
@@ -815,7 +828,8 @@ def _sibyl_variant_comparison(con, include_test: bool) -> Dict[str, Any]:
             LEFT JOIN sib_latest l ON l.question_id = s.question_id
             WHERE ((s.model_name = '{_SIBYL_MODEL_NAME}' AND s.run_id = l.run_id)
                    OR (s.model_name IN ('__ext_sibyl_ref', '__ext_sibyl_raw',
-                                        '__ext_conflictology12') AND s.run_id IS NULL)){_tf_s}{scored_only_clause(con, "s")}
+                                        '__ext_conflictology12', {_rearranged_sql})
+                       AND s.run_id IS NULL)){_tf_s}{scored_only_clause(con, "s")}
             """,
         ).fetchall()
     except Exception:
@@ -851,6 +865,17 @@ def _sibyl_variant_comparison(con, include_test: bool) -> Dict[str, Any]:
             "aggregate": _aggregate_pairs(pairs),
             "by_selection_pass": split,
         }
+    # Each rearranged variant minus Sibyl with its interval, "not_yet" below
+    # SIBYL_VARIANT_MIN_QUESTIONS (sibyl/score_variants.py).
+    try:
+        from sibyl.score_variants import variant_comparison  # noqa: PLC0415 - lazy
+
+        paired = variant_comparison(con, include_test=include_test).get("variants") or {}
+        for name, (left, _right) in _SIBYL_VARIANT_PAIRS.items():
+            if left in paired:
+                out[name]["paired"] = paired[left]
+    except Exception:  # noqa: BLE001
+        logger.debug("sibyl rearranged variant comparison failed", exc_info=True)
     return out
 
 
