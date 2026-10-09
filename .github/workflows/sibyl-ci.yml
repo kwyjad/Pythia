@@ -28,6 +28,7 @@ on:
       - "pythia/tools/score_baselines.py"
       - "pythia/tools/compute_scores.py"
       - "tests/fixtures/sibyl/**"
+      - "docs/prompts/2026-10-09-2/sibyl_agent.py"
       - "pythia/config.yaml"
       - "pythia/llm_profiles.py"
       - "scripts/ci/stage_health.py"
@@ -53,6 +54,7 @@ on:
       - "pythia/tools/score_baselines.py"
       - "pythia/tools/compute_scores.py"
       - "tests/fixtures/sibyl/**"
+      - "docs/prompts/2026-10-09-2/sibyl_agent.py"
       - "pythia/config.yaml"
       - "pythia/llm_profiles.py"
       - "scripts/ci/stage_health.py"
@@ -103,5 +105,6 @@ jobs:
                      tests/test_sibyl_research_depth.py \
                      tests/test_sibyl_failure_types.py \
                      tests/test_sibyl_variants.py \
+                     tests/test_sibyl_reconcile.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

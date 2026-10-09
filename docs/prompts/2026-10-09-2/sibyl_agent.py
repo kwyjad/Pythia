@@ -75,12 +75,7 @@ logger = logging.getLogger(__name__)
 # trials a disagreement or a large departure from the reference calls for
 # (sibyl/run.py). The text before the colon is the lane's key: it is stored
 # as the trial's ``perspective`` and the advice loop groups by it.
-# Lane R (Oct 2026, review Part 4) is the reconciler: it replaces D when the
-# extra trials are called for by disagreement, and starts from a brief of
-# what the earlier trials found (sibyl/reconcile.py). It is outside the
-# round robin below, so LANE_IDS keeps the order trials are numbered in.
 LANE_IDS = ("A", "B", "C", "D", "E")
-RECONCILE_LANE = "R"
 TRIAL_LANES: Dict[str, str] = {
     "A": (
         "Lane A, resolver and nowcast first: begin with the 'resolver' and "
@@ -109,15 +104,6 @@ TRIAL_LANES: Dict[str, str] = {
         "Lane E, reference-class material first: begin with the reference lane "
         "(lane=\"reference\"): past episodes in this country and its "
         "neighbours, seasonal patterns and structural reports, then fill every slot."
-    ),
-    "R": (
-        "Lane R, reconcile: three earlier trials of this question disagree. Their "
-        "forecasts and their evidence are below. In your first step, name in "
-        "\"step_rationale\" the one to three factual points on which they differ: a "
-        "figure, a date, or whether an event is already counted in the reference. "
-        "Then search for evidence on those points. Do not repeat a search whose result "
-        "is already in the brief. Then fill every slot and forecast. You are one more "
-        "trial. Do not average the others and do not defer to the majority."
     ),
 }
 # Kept for older callers: the lane texts in lane order.
@@ -366,10 +352,6 @@ class TrialResult:
     n_tool_calls: int = 0
     docs_read_urls: List[str] = field(default_factory=list)
     submit_gate_unmet: bool = False
-    # Lane R (review Part 4): the size of the brief it was given and the
-    # dispute points it named in its first step's step_rationale.
-    reconcile_brief_chars: Optional[int] = None
-    dispute_points: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -417,8 +399,6 @@ class TrialResult:
             "n_tool_calls": self.n_tool_calls,
             "docs_read_urls": list(self.docs_read_urls),
             "submit_gate_unmet": self.submit_gate_unmet,
-            "reconcile_brief_chars": self.reconcile_brief_chars,
-            "dispute_points": self.dispute_points,
         }
 
 
@@ -467,13 +447,8 @@ def build_step_prompt(
     return_segments: bool = False,
     track_record: str = "",
     lessons: str = "",
-    trial_brief: str = "",
 ):
     """Build a step's prompt as ``(text, is_cache_breakpoint)`` segments.
-
-    *trial_brief* (lane R only) follows the lane text inside the trial
-    segment, so the static and question segments stay shared and cached; it
-    is '' for every other lane, whose prompt is then unchanged.
 
     The segments concatenate to the prompt. The transcript segment is
     present once a step has been taken; it carries the third breakpoint, so
@@ -506,7 +481,7 @@ def build_step_prompt(
         # The lessons block (sibyl/postmortem.py) comes pre-rendered with its
         # own heading, and is '' when there is nothing to show.
         track_record_block=render_track_record(track_record) + (lessons or ""),
-        perspective=(perspective + "\n\n" + trial_brief.strip()) if trial_brief.strip() else perspective,
+        perspective=perspective,
         start_belief_json=json.dumps(start_belief.to_dict(), indent=2),
         step=step,
         max_steps=MAX_STEPS,
@@ -661,7 +636,6 @@ def run_trial(
     provider: str = "anthropic",
     model_id: Optional[str] = None,
     cost_kind: Optional[str] = None,
-    trial_brief: str = "",
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -694,8 +668,6 @@ def run_trial(
         quantiles=None,
         confidence="low",
     )
-    if trial_brief.strip():
-        result.reconcile_brief_chars = len(trial_brief.strip())
 
     # The reference (sibyl/reference.py) seeds the belief; an object without
     # reference vectors (no history) seeds a labelled placeholder.
@@ -734,7 +706,6 @@ def run_trial(
                 return_segments=True,
                 track_record=track_record,
                 lessons=lessons,
-                trial_brief=trial_brief,
             )
             prompt = "".join(text for text, _ in segments)
             # The injectable test seam takes a plain prompt string; the
@@ -816,8 +787,6 @@ def run_trial(
         )
         result.belief_trace.append(record)
         result.steps_used = step
-        if step == 1 and result.reconcile_brief_chars is not None:
-            result.dispute_points = str(getattr(belief, "step_rationale", "") or "")[:1000]
 
         if not decision.calls:
             missing = submit_gate_missing(belief.plan, result.n_docs_read, resolver_failed_steps)

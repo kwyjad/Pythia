@@ -779,3 +779,48 @@ Cost: none in model spend; a few seconds of arithmetic in the calibration
 workflow.
 
 Tests: `tests/test_sibyl_variants.py`.
+
+## 2026-10-09 — Review Part 4: a reconciler trial when trials disagree
+
+Evidence: Bridgewater's AIA Forecaster gained from a supervisor that ran new
+searches on the point its forecasts disagreed about (Brier 0.1125 against
+0.1140 for the plain mean); a supervisor that only re-read the forecasts did
+worse than the mean (0.1168). Sibyl's extra trials on lanes D and E started
+fresh and did not look at the disagreement.
+
+Changed:
+
+- Lane `R` (`sibyl/agent.py::TRIAL_LANES`, `RECONCILE_LANE`). On the
+  `disagreement` rule the extras are R and E; on `departure` they stay D and
+  E. Never for a control; the shadow arm is unchanged.
+- `sibyl/reconcile.py::build_brief`, on the main thread from the valid
+  production trials: per trial its lane, month-1/6 `p_zero`, median, 0.05
+  and 0.95 quantiles, reconciliation and plan findings; the merged ledger,
+  de-duplicated by URL and quote and tagged with lanes, capped at
+  `SIBYL_RECONCILE_BRIEF_MAX_CHARS` (12,000) with tier 1-2 and dated figures
+  kept first and whole items dropped and counted; and the dispute in numbers
+  (medians by lane, largest pairwise JSD, the buckets carrying it).
+- The brief sits in the trial segment, after the lane text, so the static
+  and question segments stay shared and cached and lanes A-E are byte-
+  identical (held by a test against the archived prompt file).
+- R passes the same gates; brief items count as neither documents nor
+  searches, so an R trial with no successful search of its own fails the
+  evidence gate. It is pooled as one trial with equal weight; the outlier
+  guard applies.
+- Recorded on the trial (`lane`, `role`, `reconcile_brief_chars`,
+  `dispute_points`) and in `trial_checks_json.reconcile` (JSD before R,
+  brief size, the dispute, whether R's month-1 median fell inside the
+  production medians' range).
+
+Measurement: Part 3 already gives it, `__ext_sibyl_abc` against `sibyl` and
+`lane_R` beside the other lanes.
+
+Not done: R does not replace E, and nothing weights R above the others.
+
+Cost: the number of trials is unchanged (R replaces D). R's prompt carries
+up to 12,000 more characters (about 3,000 tokens) in a cached segment;
+roughly +$0.02 to $0.05 per R trial, on the questions where the rule fires
+(a handful a run).
+
+Tests: `tests/test_sibyl_reconcile.py`; `tests/test_sibyl_lanes.py` moved to
+R and E on disagreement.

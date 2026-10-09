@@ -194,7 +194,7 @@ def _lane_model(beliefs: dict, calls: list):
     lock = threading.Lock()
 
     def model(prompt):
-        lane = re.search(r"Lane ([A-E]),", prompt).group(1)
+        lane = re.search(r"Lane ([A-ER]),", prompt).group(1)
         with lock:
             calls.append(lane)
         return make_submit_response(*beliefs.get(lane, beliefs["*"])), {"cost_usd": 0.01}, ""
@@ -243,11 +243,13 @@ def test_trials_that_agree_with_the_reference_run_no_extras(run_env, monkeypatch
     assert run_env and all(main for main, _ in run_env)
 
 
-def test_disagreement_adds_lanes_d_and_e_and_the_outlier_is_left_out(run_env):
+def test_disagreement_adds_lanes_r_and_e_and_the_outlier_is_left_out(run_env):
+    # Since Oct 2026 (review Part 4) the reconciler, lane R, takes D's place
+    # when the extra trials are called for by disagreement.
     calls = []
     model = _lane_model({"C": FAR, "*": LOW}, calls)
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1, model_call=model)
-    assert sorted(calls) == ["A", "B", "C", "D", "E"]
+    assert sorted(calls) == ["A", "B", "C", "E", "R"]
     status, k, trials, rule, checks, _ = _forecast_row(Q1)
     trials = json.loads(trials)
     assert status == "ok" and rule == RULE_DISAGREEMENT
@@ -258,13 +260,15 @@ def test_disagreement_adds_lanes_d_and_e_and_the_outlier_is_left_out(run_env):
     checks = json.loads(checks)
     assert checks["outliers_dropped"] == [2] and checks["n_trials_run"] == 5
     assert checks["extra_trials_measures"]["max_pairwise_jsd"] > 0.10
+    assert checks["reconcile"]["max_pairwise_jsd_before"] > 0.10
+    assert [t["lane"] for t in trials][3:] == ["R", "E"]
 
 
 def test_k_max_bounds_the_extra_trials(run_env, monkeypatch):
     monkeypatch.setattr(sibyl_config, "K_MAX", 4)
     calls = []
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1, model_call=_lane_model({"C": FAR, "*": LOW}, calls))
-    assert sorted(calls) == ["A", "B", "C", "D"]
+    assert sorted(calls) == ["A", "B", "C", "R"]
 
 
 def test_no_extras_start_once_the_budget_is_spent(run_env, monkeypatch):

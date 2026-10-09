@@ -80,6 +80,10 @@ EXTRA_TRIALS_DEPARTURE_JSD = _env_float("SIBYL_EXTRA_TRIALS_DEPARTURE_JSD", 0.25
 # thread writes DuckDB: a trial's llm_calls rows are buffered and written
 # after its batch.
 TRIAL_WORKERS = _env_int("SIBYL_TRIAL_WORKERS", 3)
+# The reconciler (lane R, review Part 4, sibyl/reconcile.py): its brief of
+# the earlier trials is capped at this many characters; whole ledger items
+# are dropped beyond it (tier 1-2 and dated figures kept first).
+RECONCILE_BRIEF_MAX_CHARS = _env_int("SIBYL_RECONCILE_BRIEF_MAX_CHARS", 12_000)
 # Outlier guard: a trial whose month-1 median is more than this many orders
 # of magnitude (log10 of 1 + value) from the median of the others' medians
 # is left out of the pool, if two trials remain. It stays in trials_json.
