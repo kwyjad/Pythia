@@ -860,6 +860,11 @@ def ensure_sibyl_measurement_tables(con: duckdb.DuckDBPyConnection) -> None:
             "question_id": "TEXT", "sibyl_run_id": "TEXT", "iso3": "TEXT",
             "hazard_code": "TEXT", "metric": "TEXT", "note_json": "TEXT",
             "model": "TEXT", "cost_usd": "DOUBLE", "created_at": "TIMESTAMP",
+            # Failure types (Oct 2026, review Part 2): the labels and the
+            # evidence for each, unknown labels kept raw, status labelled |
+            # unlabelled; and the note prompt's version ('pm_v2'). NULL on
+            # notes written before, which are re-labelled.
+            "failure_types_json": "TEXT", "prompt_version": "TEXT",
         },
     )
     _ensure_table_and_columns(

@@ -28,6 +28,20 @@ years, and the prompt forbids the rest. The kept lessons, at most
 ``SIBYL_LESSONS_MAX_CHARS`` (6,000) characters, are a new version in
 ``sibyl_lessons``; rejected ones are stored beside them with the reason.
 
+Failure types (Oct 2026, review Part 2)
+---------------------------------------
+Each note carries up to three labels from ``FAILURE_TYPES`` (most important
+first), each with the ledger id or short quote the trial recorded at the
+time that supports it. Information that did not exist at forecast time is
+``unforeseeable``, never a fault. Unknown labels are dropped and kept in
+``failure_types_raw``; a note with no valid label is ``unlabelled``.
+``failure_rates`` counts, per class and pooled, the distinct questions
+carrying each label; a share is shown from
+``SIBYL_FAILURE_RATE_MIN_QUESTIONS`` (10) labelled questions. Notes written
+before the labels (``prompt_version`` NULL) are re-labelled, oldest first,
+inside the same cap. The rates reach the pooled advice row's findings and
+the dashboard; they never go into a trial's prompt.
+
 Use
 ---
 ``lessons_block`` gives a question the class's newest lessons plus up to
@@ -56,6 +70,38 @@ ModelCall = Callable[[str], Tuple[str, Dict[str, Any], str]]
 
 LESSONS_HEADING = "=== LESSONS FROM YOUR RESOLVED QUESTIONS ==="
 
+#: The note prompt's version, stamped on every note it writes.
+PROMPT_VERSION = "pm_v2"
+
+#: Failure types (Oct 2026): the single source of the labels a note may carry,
+#: in the order the note prompt lists them.
+FAILURE_TYPES: Dict[str, str] = {
+    "resolver_misread": "Forecast a quantity other than the one the source records: wrong series, wrong window, wrong unit",
+    "stale_or_wrong_fact": "Leaned on a figure that was out of date or wrong at the time",
+    "double_counted": "Added a rise already in the reference, or counted one event more than once",
+    "coverage_as_signal": "Read heavy or thin news coverage as evidence of level",
+    "statement_as_commitment": "Took an announced plan or date as likely to hold",
+    "wrong_scale_of_event": "Modelled only the extreme version of an event, or only the mild one",
+    "rigid_reference": "Kept the reference after the mechanism behind it had changed",
+    "retreat_to_reference": "Found and reasoned the evidence correctly, then stayed near the prior",
+    "spike_carried_forward": "Carried a spike to month 6 that faded",
+    "absence_as_evidence": "Read 'the search found nothing' as 'nothing happened'",
+    "missed_dated_event": "Missed a dated event inside the window that was knowable",
+    "zero_misjudged": "p_zero badly wrong with the positive part sound",
+    "tails_too_thin": "Outcome beyond the stated 0.05 to 0.95 range with the centre sound",
+    "thin_research": "Too few or too poor sources to support the forecast",
+    "reference_fault": "The mechanical reference itself was wrong, and the trial followed it",
+    "unforeseeable": "The outcome turned on information that did not exist at forecast time",
+    "no_fault": "The forecast was sound and the outcome fell inside its central range",
+}
+UNLABELLED = "unlabelled"
+MAX_LABELS = 3
+
+
+def _failure_type_lines() -> str:
+    return "\n".join(f"- {k}: {v}" for k, v in FAILURE_TYPES.items())
+
+
 NOTE_PROMPT = """You forecast the question below some months ago and the outcome is now known. Write a short post-mortem.
 
 QUESTION: {wording}
@@ -64,18 +110,53 @@ Your forecast (raw pool of your research trials, before the reference was mixed 
 {forecast}
 Outcome by window month: {outcomes}
 Your reference (prior) median for month 1: {reference_median}
-What your trials recorded as evidence (excerpt):
-{evidence}
+
+=== EACH RESOLVED MONTH ===
+Bucket vectors run from the lowest bucket (zero) to the highest. "Inside" is stated by the code, not judged.
+{months}
+
+=== WHAT YOUR TRIALS RECORDED AT THE TIME ===
+{trials}
+
+=== FAILURE TYPES ===
+{failure_types}
+
+Label the forecast with up to {max_labels} failure types from the list above, most important first. A label must rest on what the trials recorded at the time: for each label give a ledger id (such as E3) or a short quote from the record above. Information that did not exist at forecast time is "unforeseeable", never a fault. If the forecast was sound and the outcome fell inside its central range, say "no_fault".
 
 Answer ONLY with a JSON object:
 {{"what_happened": "<one or two sentences>",
   "forecast_vs_outcome": "<one sentence: too high, too low, too wide, too narrow, about right>",
   "what_would_have_helped": "<one or two sentences: which evidence or reasoning would have moved you the right way>",
-  "general_lesson": "<one sentence that would help on a DIFFERENT question of this class; name no country, place, year or event>"}}"""
+  "general_lesson": "<one sentence that would help on a DIFFERENT question of this class; name no country, place, year or event>",
+  "failure_types": ["<label>", "..."],
+  "label_evidence": {{"<label>": "<ledger id or short quote>"}}}}"""
+
+RELABEL_PROMPT = """Below is a post-mortem you wrote on one of your resolved forecasts, with what your trials recorded at the time. Label it.
+
+QUESTION: {wording}
+Class: {hazard_code} / {metric}. Country: {country}.
+Outcome by window month: {outcomes}
+Your post-mortem: {note}
+
+=== EACH RESOLVED MONTH ===
+{months}
+
+=== WHAT YOUR TRIALS RECORDED AT THE TIME ===
+{trials}
+
+=== FAILURE TYPES ===
+{failure_types}
+
+Choose up to {max_labels} failure types from the list above, most important first. A label must rest on what the trials recorded at the time: for each give a ledger id (such as E3) or a short quote. Information that did not exist at forecast time is "unforeseeable", never a fault.
+
+Answer ONLY with a JSON object:
+{{"failure_types": ["<label>", "..."], "label_evidence": {{"<label>": "<ledger id or short quote>"}}}}"""
 
 LESSONS_PROMPT = """Below are post-mortem notes on {n} of your resolved forecasts of {hazard_code} / {metric} questions. Each note has an id.
 
 {notes}
+
+Each note carries the failure types it was labelled with; a lesson may address a type that recurs.
 
 Draw at most six lessons that would improve FUTURE forecasts of this class. A lesson must:
 - rest on at least {min_cases} of the notes above, cited by id;
@@ -221,6 +302,92 @@ def gate_lessons(
     return final, rejected, "\n".join(lines)
 
 
+def validate_labels(parsed: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The labels a note may carry, checked against ``FAILURE_TYPES``.
+
+    Valid labels are kept in order, at most ``MAX_LABELS``, each with its
+    evidence where one was given; anything else is kept in
+    ``failure_types_raw``. No valid label: status ``unlabelled``.
+    """
+    raw = (parsed or {}).get("failure_types") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    evidence = (parsed or {}).get("label_evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    labels: List[str] = []
+    unknown: List[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        label = str(item or "").strip().lower()
+        if label in FAILURE_TYPES:
+            if label not in labels and len(labels) < MAX_LABELS:
+                labels.append(label)
+        elif label:
+            unknown.append(str(item))
+    return {
+        "status": "labelled" if labels else UNLABELLED,
+        "failure_types": labels,
+        "label_evidence": {
+            k: str(evidence.get(k) or "")[:300] for k in labels if evidence.get(k)
+        },
+        "failure_types_raw": unknown,
+    }
+
+
+def failure_rates(con, *, min_questions: Optional[int] = None) -> Dict[str, Any]:
+    """Per class and pooled: distinct questions carrying each label.
+
+    The denominator is the distinct questions with a labelled note (a
+    question with several notes counts once, from its newest labelled
+    note). Counts are always given; a share only from *min_questions*.
+    """
+    min_q = _cfg.FAILURE_RATE_MIN_QUESTIONS if min_questions is None else int(min_questions)
+    out: Dict[str, Any] = {"min_questions": min_q, "labels": list(FAILURE_TYPES),
+                           "classes": {}, "pooled": None}
+    try:
+        rows = con.execute(
+            "SELECT question_id, hazard_code, metric, failure_types_json FROM "
+            "sibyl_postmortem_notes WHERE failure_types_json IS NOT NULL "
+            "ORDER BY created_at DESC, sibyl_run_id DESC"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - an older DB has no column
+        return out
+    per_q: Dict[str, Tuple[str, List[str]]] = {}
+    unlabelled: Dict[str, str] = {}
+    for qid, hz, metric, ftj in rows:
+        try:
+            ft = json.loads(ftj) or {}
+        except (TypeError, ValueError):
+            continue
+        cls = f"{str(hz).upper()}/{str(metric).upper()}"
+        labels = [x for x in (ft.get("failure_types") or []) if x in FAILURE_TYPES]
+        if labels:
+            per_q.setdefault(str(qid), (cls, labels))
+        else:
+            unlabelled.setdefault(str(qid), cls)
+
+    def _summary(items: List[Tuple[str, List[str]]], n_unl: int) -> Dict[str, Any]:
+        n = len(items)
+        counts = {k: sum(1 for _, ls in items if k in ls) for k in FAILURE_TYPES}
+        ok = n >= min_q
+        return {
+            "n_labelled_questions": n,
+            "n_unlabelled_questions": n_unl,
+            "status": "ok" if ok else "not_yet",
+            "counts": counts,
+            "shares": {k: (c / n if ok and n else None) for k, c in counts.items()},
+        }
+
+    classes = sorted({c for c, _ in per_q.values()} | set(unlabelled.values()))
+    for cls in classes:
+        items = [v for v in per_q.values() if v[0] == cls]
+        n_unl = sum(1 for q, c in unlabelled.items() if c == cls and q not in per_q)
+        out["classes"][cls] = _summary(items, n_unl)
+    out["pooled"] = _summary(list(per_q.values()),
+                             sum(1 for q in unlabelled if q not in per_q))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
@@ -242,47 +409,166 @@ def _question_info(con, qid: str) -> Dict[str, Any]:
     return {"wording": (row[0] if row else "") or "", "iso3": (row[1] if row else "") or ""}
 
 
+def _fmt_vec(vec: Any) -> str:
+    try:
+        return "[" + ", ".join(f"{float(x):.2f}" for x in vec) + "]"
+    except (TypeError, ValueError):
+        return "(none)"
+
+
 def _forecast_context(con, qid: str, srid: str) -> Dict[str, Any]:
+    """What the note prompt shows about one stored forecast.
+
+    ``raw`` (month 1 and 6 quantiles of the raw pool), ``reference_median``,
+    the per-month vectors (``reference``, ``raw_vectors``, ``raw_quantiles``,
+    ``final``), the metric, and per trial its lane, plan findings,
+    reconciliation with the reference and ledger items.
+    """
     try:
         row = con.execute(
-            "SELECT raw_by_month_json, reference_json, trials_json FROM sibyl_forecasts "
+            "SELECT raw_by_month_json, reference_json, trials_json, metric FROM sibyl_forecasts "
             "WHERE question_id = ? AND sibyl_run_id = ? LIMIT 1", [qid, srid],
         ).fetchone()
     except Exception:  # noqa: BLE001
         row = None
-    out: Dict[str, Any] = {"raw": {}, "reference_median": None, "evidence": []}
+    out: Dict[str, Any] = {"raw": {}, "reference_median": None, "evidence": [],
+                           "reference": {}, "raw_vectors": {}, "raw_quantiles": {},
+                           "final": {}, "metric": None, "trials": []}
     if not row:
         return out
+    out["metric"] = str(row[3] or "").upper() or None
+    try:
+        final_row = con.execute(
+            "SELECT final_by_month_json FROM sibyl_forecasts "
+            "WHERE question_id = ? AND sibyl_run_id = ? LIMIT 1", [qid, srid],
+        ).fetchone()
+        out["final"] = json.loads(final_row[0]) if final_row and final_row[0] else {}
+    except Exception:  # noqa: BLE001 - an older DB has no column
+        pass
     try:
         raw = json.loads(row[0]) if row[0] else {}
         out["raw"] = {k: v for k, v in (raw.get("quantiles") or {}).items() if k in ("1", "6")}
-    except (TypeError, ValueError):
+        out["raw_vectors"] = raw.get("vectors") or {}
+        out["raw_quantiles"] = raw.get("quantiles") or {}
+    except (TypeError, ValueError, AttributeError):
         pass
     try:
         from sibyl.aggregate import dist_from_vector  # noqa: PLC0415
         from sibyl.trials import month_median  # noqa: PLC0415
 
         ref = json.loads(row[1]) if row[1] else {}
-        vec = (ref.get("by_month") or {}).get("1")
-        if vec:
-            metric = con.execute(
-                "SELECT metric FROM sibyl_forecasts WHERE question_id = ? LIMIT 1", [qid]
-            ).fetchone()[0]
-            d = dist_from_vector(vec, str(metric).upper())
+        out["reference"] = ref.get("by_month") or {}
+        vec = out["reference"].get("1")
+        if vec and out["metric"]:
+            d = dist_from_vector(vec, out["metric"])
             out["reference_median"] = round(month_median(d.p_zero, d.qpos), 1)
     except Exception:  # noqa: BLE001
         pass
     try:
         for t in json.loads(row[2]) if row[2] else []:
-            for it in (t or {}).get("ledger") or []:
+            t = t or {}
+            trace = t.get("belief_trace") or []
+            last = (trace[-1] or {}).get("belief") if trace else {}
+            last = last or {}
+            plan = last.get("plan") or {}
+            items = []
+            for k, it in enumerate(t.get("ledger") or [], start=1):
+                items.append({
+                    "id": it.get("id") or f"E{k}", "date": it.get("date"),
+                    "tier": it.get("tier"), "kind": it.get("kind"),
+                    "quote": str(it.get("quote") or "")[:200],
+                    "direction": it.get("direction"),
+                })
                 out["evidence"].append(
                     f"[{it.get('date') or 'undated'}] {it.get('direction') or ''}: "
                     f"{str(it.get('quote') or '')[:200]}"
                 )
-    except (TypeError, ValueError):
+            out["trials"].append({
+                "lane": t.get("lane") or str(t.get("perspective") or "").split(",")[0],
+                "plan": {slot: str((v or {}).get("finding") or "")[:200]
+                         for slot, v in plan.items() if isinstance(v, dict)},
+                "reconciliation": str(last.get("baserate_reconciliation") or "")[:400],
+                "ledger": items,
+            })
+    except (TypeError, ValueError, AttributeError):
         pass
     out["evidence"] = out["evidence"][:20]
     return out
+
+
+def month_lines(ctx: Dict[str, Any], outcomes: Sequence[float],
+                horizons: Sequence[Optional[int]]) -> List[str]:
+    """One line per resolved month: the vectors, the outcome and its bucket,
+    and whether the outcome fell inside the raw pool's 0.05 to 0.95 range
+    (stated by the code)."""
+    from sibyl.score_variants import _bucket  # noqa: PLC0415
+
+    lines: List[str] = []
+    metric = ctx.get("metric")
+    for y, h in zip(outcomes, horizons or [None] * len(outcomes)):
+        key = str(h) if h is not None else "1"
+        q = ctx.get("raw_quantiles", {}).get(key) or {}
+        lo, hi = q.get("0.05"), q.get("0.95")
+        if lo is not None and hi is not None:
+            inside = "inside" if float(lo) <= float(y) <= float(hi) else (
+                "BELOW" if float(y) < float(lo) else "ABOVE")
+            rng = f"raw 0.05-0.95 range {float(lo):g} to {float(hi):g}: outcome {inside}"
+        else:
+            rng = "raw 0.05-0.95 range not stored"
+        bucket = _bucket(float(y), metric) if metric else None
+        lines.append(
+            f"Month {h if h is not None else '?'}: outcome {float(y):g} "
+            f"(bucket {bucket + 1 if bucket is not None else '?'}); {rng}; "
+            f"reference {_fmt_vec(ctx.get('reference', {}).get(key))}; "
+            f"raw pool {_fmt_vec(ctx.get('raw_vectors', {}).get(key))}; "
+            f"published {_fmt_vec(ctx.get('final', {}).get(key))}"
+        )
+    return lines
+
+
+def trial_text(trials: Sequence[Dict[str, Any]], max_chars: int) -> Tuple[str, int]:
+    """The trials block inside *max_chars*: whole ledger items are dropped
+    from the end (lowest tier first is not attempted: the order is the
+    trial's own) and the number dropped is said."""
+    blocks: List[List[str]] = []
+    for t in trials:
+        head = [f"Trial, lane {t.get('lane') or '?'}:"]
+        for slot, finding in (t.get("plan") or {}).items():
+            if finding:
+                head.append(f"  plan {slot}: {finding}")
+        if t.get("reconciliation"):
+            head.append(f"  reconciliation with the reference: {t['reconciliation']}")
+        items = [
+            f"  [{it['id']}] {it.get('date') or 'undated'} tier {it.get('tier') or '?'} "
+            f"{it.get('kind') or ''} {it.get('direction') or ''}: {it.get('quote') or ''}"
+            for it in t.get("ledger") or []
+        ]
+        blocks.append(head + items)
+    n_heads = [len([ln for ln in b if not ln.startswith("  [")]) for b in blocks]
+    dropped = 0
+
+    def _join() -> str:
+        return "\n".join(ln for b in blocks for ln in b)
+
+    while len(_join()) > max_chars:
+        # Drop the last ledger line of the longest trial block.
+        idx = max(range(len(blocks)), key=lambda i: len(blocks[i]) - n_heads[i], default=None)
+        if idx is None or len(blocks[idx]) <= n_heads[idx]:
+            break
+        blocks[idx].pop()
+        dropped += 1
+    text = _join() or "(none recorded)"
+    if dropped:
+        text += f"\n({dropped} ledger item(s) left out for length)"
+    return text, dropped
+
+
+def _prompt_parts(ctx: Dict[str, Any], outcomes: Sequence[float],
+                  horizons: Sequence[Optional[int]], fixed_chars: int) -> Tuple[str, str]:
+    months = "\n".join(month_lines(ctx, outcomes, horizons)) or "(none)"
+    budget = max(1000, int(_cfg.POSTMORTEM_PROMPT_MAX_CHARS) - fixed_chars - len(months))
+    trials, _ = trial_text(ctx.get("trials") or [], budget)
+    return months, trials
 
 
 def write_notes(
@@ -317,13 +603,17 @@ def write_notes(
         outcomes = ", ".join(
             f"month {h}: {y:g}" for y, h in zip(r.outcomes, r.outcome_horizons or [None] * len(r.outcomes))
         )
-        prompt = NOTE_PROMPT.format(
+        horizons = r.outcome_horizons or [None] * len(r.outcomes)
+        fields = dict(
             wording=info["wording"] or "(no wording stored)",
             hazard_code=r.hazard_code, metric=r.metric, country=info["iso3"] or "?",
             forecast=json.dumps(ctx["raw"] or {"month_1": r.quantiles}, default=str),
             outcomes=outcomes, reference_median=ctx["reference_median"],
-            evidence="\n".join(ctx["evidence"]) or "(none recorded)",
+            failure_types=_failure_type_lines(), max_labels=MAX_LABELS,
         )
+        fixed = len(NOTE_PROMPT.format(months="", trials="", **fields))
+        months, trials = _prompt_parts(ctx, r.outcomes, horizons, fixed)
+        prompt = NOTE_PROMPT.format(months=months, trials=trials, **fields)
         text, usage, error = call(prompt)
         cost = float((usage or {}).get("cost_usd") or 0.0)
         budget.spent_usd += cost
@@ -336,18 +626,109 @@ def write_notes(
             logger.warning("sibyl.postmortem: no usable note for %s (%s)", r.question_id,
                            error or "unparseable")
             continue
+        labels = validate_labels(note)
+        for k in ("failure_types", "label_evidence"):
+            note.pop(k, None)
         con.execute(
             """
             INSERT INTO sibyl_postmortem_notes
                 (question_id, sibyl_run_id, iso3, hazard_code, metric, note_json, model,
-                 cost_usd, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 cost_usd, created_at, failure_types_json, prompt_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
             """,
             [r.question_id, str(r.sibyl_run_id), info["iso3"], r.hazard_code, r.metric,
-             json.dumps(note), _cfg.MODEL, cost],
+             json.dumps(note), _cfg.MODEL, cost, json.dumps(labels), PROMPT_VERSION],
         )
         written += 1
     return written
+
+
+def relabel_notes(
+    con,
+    *,
+    call: Optional[ModelCall] = None,
+    budget: Optional[Budget] = None,
+    log: Optional[Callable[..., None]] = None,
+) -> int:
+    """Label notes written before the labels existed, oldest first, inside the cap.
+
+    A note counts as unlabelled-by-age when ``prompt_version`` is NULL; a
+    ``pm_v2`` note that came back unlabelled is not asked again (it was).
+    """
+    from sibyl.advice import load_records  # noqa: PLC0415
+
+    _ensure(con)
+    call = call or _default_call
+    budget = budget or Budget(_cfg.POSTMORTEM_CAP_USD)
+    pending = con.execute(
+        "SELECT question_id, sibyl_run_id, hazard_code, metric, note_json "
+        "FROM sibyl_postmortem_notes WHERE prompt_version IS NULL "
+        "ORDER BY created_at, question_id"
+    ).fetchall()
+    if not pending:
+        return 0
+    records = {r.question_id: r for r in load_records(con)}
+    done = 0
+    for qid, srid, hz, metric, nj in pending:
+        r = records.get(str(qid))
+        if r is None:
+            continue
+        if not budget.can_spend():
+            logger.warning("sibyl.postmortem: cap reached; re-labelling stops here")
+            break
+        info = _question_info(con, str(qid))
+        ctx = _forecast_context(con, str(qid), str(srid))
+        horizons = r.outcome_horizons or [None] * len(r.outcomes)
+        outcomes = ", ".join(f"month {h}: {y:g}" for y, h in zip(r.outcomes, horizons))
+        fields = dict(
+            wording=info["wording"] or "(no wording stored)", hazard_code=hz,
+            metric=metric, country=info["iso3"] or "?", outcomes=outcomes,
+            note=nj or "{}", failure_types=_failure_type_lines(), max_labels=MAX_LABELS,
+        )
+        fixed = len(RELABEL_PROMPT.format(months="", trials="", **fields))
+        months, trials = _prompt_parts(ctx, r.outcomes, horizons, fixed)
+        prompt = RELABEL_PROMPT.format(months=months, trials=trials, **fields)
+        text, usage, error = call(prompt)
+        cost = float((usage or {}).get("cost_usd") or 0.0)
+        budget.spent_usd += cost
+        if log:
+            log(prompt=prompt, response=text, usage=usage or {}, error=error,
+                question_id=str(qid), iso3=info["iso3"], hazard_code=hz, metric=metric,
+                call_type="sibyl_postmortem_relabel")
+        parsed = _parse_json(text) if not error else None
+        if parsed is None:
+            continue
+        con.execute(
+            "UPDATE sibyl_postmortem_notes SET failure_types_json = ?, prompt_version = ? "
+            "WHERE question_id = ? AND sibyl_run_id = ?",
+            [json.dumps(validate_labels(parsed)), PROMPT_VERSION, qid, srid],
+        )
+        done += 1
+    return done
+
+
+def attach_failure_rates(con) -> bool:
+    """Write ``failure_rates`` into the newest pooled advice row's findings."""
+    try:
+        row = con.execute(
+            "SELECT as_of_month, findings_json FROM sibyl_calibration_advice "
+            "WHERE hazard_code = '*' AND metric = '*' ORDER BY as_of_month DESC LIMIT 1"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - no table yet
+        return False
+    if not row:
+        return False
+    try:
+        findings = json.loads(row[1]) if row[1] else {}
+    except (TypeError, ValueError):
+        findings = {}
+    findings["failure_types"] = failure_rates(con)
+    con.execute(
+        "UPDATE sibyl_calibration_advice SET findings_json = ? "
+        "WHERE as_of_month = ? AND hazard_code = '*' AND metric = '*'",
+        [json.dumps(findings, default=str), row[0]],
+    )
+    return True
 
 
 def write_lessons(
@@ -381,23 +762,28 @@ def write_lessons(
             logger.warning("sibyl.postmortem: cap reached; lessons for %s/%s wait", hz, metric)
             break
         notes = con.execute(
-            "SELECT question_id, iso3, note_json FROM sibyl_postmortem_notes "
+            "SELECT question_id, iso3, note_json, failure_types_json FROM sibyl_postmortem_notes "
             "WHERE hazard_code = ? AND metric = ? ORDER BY created_at, question_id",
             [hz, metric],
         ).fetchall()
-        ids = [str(q) for q, _, _ in notes]
-        iso3s = sorted({str(i) for _, i, _ in notes if i})
+        ids = [str(q) for q, _, _, _ in notes]
+        iso3s = sorted({str(i) for _, i, _, _ in notes if i})
         blocks = []
-        for qid, _, nj in notes:
+        for qid, _, nj, ftj in notes:
             try:
                 nd = json.loads(nj)
             except (TypeError, ValueError):
                 nd = {}
+            try:
+                labels = (json.loads(ftj) or {}).get("failure_types") or [] if ftj else []
+            except (TypeError, ValueError):
+                labels = []
             blocks.append(
                 f"[{qid}] happened: {nd.get('what_happened', '')} | "
                 f"forecast: {nd.get('forecast_vs_outcome', '')} | "
                 f"would have helped: {nd.get('what_would_have_helped', '')} | "
-                f"lesson: {nd.get('general_lesson', '')}"
+                f"lesson: {nd.get('general_lesson', '')} | "
+                f"failure types: {', '.join(labels) if labels else 'none'}"
             )
         prompt = LESSONS_PROMPT.format(
             n=len(notes), hazard_code=hz, metric=metric, notes="\n".join(blocks),
@@ -543,9 +929,13 @@ def run(con, *, as_of_month: Optional[str] = None, call: Optional[ModelCall] = N
         log: Optional[Callable[..., None]] = _log_call) -> Dict[str, Any]:
     budget = Budget(_cfg.POSTMORTEM_CAP_USD)
     notes = write_notes(con, call=call, budget=budget, log=log)
+    relabelled = relabel_notes(con, call=call, budget=budget, log=log)
     lessons = write_lessons(con, as_of_month=as_of_month, call=call, budget=budget, log=log)
-    return {"notes_written": notes, "lessons": lessons, "spent_usd": round(budget.spent_usd, 4),
-            "cap_usd": budget.cap_usd}
+    # The rates go to the pooled advice row (sibyl.advice ran before this
+    # step) and to the dashboard; never into a trial's prompt.
+    attach_failure_rates(con)
+    return {"notes_written": notes, "notes_relabelled": relabelled, "lessons": lessons,
+            "spent_usd": round(budget.spent_usd, 4), "cap_usd": budget.cap_usd}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

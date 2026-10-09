@@ -8,6 +8,7 @@ import type {
   SibylCalibrationResponse,
   SibylCalibrationRow,
   SibylCalibrationStat,
+  SibylFailureRates,
 } from "../../lib/types";
 
 // Sibyl's own calibration record (sibyl/advice.py) and the advice its prompt
@@ -95,6 +96,81 @@ function ArmComparison({ arms }: { arms: SibylArmComparison | null }) {
         ))}
       </tbody>
     </table>
+  );
+}
+
+// Failure types (sibyl/postmortem.py): per class, the distinct resolved
+// questions whose post-mortem carries each label. Counts always; a share only
+// once a class holds the minimum number of labelled questions.
+const FAILURE_LABELS: Record<string, string> = {
+  resolver_misread: "Misread what resolves",
+  stale_or_wrong_fact: "Stale or wrong fact",
+  double_counted: "Counted twice",
+  coverage_as_signal: "Coverage read as signal",
+  statement_as_commitment: "Statement taken as commitment",
+  wrong_scale_of_event: "Wrong scale of event",
+  rigid_reference: "Reference kept too long",
+  retreat_to_reference: "Retreated to the reference",
+  spike_carried_forward: "Spike carried to month 6",
+  absence_as_evidence: "Absence read as evidence",
+  missed_dated_event: "Missed a dated event",
+  zero_misjudged: "Chance of zero misjudged",
+  tails_too_thin: "Tails too thin",
+  thin_research: "Thin research",
+  reference_fault: "Reference itself wrong",
+  unforeseeable: "Unforeseeable",
+  no_fault: "No fault",
+};
+
+function FailureTypes({ rates }: { rates: SibylFailureRates | null | undefined }) {
+  if (!rates || !rates.pooled) {
+    return (
+      <p className="text-sm text-fred-muted">
+        No labelled post-mortems yet.
+      </p>
+    );
+  }
+  const cols: [string, string][] = [
+    ...Object.keys(rates.classes)
+      .sort()
+      .map((k): [string, string] => [k, k]),
+    ["*", "All classes"],
+  ];
+  const summary = (key: string) => (key === "*" ? rates.pooled : rates.classes[key]);
+  const cell = (key: string, label: string) => {
+    const s = summary(key);
+    if (!s) return "—";
+    const c = s.counts[label] ?? 0;
+    const share = s.shares[label];
+    return share === null || share === undefined ? `${c}` : `${c} (${pct(share)})`;
+  };
+  return (
+    <div className="overflow-x-auto rounded-lg border border-fred-secondary bg-fred-surface">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="text-left text-xs text-fred-muted">
+            <th className="px-3 py-2">Failure type</th>
+            {cols.map(([k, name]) => (
+              <th key={k} className="px-3 py-2">
+                {name} ({summary(k)?.n_labelled_questions ?? 0})
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rates.labels.map((label) => (
+            <tr key={label} className="border-t border-fred-secondary/40">
+              <td className="px-3 py-2">{FAILURE_LABELS[label] ?? label}</td>
+              {cols.map(([k]) => (
+                <td key={k} className="px-3 py-2">
+                  {cell(k, label)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -219,6 +295,18 @@ export default function SibylCalibration() {
           scores.
         </p>
         <ArmComparison arms={data.arm_comparison} />
+      </section>
+
+      <section className="space-y-2">
+        <h2 className="text-lg font-semibold">What went wrong, by type</h2>
+        <p className="text-sm text-fred-muted">
+          Each resolved question&apos;s post-mortem carries up to three failure
+          types, each resting on what the research recorded at the time. Counts are
+          distinct questions (labelled questions in brackets); a share is shown once
+          a class holds {data.failure_types?.min_questions ?? 10} labelled questions.
+          These rates are never shown to Sibyl.
+        </p>
+        <FailureTypes rates={data.failure_types} />
       </section>
     </div>
   );

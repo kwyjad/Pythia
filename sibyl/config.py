@@ -324,6 +324,12 @@ POSTMORTEM_MIN_NOTES = _env_int("SIBYL_POSTMORTEM_MIN_NOTES", 8)
 LESSONS_MAX_CHARS = _env_int("SIBYL_LESSONS_MAX_CHARS", 6000)
 LESSON_MIN_CASES = _env_int("SIBYL_LESSON_MIN_CASES", 3)
 MAX_ANALOGUES = _env_int("SIBYL_MAX_ANALOGUES", 4)
+# Failure types (Oct 2026, review Part 2): the note prompt carries the
+# trials' plan findings, reconciliations and ledgers inside this many
+# characters (whole ledger items dropped from the end beyond it), and a
+# label's share of questions is shown from this many labelled questions.
+POSTMORTEM_PROMPT_MAX_CHARS = _env_int("SIBYL_POSTMORTEM_PROMPT_MAX_CHARS", 20_000)
+FAILURE_RATE_MIN_QUESTIONS = _env_int("SIBYL_FAILURE_RATE_MIN_QUESTIONS", 10)
 
 # --- Shadow arm (Oct 2026, Part 7) -------------------------------------------
 # One extra lane C trial per selected question (controls excluded) on a second

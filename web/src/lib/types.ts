@@ -801,4 +801,21 @@ export type SibylCalibrationResponse = {
   min_questions: number | null;
   rows: SibylCalibrationRow[];
   arm_comparison: SibylArmComparison | null;
+  // Failure types from the post-mortems (Oct 2026); null on older generations.
+  failure_types?: SibylFailureRates | null;
+};
+
+export type SibylFailureSummary = {
+  n_labelled_questions: number;
+  n_unlabelled_questions: number;
+  status: "ok" | "not_yet";
+  counts: Record<string, number>;
+  shares: Record<string, number | null>;
+};
+
+export type SibylFailureRates = {
+  min_questions: number;
+  labels: string[];
+  classes: Record<string, SibylFailureSummary>;
+  pooled: SibylFailureSummary | null;
 };

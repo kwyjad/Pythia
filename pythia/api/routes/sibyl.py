@@ -207,6 +207,7 @@ def sibyl_calibration(as_of_month: Optional[str] = Query(None, pattern=r"^\d{4}-
     empty = {
         "has_advice_table": False, "as_of_month": None, "months": [],
         "min_questions": None, "rows": [], "arm_comparison": None,
+        "failure_types": None,
     }
     if not _table_exists(con, "sibyl_calibration_advice"):
         return empty
@@ -248,6 +249,9 @@ def sibyl_calibration(as_of_month: Optional[str] = Query(None, pattern=r"^\d{4}-
         r["paired_skill"] = findings.get("paired_skill") or {}
         if r["scope"] == "pooled":
             out["arm_comparison"] = findings.get("arm_comparison")
+            # Failure types from the post-mortems (Oct 2026): per class and
+            # pooled; absent on generations written before.
+            out["failure_types"] = findings.get("failure_types")
     out["rows"] = rows
     return out
 
