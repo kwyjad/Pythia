@@ -349,6 +349,19 @@ export const ProcessMeasures = ({ run }: { run: SibylRun }) => {
       tip: "Share of trials that found how the question resolves before submitting.",
     },
     {
+      label: "Nowcast slot done",
+      value: fmtShare(run.share_nowcast_done),
+      tip: "Share of trials that estimated the months between the reference and today. The resolving source's latest reading, shown to every trial, feeds this slot.",
+    },
+    {
+      label: "Live ACLED reads",
+      value:
+        run.n_resolver_live_ok === null || run.n_resolver_live_ok === undefined
+          ? "—"
+          : `${run.n_resolver_live_ok} ok, ${run.n_resolver_live_failed ?? 0} failed`,
+      tip: "Month-to-date ACLED reads for conflict-death questions: taken, and refused or unreadable.",
+    },
+    {
       label: "Documents per trial",
       value:
         run.docs_per_trial === null || run.docs_per_trial === undefined

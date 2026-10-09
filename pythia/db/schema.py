@@ -2023,6 +2023,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "tool_calls_per_trial": "DOUBLE",
                 "share_docs_wikipedia": "DOUBLE",
                 "n_submit_gate_unmet": "INTEGER",
+                # Part 5: live resolver reads taken and refused, and the share
+                # of trials whose nowcast plan slot ended done.
+                "n_resolver_live_ok": "INTEGER",
+                "n_resolver_live_failed": "INTEGER",
+                "share_nowcast_done": "DOUBLE",
                 # The reference weight the run's pool used, and where it came
                 # from ('fitted' | 'fixed' | 'backtest').
                 "reference_weight": "DOUBLE",
@@ -2137,6 +2142,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # trials left out as outliers).
                 "extra_trials_rule": "TEXT",
                 "trial_checks_json": "TEXT",
+                # The resolving source's latest reading shown to the trials
+                # (Oct 2026, review Part 5, sibyl/resolver_reading.py): its
+                # source, its aggregates or the reason it could not be read.
+                # NULL on earlier rows and where nothing was shown.
+                "resolver_reading_json": "TEXT",
                 # The shadow arm (Oct 2026, Part 7): the shadow series (the
                 # pool with the Claude lane C trial replaced by the shadow
                 # model's), its trial, and its spend. Never in the forecast

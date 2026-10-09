@@ -209,6 +209,15 @@ jobs:
           # An existing secret; without it the arm is skipped with a warning
           # and the run is flagged shadow_status=no_key.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # The resolving source's latest reading (sibyl/resolver_reading.py,
+          # Oct 2026 review Part 5): conflict-death questions get one live
+          # month-to-date ACLED read each, taken before their trials. The
+          # credentials stay at this step's scope; without them the read is
+          # recorded unavailable and the trials say so.
+          SIBYL_LIVE_LOOKUPS_ENABLED: "1"
+          ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
+          ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+          ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
           # MODEL_COSTS_JSON env override removed 2026-07: pythia/model_costs.json
           # (now per-1M-token rates) is authoritative and carries the
           # claude-opus-5-5 entry Sibyl's budget cap depends on.

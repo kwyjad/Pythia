@@ -824,3 +824,54 @@ roughly +$0.02 to $0.05 per R trial, on the questions where the rule fires
 
 Tests: `tests/test_sibyl_reconcile.py`; `tests/test_sibyl_lanes.py` moved to
 R and E on disagreement.
+
+## 2026-10-09 — Review Part 5: the resolving source's latest reading
+
+Evidence: every lane's plan opens with a "resolver" slot (the resolving
+source's latest figures) and a "nowcast" slot (the months between the
+reference and today). The trials filled both by searching the open web for
+figures the pipeline already holds, and for conflict deaths no web page
+carries a month-to-date ACLED count at all. Part 1's measures put the
+resolver slot at its weakest where the source is least published.
+
+Changed:
+
+- `sibyl/resolver_reading.py::build_resolver_reading`, on the main thread
+  before a question's trials; never raises; nothing in backtest or with
+  `SIBYL_RESOLVER_READING=0`.
+  - ACE/FATALITIES: one live month-to-date ACLED read when
+    `SIBYL_LIVE_LOOKUPS_ENABLED` (0 in code, "1" in `run_sibyl.yml`, with the
+    ACLED credentials at the Run Sibyl step only). The lightest existing
+    path: the numeric `iso` filter and own-country attribution from
+    `pythia/acled_political.py`, the token and its file cache from
+    `acled_auth`, the one JSON path `parse_json_response`. One request,
+    one retry, 1 s apart, 30 s timeout. A 403, an HTML body or a refused
+    token is `unavailable`, never zero, and the block says so.
+  - DR/PHASE3PLUS_IN_NEED: the newest Phase 3+ rows with the lower-bound
+    sentence, and the window's Most Likely projections, labelled.
+  - FL/TC PA: six months of resolving rows, a month with none stated, and
+    three months of GDACS alerts with the detection-only sentence.
+- The block sits in the question segment after the reference and before the
+  track record, for every lane, controls and the shadow trial. Empty, the
+  prompt is byte-identical (held by a test against the archived
+  `docs/prompts/2026-10-09-3/sibyl_agent.py`).
+- Recorded: `sibyl_forecasts.resolver_reading_json`, one `sibyl_evidence`
+  row (`trial_index` -1, step 0, tool `resolver_reading`),
+  `sibyl_runs.n_resolver_live_ok`/`n_resolver_live_failed`, and the process
+  measure `share_nowcast_done`.
+
+Not done: the reading is not counted toward either gate, and no reading is
+shown in backtest (the database holds figures published after the as-of
+date). `_load_fewsnet_projection` is mirrored rather than called: it opens
+and closes the shared `duckdb_io` handle, and Sibyl holds its own
+connection across the question. The ACLED read could not be run from the
+build sandbox (acleddata.com is denied): the first live run on 13 November
+2026 is the verification, through `n_resolver_live_ok` and the
+`resolver_reading_json` rows.
+
+Cost: about 5 to 8 conflict-death questions a run, one ACLED request each
+(no model spend). The block adds roughly 150 to 400 tokens to a cached
+segment: under $0.01 a trial, about $0.3 to $0.5 a run.
+
+Tests: `tests/test_sibyl_resolver_reading.py`, against the real response
+shape (`#country+code` or a country name only), including a 200 HTML body.
