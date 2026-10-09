@@ -320,6 +320,29 @@ REFERENCE_WEIGHT = _env_float("SIBYL_REFERENCE_WEIGHT", 0.5)
 # the rest on the 36-month history vector. A starting value, no backtest.
 DR_PERSISTENCE_WEIGHT = _env_float("SIBYL_DR_PERSISTENCE_WEIGHT", 0.5)
 
+
+def _dr_persistence_weights() -> tuple:
+    """Six weights, one per window month (Oct 2026, review Part 7).
+
+    ``SIBYL_DR_PERSISTENCE_WEIGHTS`` is six comma-separated numbers in [0, 1];
+    unset, malformed or the wrong length, every month takes
+    ``SIBYL_DR_PERSISTENCE_WEIGHT``, which leaves the reference byte-identical
+    to before. sibyl/reference_backtest.py proposes a schedule; nothing sets
+    one by itself.
+    """
+    raw = os.getenv("SIBYL_DR_PERSISTENCE_WEIGHTS", "").strip()
+    if raw:
+        try:
+            vals = tuple(float(x) for x in raw.split(","))
+            if len(vals) == 6 and all(0.0 <= v <= 1.0 for v in vals):
+                return vals
+        except ValueError:
+            pass
+    return (float(DR_PERSISTENCE_WEIGHT),) * 6
+
+
+DR_PERSISTENCE_WEIGHTS = _dr_persistence_weights()
+
 # --- Measurement, pool weight and post-mortems (Oct 2026, Part 6) ----------
 # The pre-extraction text of a document read is stored in sibyl_evidence up
 # to this many characters (the shown text is stored whole).

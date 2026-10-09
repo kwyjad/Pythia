@@ -118,5 +118,6 @@ jobs:
                      tests/test_sibyl_reconcile.py \
                      tests/test_sibyl_resolver_reading.py \
                      tests/test_sibyl_pack.py \
+                     tests/test_sibyl_reference_backtest.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

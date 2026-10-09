@@ -922,3 +922,48 @@ question.
 
 Tests: `tests/test_sibyl_pack.py`; an assertion in
 `tests/test_api_sibyl_routes.py`.
+
+## 2026-10-09 — Review Part 7: mechanical backtests of the references
+
+Evidence: Sibyl's reference is half of what it publishes (`SIBYL_REFERENCE_WEIGHT`
+0.5). Only the conflict reference rests on a backtest (Brier 0.390 for the
+12-month shares, 0.384 for the 75/25 pool, 0.470 for level-and-volatility,
+on 8,371 country-forecasts). The script behind those figures was a one-off
+and is not in the repository. The drought persistence weight (0.5) and the
+flood and cyclone choice of a per-calendar-month vector rest on nothing.
+
+Changed:
+
+- `sibyl/reference_backtest.py`, read-only. Forecasts on the 13th of month
+  M for M+1..M+6, each candidate seeing only what was knowable then.
+  Conflict uses the `base_rate_spd` settle rule. Drought uses rows up to
+  M - L for L = 1, 2, 3, every result reported per L. Flood and cyclone use
+  `base_rate_spd`'s history before the window. Unresolved months are left out.
+- Candidates:
+  - conflict: 12-month shares, level-transition, level-and-volatility, and
+    pools at 0.5, 0.75 and 0.9;
+  - drought: persistence weights 0 to 1, plus a per-horizon schedule fitted
+    to 2023-12, forced non-increasing and scored after it;
+  - flood and cyclone: per-month, pooled and uniform, "too few" below 100.
+- Scoring: Brier, RPS and log (floored) per horizon; 90% intervals from
+  2,000 country resamples with a fixed seed, for each mean and for each
+  paired difference from production. The report tries to reproduce the
+  quoted conflict figures and prints the comparison.
+- Workflow `backtest_sibyl_reference.yml` (dispatch, plus PR on its own
+  paths). It uses the canonical DB, or else the release DB, and sits outside
+  the DB concurrency group. Artifact `sibyl-reference-backtest`, kept 14 days.
+- `SIBYL_DR_PERSISTENCE_WEIGHTS`: six weights, one per window month.
+  Unset or malformed, all six take `SIBYL_DR_PERSISTENCE_WEIGHT` and the
+  reference is byte-identical (held by a test).
+
+Not done:
+- No production weight changes. The schedule the backtest fits is a
+  proposal for the owner, read from the artifact. It is stated in the PR
+  once the PR run has produced it.
+- Level-transition is not tried for drought.
+- The drought knowability uses assumed lags, not the `publication_date`
+  column, which is mostly the date we first saw a row (Group E).
+
+Cost: none in model spend. A few minutes of runner time per dispatch.
+
+Tests: `tests/test_sibyl_reference_backtest.py`.
