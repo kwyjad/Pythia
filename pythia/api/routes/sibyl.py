@@ -45,6 +45,9 @@ PROCESS_MEASURES = (
     "share_resolver_done", "docs_per_trial", "share_ledger_dated_figure",
     "share_forecasts_at_floor", "mean_jsd_from_reference", "reference_weight",
     "reference_weight_source",
+    # Research depth (Oct 2026, review Part 1).
+    "median_docs_per_trial", "share_trials_under_doc_gate", "steps_per_trial",
+    "tool_calls_per_trial", "share_docs_wikipedia", "n_submit_gate_unmet",
 )
 #: The shadow arm (sibyl/shadow.py, Oct 2026): NULL on earlier runs.
 SHADOW_FIELDS = (

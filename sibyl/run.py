@@ -726,6 +726,11 @@ def run_sibyl(
         # The tool counters describe production research; the shadow
         # trials' searches are read after this snapshot and not counted.
         tool_counts = sibyl_tools.COUNTERS.snapshot()
+        # Documents read: the trials' own count, where a repeat read of a URL
+        # or of the same text counts once (the tool counter counts fetches).
+        tool_counts["n_docs_read"] = sum(
+            int(t.n_docs_read or 0) for o in outcomes for t in o.trials
+        )
 
         # The shadow arm runs only after every question's production trials,
         # so it can never take budget or time production needed.

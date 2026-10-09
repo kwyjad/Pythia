@@ -285,11 +285,13 @@ def test_plan_is_parsed_and_unknown_status_becomes_pending():
 def test_submit_gate_names_what_is_missing():
     missing = sibyl_agent.submit_gate_missing(empty_plan(), 1, 0)
     assert len(missing) == 3
-    assert any("resolver" in m for m in missing) and any("1 of 3" in m for m in missing)
-    assert sibyl_agent.submit_gate_missing(ALL_DONE_PLAN, 3, 0) == []
+    assert any("resolver" in m for m in missing) and any("1 of 5" in m for m in missing)
+    assert sibyl_agent.submit_gate_missing(ALL_DONE_PLAN, 5, 0) == []
+    # Four documents is under the gate of five (Oct 2026; it was three).
+    assert len(sibyl_agent.submit_gate_missing(ALL_DONE_PLAN, 4, 0)) == 1
     failed_twice = dict(ALL_DONE_PLAN, resolver={"status": "failed", "finding": ""})
-    assert sibyl_agent.submit_gate_missing(failed_twice, 3, 2) == []
-    assert len(sibyl_agent.submit_gate_missing(failed_twice, 3, 1)) == 1
+    assert sibyl_agent.submit_gate_missing(failed_twice, 5, 2) == []
+    assert len(sibyl_agent.submit_gate_missing(failed_twice, 5, 1)) == 1
 
 
 def _q():
@@ -331,13 +333,16 @@ def test_an_early_submit_is_refused_and_the_trial_goes_on(monkeypatch):
         make_plan_submit_response(empty_plan()),       # refused: nothing done
         make_actions_response([("fetch_url", "https://a"), ("fetch_url", "https://b"),
                                ("fetch_url", "https://c")], plan=ALL_DONE_PLAN),
+        make_actions_response([("fetch_url", "https://d"), ("fetch_url", "https://e")],
+                              plan=ALL_DONE_PLAN),
         make_plan_submit_response(),                    # accepted
     ]
     trial, prompts = _run(script, monkeypatch)
-    assert trial.submitted and trial.steps_used == 3
+    assert trial.submitted and trial.steps_used == 4
     assert trial.belief_trace[0].gate_rejected
     assert "Your submit was NOT accepted" in prompts[1]
-    assert trial.n_docs_read == 3
+    assert trial.n_docs_read == 5 and trial.n_tool_calls == 5
+    assert not trial.submit_gate_unmet
 
 
 def test_the_step_limit_ends_a_trial_that_never_satisfies_the_gate(monkeypatch):
@@ -347,6 +352,8 @@ def test_the_step_limit_ends_a_trial_that_never_satisfies_the_gate(monkeypatch):
     assert trial.ok and trial.steps_used == 3 and trial.submitted
     assert trial.belief_trace[0].gate_rejected and trial.belief_trace[1].gate_rejected
     assert trial.belief_trace[2].gate_rejected is None
+    # The step limit, not the gate, ended it: the trial says so.
+    assert trial.submit_gate_unmet and trial.to_dict()["submit_gate_unmet"] is True
 
 
 def test_a_long_document_is_extracted_inside_the_trial(monkeypatch):

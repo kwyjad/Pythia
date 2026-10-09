@@ -659,3 +659,42 @@ Not done:
   `unsupported_provider`.
 
 Tests: `tests/test_sibyl_shadow.py`, a case in `tests/test_api_sibyl_routes.py`.
+
+## 2026-10-09 — Review Part 1: a higher document gate, and research depth measured
+
+From the October 2026 review of AI forecasting practice (FutureSearch, Preseen,
+the Metaculus bot tournaments, the literature).
+
+Evidence: before the rebuild a trial averaged three searches and most read no
+page. FutureSearch's typical forecasting run makes 10 to 20 tool calls and
+reads 5 to 20 pages. Sibyl's submit gate asked for three documents.
+
+Changed:
+
+- `SIBYL_SUBMIT_MIN_DOCS` 3 to 5. The step limit still ends a trial; one it
+  ends with the gate unmet carries `submit_gate_unmet`, counted on
+  `sibyl_runs.n_submit_gate_unmet`.
+- A document counts once in a trial. The count was `+1` per successful
+  `fetch_url`, so a second read of the same page counted again; now a repeat
+  URL, or a text whose SHA-256 was already read under another URL, adds
+  nothing. A failed fetch never counted and still does not.
+  `sibyl_runs.n_docs_read` is now the trials' count, not the tool counter's.
+- New process measures on `sibyl_runs`: `median_docs_per_trial`,
+  `share_trials_under_doc_gate`, `steps_per_trial`, `tool_calls_per_trial`,
+  `share_docs_wikipedia`. They show in `/v1/sibyl/summary` and on the "How
+  this run researched" card. `scripts/ci/stage_health.py` warns, never
+  fails, when the median is under 5 or the Wikipedia share over one half.
+
+Not done: the evidence gate (`SIBYL_MIN_SEARCH_OK` 3, `SIBYL_MIN_DOCS_READ`
+2) is unchanged. It decides whether a forecast is valid, and raising it would
+fail more questions.
+
+Cost: more reads a trial means more steps and more extraction calls. A step
+of Opus 5.5 costs about $0.03-0.05 at October's rate and an extraction about
+$0.005, so two more documents and one more step a trial is about $0.10 a
+question, about $2.50 a run of 25 (more on questions that call for extra
+trials).
+
+Tests: `tests/test_sibyl_research_depth.py`; `tests/test_sibyl_documents.py`,
+`tests/test_sibyl_smoke.py` and `tests/sibyl_test_utils.py` moved to five
+documents.

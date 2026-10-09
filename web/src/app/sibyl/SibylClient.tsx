@@ -338,6 +338,9 @@ export const ShadowArm = ({
 
 // How Sibyl researched in this run (sibyl/measure.py). Never a score: the
 // About tab says what each one is for.
+const fmtNum = (v: number | null | undefined) =>
+  v === null || v === undefined ? "—" : v.toFixed(1);
+
 export const ProcessMeasures = ({ run }: { run: SibylRun }) => {
   const items: { label: string; value: string; tip: string }[] = [
     {
@@ -352,6 +355,31 @@ export const ProcessMeasures = ({ run }: { run: SibylRun }) => {
           ? "—"
           : run.docs_per_trial.toFixed(1),
       tip: "Documents (pages and PDFs) read per research trial.",
+    },
+    {
+      label: "Median documents",
+      value: fmtNum(run.median_docs_per_trial),
+      tip: "Documents read by the median trial. Each URL and each document text counts once; the submit gate asks for five.",
+    },
+    {
+      label: "Trials under the gate",
+      value: fmtShare(run.share_trials_under_doc_gate),
+      tip: "Share of trials that read fewer documents than the submit gate asks for (they ended at the step limit).",
+    },
+    {
+      label: "Steps per trial",
+      value: fmtNum(run.steps_per_trial),
+      tip: "Mean agent steps per trial (the limit is twelve).",
+    },
+    {
+      label: "Tool calls per trial",
+      value: fmtNum(run.tool_calls_per_trial),
+      tip: "Mean searches and document reads per trial.",
+    },
+    {
+      label: "Wikipedia share",
+      value: fmtShare(run.share_docs_wikipedia),
+      tip: "Share of the documents read that came from wikipedia.org.",
     },
     {
       label: "Dated figures in ledger",

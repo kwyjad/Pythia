@@ -346,12 +346,6 @@ class TrialResult:
     # written by sibyl.run on the main thread and never go to trials_json.
     resolver_status: Optional[str] = None
     evidence_rows: List[Dict[str, Any]] = field(default_factory=list)
-    # Research depth (Oct 2026, Part 1 of the review): tool calls made, the
-    # documents counted as read (each URL and each document text once), and
-    # whether the trial ran out of steps with the submit gate still unmet.
-    n_tool_calls: int = 0
-    docs_read_urls: List[str] = field(default_factory=list)
-    submit_gate_unmet: bool = False
 
     @property
     def ok(self) -> bool:
@@ -396,9 +390,6 @@ class TrialResult:
             "role": self.role,
             "outlier_dropped": self.outlier_dropped,
             "resolver_status": self.resolver_status,
-            "n_tool_calls": self.n_tool_calls,
-            "docs_read_urls": list(self.docs_read_urls),
-            "submit_gate_unmet": self.submit_gate_unmet,
         }
 
 
@@ -679,10 +670,6 @@ def run_trial(
     # The prompt prefix an earlier step's llm_calls row already holds.
     logged_prefix: Optional[str] = None
     seen_urls: set[str] = set()
-    # A document counts as read once: a second fetch of the same URL, or of a
-    # document whose text has the same SHA-256, adds nothing to the gate.
-    seen_doc_urls: set[str] = set()
-    seen_doc_hashes: set[str] = set()
     resolver_failed_steps = 0
     terms = _search_terms(question, country_name)
 
@@ -804,7 +791,6 @@ def run_trial(
             break
 
         outputs: List[ToolOutput] = []
-        result.n_tool_calls += len(decision.calls)
         for i, tcall in enumerate(decision.calls):
             retrieved_at = datetime.now(timezone.utc).replace(tzinfo=None)
             tool_result = _execute_tool(tcall, as_of, question=question, terms=terms)
@@ -851,14 +837,7 @@ def run_trial(
             if call_ok and tool_result.tool in ("brave_search", "reliefweb_search") and tool_result.sources:
                 result.n_search_ok += 1
             if call_ok and tool_result.tool == "fetch_url":
-                doc_url = str(tcall.action_input).strip()
-                basis = tool_result.doc_text or tool_result.text or ""
-                doc_hash = hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()
-                if doc_url not in seen_doc_urls and doc_hash not in seen_doc_hashes:
-                    result.n_docs_read += 1
-                    result.docs_read_urls.append(doc_url)
-                seen_doc_urls.add(doc_url)
-                seen_doc_hashes.add(doc_hash)
+                result.n_docs_read += 1
             result.cost.add(_kind(COST_KIND_BRAVE), tool_result.cost_usd)
             tracker.add(question.question_id, _kind(COST_KIND_BRAVE), tool_result.cost_usd)
             result.leakage.merge(tool_result.leakage)
@@ -899,16 +878,6 @@ def run_trial(
         ))
 
     result.ledger = ledger.to_list()
-    # The step limit ended the trial with the submit gate still unmet: the
-    # trial counts, and the run says how many such trials it had.
-    if (
-        result.error is None
-        and result.degraded is None
-        and result.belief_trace
-        and result.steps_used >= MAX_STEPS
-        and submit_gate_missing(belief.plan, result.n_docs_read, resolver_failed_steps)
-    ):
-        result.submit_gate_unmet = True
     result.resolver_status = (belief.plan.get("resolver") or {}).get("status")
     result.n_transcript_stubbed = transcript.n_stubbed
     # A trial that ran out of steps without submitting still counts: the

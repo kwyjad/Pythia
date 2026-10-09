@@ -8,7 +8,7 @@
 * ``write_evidence`` stores one ``sibyl_evidence`` row per tool result a
   trial saw. The rows are built on the trial (``TrialResult.evidence_rows``)
   and written here, on the main thread, after the question's trials end.
-* ``process_measures`` turns a run's outcomes into the five process figures
+* ``process_measures`` turns a run's outcomes into the process figures
   ``sibyl_runs`` carries. They describe HOW Sibyl researched, never whether
   it was right: accuracy is measured only against resolutions.
 * ``reference_weight`` picks the weight of Sibyl's reference in the
@@ -85,8 +85,18 @@ def _share(num: float, den: float) -> Optional[float]:
     return (num / den) if den else None
 
 
+def _is_wikipedia(url: str) -> bool:
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    try:
+        host = (urlparse(str(url)).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "wikipedia.org" or host.endswith(".wikipedia.org")
+
+
 def process_measures(outcomes: Sequence[Any]) -> Dict[str, Optional[float]]:
-    """The five process figures over a run's question outcomes.
+    """The process figures over a run's question outcomes.
 
     * share_resolver_done: trials whose resolver plan slot ended 'done'.
     * docs_per_trial: documents read per trial.
@@ -96,6 +106,16 @@ def process_measures(outcomes: Sequence[Any]) -> Dict[str, Optional[float]]:
       window month, at the bucket floor.
     * mean_jsd_from_reference: mean month-1 JSD of the raw pool from the
       reference, over forecasts that had both.
+
+    Research depth (Oct 2026, review Part 1):
+
+    * median_docs_per_trial: the median trial's documents read.
+    * share_trials_under_doc_gate: trials that read fewer documents than
+      SIBYL_SUBMIT_MIN_DOCS (they ended at the step limit).
+    * steps_per_trial / tool_calls_per_trial: means over trials.
+    * share_docs_wikipedia: documents read whose host ends in wikipedia.org.
+    * n_submit_gate_unmet: trials the step limit ended with the submit gate
+      unmet.
     """
     from sibyl.spd import _js_divergence  # noqa: PLC0415
 
@@ -120,12 +140,32 @@ def process_measures(outcomes: Sequence[Any]) -> Dict[str, Optional[float]]:
         if getattr(o, "raw_month1", None) and getattr(o, "reference_month1", None)
         and len(o.raw_month1) == len(o.reference_month1)
     ]
+    doc_counts = sorted(int(getattr(t, "n_docs_read", 0) or 0) for t in trials)
+    median_docs: Optional[float] = None
+    if doc_counts:
+        mid = len(doc_counts) // 2
+        median_docs = (
+            float(doc_counts[mid]) if len(doc_counts) % 2
+            else (doc_counts[mid - 1] + doc_counts[mid]) / 2.0
+        )
+    under_gate = sum(1 for n in doc_counts if n < int(_cfg.SUBMIT_MIN_DOCS))
+    steps = sum(int(getattr(t, "steps_used", 0) or 0) for t in trials)
+    calls = sum(int(getattr(t, "n_tool_calls", 0) or 0) for t in trials)
+    doc_urls = [u for t in trials for u in (getattr(t, "docs_read_urls", None) or [])]
+    wiki = sum(1 for u in doc_urls if _is_wikipedia(u))
+    gate_unmet = sum(1 for t in trials if getattr(t, "submit_gate_unmet", False))
     return {
         "share_resolver_done": _share(resolver_done, n_trials),
         "docs_per_trial": _share(docs, n_trials),
         "share_ledger_dated_figure": _share(dated_fig, len(items)),
         "share_forecasts_at_floor": _share(at_floor, len(written)),
         "mean_jsd_from_reference": (sum(jsds) / len(jsds)) if jsds else None,
+        "median_docs_per_trial": median_docs,
+        "share_trials_under_doc_gate": _share(under_gate, n_trials),
+        "steps_per_trial": _share(steps, n_trials),
+        "tool_calls_per_trial": _share(calls, n_trials),
+        "share_docs_wikipedia": _share(wiki, len(doc_urls)),
+        "n_submit_gate_unmet": (gate_unmet if n_trials else None),
     }
 
 

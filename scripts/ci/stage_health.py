@@ -438,7 +438,47 @@ def _sibyl(con, hs_run_id: str, sibyl_run_id: str = "") -> Dict[str, Any]:
                     f"{failed} of {calls} searches failed ({100 * share:.0f}%, "
                     f"limit {100 * limit:.0f}%; {trips} breaker trip(s))"
                 )
+
+    # Research depth (Oct 2026, review Part 1): warned about, never failed.
+    # A shallow run is a fact about the research, not a broken stage.
+    depth_cols = ("median_docs_per_trial", "share_docs_wikipedia",
+                  "share_trials_under_doc_gate", "steps_per_trial",
+                  "tool_calls_per_trial", "n_submit_gate_unmet")
+    present = [c for c in depth_cols if _has_column(con, "sibyl_runs", c)]
+    if present:
+        drow = _q(
+            con,
+            f"SELECT {', '.join(present)} FROM sibyl_runs WHERE sibyl_run_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            [out["sibyl_run_id"]],
+        )
+        if drow:
+            depth = {c: drow[0][i] for i, c in enumerate(present)}
+            median_floor, wiki_limit = _depth_limits()
+            warnings: List[str] = []
+            med = depth.get("median_docs_per_trial")
+            if med is not None and float(med) < median_floor:
+                warnings.append(
+                    f"median documents per trial {float(med):.1f} is below {median_floor:g}"
+                )
+            wiki = depth.get("share_docs_wikipedia")
+            if wiki is not None and float(wiki) > wiki_limit:
+                warnings.append(
+                    f"{100 * float(wiki):.0f}% of documents read were Wikipedia "
+                    f"(limit {100 * wiki_limit:.0f}%)"
+                )
+            out["research_depth"] = depth
+            out["depth_warnings"] = warnings
     return out
+
+
+def _depth_limits() -> tuple:
+    try:
+        from sibyl.config import DEPTH_WARN_MEDIAN_DOCS, WIKIPEDIA_WARN_SHARE  # noqa: PLC0415
+
+        return float(DEPTH_WARN_MEDIAN_DOCS), float(WIKIPEDIA_WARN_SHARE)
+    except Exception:  # noqa: BLE001
+        return 5.0, 0.5
 
 
 def _degraded_share() -> float:
@@ -544,6 +584,23 @@ def _markdown(rep: Dict[str, Any]) -> str:
         if sb.get("degraded"):
             L.append(f"**DEGRADED** — {sb.get('degraded_reason')}")
             L.append("")
+        depth = sb.get("research_depth") or {}
+        if depth:
+            med = depth.get("median_docs_per_trial")
+            wiki = depth.get("share_docs_wikipedia")
+            L.append(
+                "Research depth: median "
+                + ("—" if med is None else f"{float(med):.1f}")
+                + " document(s) per trial · Wikipedia share "
+                + ("—" if wiki is None else f"{100 * float(wiki):.0f}%")
+                + f" · {depth.get('n_submit_gate_unmet') or 0} trial(s) ended at the "
+                "step limit with the submit gate unmet"
+            )
+            L.append("")
+            for w in sb.get("depth_warnings") or []:
+                L.append(f"**Shallow research** — {w}")
+            if sb.get("depth_warnings"):
+                L.append("")
         if sb.get("by_status"):
             L.append("| status | questions |")
             L.append("|---|--:|")
@@ -682,6 +739,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sb = rep.get("sibyl") or {}
     if sb.get("degraded"):
         print(f"::warning title=Sibyl research degraded::{sb.get('degraded_reason')}")
+    for w in sb.get("depth_warnings") or []:
+        print(f"::warning title=Sibyl research shallow::{w}")
 
     return 0
 

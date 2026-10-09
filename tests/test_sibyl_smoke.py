@@ -153,12 +153,12 @@ def test_end_to_end_single_question(smoke_env):
         for trial in trials:
             assert trial["quantiles"] is not None
             steps = trial["belief_trace"]
-            assert [s["action"] for s in steps] == ["brave_search", "fetch_url", "submit"]
+            assert [s["action"] for s in steps] == ["brave_search", "fetch_url", "fetch_url", "submit"]
             assert [c["action"] for c in steps[0]["calls"]] == [
                 "brave_search", "brave_search", "reliefweb_search"]
             assert steps[0]["calls"][1]["options"]["lane"] == "reference"
-            assert (trial["n_search_ok"], trial["n_docs_read"]) == (3, 3)
-            assert steps[2]["belief"]["plan"]["disconfirm"]["status"] == "done"
+            assert (trial["n_search_ok"], trial["n_docs_read"]) == (3, 5)
+            assert steps[3]["belief"]["plan"]["disconfirm"]["status"] == "done"
             assert steps[0]["belief"]["month_1"]["quantiles_positive"]
             assert trial["month_1"]["p_zero"] == pytest.approx(0.1)
             assert trial["month_6"]["p_zero"] == pytest.approx(0.15)
@@ -169,9 +169,9 @@ def test_end_to_end_single_question(smoke_env):
         assert rec[5] is not None and rec[5] > 0.0
         assert rec[6] is not None and rec[6] == pytest.approx(0.0, abs=1e-9)
 
-        # Costs: 9 Opus calls x $0.10 + 6 Brave queries x $0.005.
-        assert rec[7] == pytest.approx(0.93, abs=1e-6)
-        assert rec[8] == pytest.approx(0.9, abs=1e-6)
+        # Costs: 12 Opus calls x $0.10 + 6 Brave queries x $0.005.
+        assert rec[7] == pytest.approx(1.23, abs=1e-6)
+        assert rec[8] == pytest.approx(1.2, abs=1e-6)
         assert rec[9] == pytest.approx(0.03, abs=1e-6)
         assert rec[10] is not None  # asOf persisted for deferred calibration
 
@@ -203,6 +203,11 @@ def test_end_to_end_single_question(smoke_env):
         assert run_row[0] == HS_RUN_ID
         assert (run_row[1], run_row[2]) == (1, 1)
         assert run_row[3] is False
+        depth = con.execute(
+            "SELECT median_docs_per_trial, share_trials_under_doc_gate, steps_per_trial, "
+            "tool_calls_per_trial, share_docs_wikipedia, n_submit_gate_unmet, n_docs_read "
+            "FROM sibyl_runs WHERE sibyl_run_id = ?", [sibyl_run_id]).fetchone()
+        assert depth == (5.0, 0.0, 4.0, 8.0, 0.0, 0, 15)
 
         # --- spend itemised in the existing cost ledger ----------------------
         ledger = con.execute(
@@ -215,9 +220,9 @@ def test_end_to_end_single_question(smoke_env):
             [Q1],
         ).fetchall()
         by_provider = {r[0]: (r[1], r[2]) for r in ledger}
-        assert by_provider["anthropic"][0] == 9
+        assert by_provider["anthropic"][0] == 12
         assert by_provider["brave"][0] == 6
-        assert by_provider["anthropic"][1] == pytest.approx(0.9, abs=1e-6)
+        assert by_provider["anthropic"][1] == pytest.approx(1.2, abs=1e-6)
         assert by_provider["brave"][1] == pytest.approx(0.03, abs=1e-6)
     finally:
         con.close()
