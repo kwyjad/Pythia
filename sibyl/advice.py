@@ -787,6 +787,16 @@ def generate(con, *, as_of_month: Optional[str] = None) -> List[Dict[str, Any]]:
                 row["findings"]["shadow"] = shadow_comparison(con)
     except Exception as exc:  # noqa: BLE001
         logger.warning("sibyl.advice: shadow comparison failed: %s", exc)
+    # Rearranged variants (sibyl/score_variants.py): each minus Sibyl, "not
+    # yet" below SIBYL_VARIANT_MIN_QUESTIONS. A finding, never adopted.
+    try:
+        from sibyl.score_variants import variant_comparison  # noqa: PLC0415
+
+        for row in rows:
+            if row["scope"] == "pooled":
+                row["findings"]["variants"] = variant_comparison(con)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sibyl.advice: variant comparison failed: %s", exc)
     # Failure types from the post-mortems (sibyl/postmortem.py): pooled row
     # only, a finding for the dashboard; never in the advice text.
     try:

@@ -314,6 +314,14 @@ REFERENCE_WEIGHT_MODE = _env_str("SIBYL_REFERENCE_WEIGHT_MODE", "fitted").strip(
 POOL_WEIGHT_GRID = (0.25, 0.5, 0.75)
 POOL_WEIGHT_MIN_QUESTIONS = _env_int("SIBYL_POOL_WEIGHT_MIN_QUESTIONS", 20)
 POOL_WEIGHT_PRIOR_QUESTIONS = _env_int("SIBYL_POOL_WEIGHT_PRIOR_QUESTIONS", 20)
+# Rearranged variants (review Part 3, sibyl/score_variants.py): the
+# disagreement-weighted variant puts 0.75 on the reference when the largest
+# pairwise month-1 JSD among the pooled trials is above DW_HIGH_JSD, 0.25
+# below DW_LOW_JSD, else 0.5. Fixed: never fitted on outcomes. A variant's
+# comparison with sibyl says "not yet" below VARIANT_MIN_QUESTIONS.
+DW_HIGH_JSD = _env_float("SIBYL_DW_HIGH_JSD", 0.10)
+DW_LOW_JSD = _env_float("SIBYL_DW_LOW_JSD", 0.03)
+VARIANT_MIN_QUESTIONS = _env_int("SIBYL_VARIANT_MIN_QUESTIONS", 20)
 
 # Post-mortems (sibyl/postmortem.py): a note on each newly resolved
 # question, and per class, once POSTMORTEM_MIN_NOTES notes exist, lessons of
