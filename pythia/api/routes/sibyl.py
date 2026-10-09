@@ -180,7 +180,19 @@ def sibyl_summary(
     )
     for key in SHADOW_FIELDS:
         run.setdefault(key, None)
-    return {"run": run, "questions": questions, "shadow": _shadow_comparison(con, include_test)}
+    return {"run": run, "questions": questions, "shadow": _shadow_comparison(con, include_test),
+            "pack": _pack_comparison(con, include_test)}
+
+
+def _pack_comparison(con, include_test: bool) -> Optional[Dict[str, Any]]:
+    """The structured-data pack arms compared (Part 6; a finding, never a switch)."""
+    try:
+        from sibyl.pack import pack_comparison  # noqa: PLC0415 - lazy, API process
+
+        return pack_comparison(con, include_test=include_test)
+    except Exception:  # noqa: BLE001
+        logger.debug("sibyl pack comparison failed", exc_info=True)
+        return None
 
 
 def _shadow_comparison(con, include_test: bool) -> Optional[Dict[str, Any]]:
@@ -369,6 +381,7 @@ def sibyl_question_detail(
         ("trial_checks_json", "trial_checks"),
         # Part 5: the resolving source's reading shown to the trials.
         ("resolver_reading_json", "resolver_reading"),
+        ("pack_json", "pack"),
     ):
         rec[dst_key] = _maybe_json(rec.pop(src_key, None))
 

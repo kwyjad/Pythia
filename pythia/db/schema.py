@@ -2147,6 +2147,12 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # source, its aggregates or the reason it could not be read.
                 # NULL on earlier rows and where nothing was shown.
                 "resolver_reading_json": "TEXT",
+                # The structured-data starting pack (Oct 2026, review Part 6,
+                # sibyl/pack.py): the arm (pack | no_pack | pack_empty; NULL in
+                # backtest and on earlier rows) and the sections shown,
+                # dropped for length, the block's size and any load error.
+                "pack_arm": "TEXT",
+                "pack_json": "TEXT",
                 # The shadow arm (Oct 2026, Part 7): the shadow series (the
                 # pool with the Claude lane C trial replaced by the shadow
                 # model's), its trial, and its spend. Never in the forecast

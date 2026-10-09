@@ -213,6 +213,8 @@ def test_summary_carries_the_shadow_arm_on_both_schemas(tmp_path, monkeypatch, r
     body = c.get("/v1/sibyl/summary").json()
     assert body["run"]["shadow_status"] is None and body["run"]["shadow_cost_usd"] is None
     assert body["shadow"]["series"]["brier"]["status"] == "not_yet"
+    # Part 6: the pack comparison rides beside it (no arms recorded yet).
+    assert body["pack"]["groups"] == {} and body["pack"]["min_questions_scored"] == 20
 
     con = duckdb.connect(str(db))
     con.execute("ALTER TABLE sibyl_runs ADD COLUMN shadow_status TEXT")
