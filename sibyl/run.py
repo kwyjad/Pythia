@@ -12,8 +12,9 @@ then controls, then fill picks, so a cap removes fill picks first):
 1. build Sibyl's reference (sibyl/reference.py),
 2. run K independent agentic trials on lanes A, B, C in parallel threads
    (a control runs one, on lane A); when they disagree or their pool
-   departs far from the reference, run up to K_MAX - K more on lanes D and E
-   (sibyl/trials.py),
+   departs far from the reference, run up to K_MAX - K more: lanes R and E
+   on disagreement (R, the reconciler, starts from a brief of the earlier
+   trials, sibyl/reconcile.py), lanes D and E on departure (sibyl/trials.py),
 3. leave out an outlier trial, then linear-pool the trial CDFs,
 4. calibrate (identity hook while CALIBRATION_ENABLED is off),
 5. serialize to the native SPD format beside the standard track,
@@ -73,7 +74,15 @@ from sibyl.leakage import LeakageStats
 from sibyl.measure import process_measures, reference_weight, write_evidence
 from sibyl.postmortem import lessons_block_for
 from sibyl.shadow import ShadowContext, run_shadow_phase, shadow_setup
-from sibyl.trials import extra_trials_rule, month_median, outlier_indices, run_trial_batch
+from sibyl.reconcile import RECONCILE_LANE, build_brief as build_reconcile_brief
+from sibyl.reconcile import median_inside as reconcile_median_inside
+from sibyl.trials import (
+    RULE_DISAGREEMENT,
+    extra_trials_rule,
+    month_median,
+    outlier_indices,
+    run_trial_batch,
+)
 from sibyl.select_questions import (
     SibylQuestion,
     hs_run_is_test,
@@ -246,6 +255,8 @@ def process_question(
 
     is_control = question.is_control
 
+    briefs: Dict[str, str] = {}
+
     def _run_one(trial_index: int, lane: str, sink: List[Dict[str, Any]]) -> TrialResult:
         return run_trial(
             question,
@@ -261,6 +272,7 @@ def process_question(
             lane=lane,
             lessons=lessons,
             log_sink=sink,
+            trial_brief=briefs.get(lane, ""),
         )
 
     def _batch(jobs, role: str) -> None:
@@ -309,6 +321,27 @@ def process_question(
                 (n_production + j, LANE_IDS[(n_production + j) % len(LANE_IDS)])
                 for j in range(_cfg.K_MAX - n_production)
             ]
+            if rule == RULE_DISAGREEMENT and extra:
+                # The reconciler (review Part 4) takes D's place: it starts
+                # from a brief of what the production trials found and where
+                # they differ, built here on the main thread.
+                production = [t for t in valid if t.role == "production"]
+                try:
+                    brief = build_reconcile_brief(production, metric)
+                    briefs[RECONCILE_LANE] = brief.text
+                    outcome.trial_checks["reconcile"] = {
+                        "max_pairwise_jsd_before": measures.get("max_pairwise_jsd"),
+                        "brief_chars": brief.chars,
+                        "brief_items": brief.n_items,
+                        "brief_items_dropped": brief.n_items_dropped,
+                        "dispute": brief.dispute,
+                    }
+                    extra = [
+                        (idx, RECONCILE_LANE if lane == "D" else lane) for idx, lane in extra
+                    ]
+                except (ValueError, KeyError) as exc:
+                    logger.warning("sibyl.run: no reconcile brief for %s (%s); lanes D/E run",
+                                   question.question_id, exc)
             logger.info(
                 "sibyl.run: %s calls for %d extra trial(s) (%s, %s)",
                 question.question_id, len(extra), rule, measures,
@@ -316,6 +349,16 @@ def process_question(
             outcome.extra_trials_rule = rule
             _batch(extra, rule)
     outcome.trial_checks["n_trials_run"] = len(outcome.trials)
+    rec = outcome.trial_checks.get("reconcile")
+    if rec is not None:
+        r_trials = [t for t in outcome.trials if t.lane == RECONCILE_LANE]
+        production = [t for t in _valid() if t.role == "production"]
+        r = r_trials[0] if r_trials else None
+        rec["r_trial_index"] = r.trial_index if r else None
+        rec["r_valid"] = bool(r and r.ok and r.evidence_ok)
+        rec["r_median_inside_production_range"] = (
+            reconcile_median_inside(r, production) if r is not None and r.ok else None
+        )
 
     # Outlier guard: a trial whose month-1 median sits more than
     # OUTLIER_LOG10 orders of magnitude from the others' is left out of the
