@@ -2007,6 +2007,17 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "share_ledger_dated_figure": "DOUBLE",
                 "share_forecasts_at_floor": "DOUBLE",
                 "mean_jsd_from_reference": "DOUBLE",
+                # Research depth (Oct 2026, review Part 1): the median
+                # trial's documents read, the share of trials under the
+                # submit gate's document count, mean steps and tool calls per
+                # trial, the share of documents read from wikipedia.org, and
+                # the trials the step limit ended with the gate unmet.
+                "median_docs_per_trial": "DOUBLE",
+                "share_trials_under_doc_gate": "DOUBLE",
+                "steps_per_trial": "DOUBLE",
+                "tool_calls_per_trial": "DOUBLE",
+                "share_docs_wikipedia": "DOUBLE",
+                "n_submit_gate_unmet": "INTEGER",
                 # The reference weight the run's pool used, and where it came
                 # from ('fitted' | 'fixed' | 'backtest').
                 "reference_weight": "DOUBLE",

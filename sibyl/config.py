@@ -92,8 +92,15 @@ OUTLIER_LOG10 = _env_float("SIBYL_OUTLIER_LOG10", 1.5)
 MAX_STEPS = _env_int("SIBYL_MAX_STEPS", 12)
 MAX_ACTIONS_PER_STEP = _env_int("SIBYL_MAX_ACTIONS_PER_STEP", 3)
 # Documents a trial must have read before a submit is accepted (the step
-# limit overrides it; the evidence gate below does not).
-SUBMIT_MIN_DOCS = _env_int("SIBYL_SUBMIT_MIN_DOCS", 3)
+# limit overrides it; the evidence gate below does not). Raised from 3 to 5
+# in Oct 2026: FutureSearch's typical run reads 5 to 20 pages. A document
+# counts once (one URL, one text hash) and a failed fetch never counts.
+SUBMIT_MIN_DOCS = _env_int("SIBYL_SUBMIT_MIN_DOCS", 5)
+# A run whose median documents per trial is below this, or whose share of
+# documents read from wikipedia.org is above WIKIPEDIA_WARN_SHARE, is warned
+# about (never failed) by scripts/ci/stage_health.py.
+DEPTH_WARN_MEDIAN_DOCS = _env_float("SIBYL_DEPTH_WARN_MEDIAN_DOCS", 5.0)
+WIKIPEDIA_WARN_SHARE = _env_float("SIBYL_WIKIPEDIA_WARN_SHARE", 0.5)
 # Above this many characters the oldest tool results in a trial's transcript
 # are replaced by a one-line stub that keeps the URL (sibyl/transcript.py).
 # 400,000 characters is about 100,000 tokens, well inside Opus 5.5's window.

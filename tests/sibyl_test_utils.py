@@ -128,8 +128,9 @@ def make_plan_submit_response(plan: dict | None = None) -> str:
 
 
 def research_script():
-    """A fake agent that does real research: three searches, three reads,
-    then a submit with every plan slot done. Cycles per trial."""
+    """A fake agent that does real research: three searches, five reads
+    (the submit gate's SIBYL_SUBMIT_MIN_DOCS), then a submit with every plan
+    slot done. Cycles per trial."""
     return [
         make_actions_response([
             ("brave_search", {"query": "conflict latest", "lane": "news"}),
@@ -140,6 +141,10 @@ def research_script():
             ("fetch_url", {"url": "https://news.example.com/a", "extraction_request": "deaths"}),
             ("fetch_url", {"url": "https://news.example.com/b", "extraction_request": "deaths"}),
             ("fetch_url", {"url": "https://news.example.com/c", "extraction_request": "deaths"}),
+        ], plan=ALL_DONE_PLAN),
+        make_actions_response([
+            ("fetch_url", {"url": "https://news.example.com/d", "extraction_request": "deaths"}),
+            ("fetch_url", {"url": "https://news.example.com/e", "extraction_request": "deaths"}),
         ], plan=ALL_DONE_PLAN),
         make_plan_submit_response(),
     ]
@@ -152,8 +157,10 @@ def stub_tools(monkeypatch) -> None:
     from sibyl.tools import ToolResult
 
     def fake_fetch(url, as_of, **kw):
+        # Each URL carries its own text: a document counts as read once by
+        # URL and once by text hash (sibyl.agent.run_trial).
         return ToolResult(tool="fetch_url", ok=True, text=f"Content of {url}:\nclashes; 12 killed",
-                          doc_text="clashes; 12 killed", url=url)
+                          doc_text=f"clashes; 12 killed ({url})", url=url)
 
     def fake_rw(query, as_of, **kw):
         return ToolResult(tool="reliefweb_search", ok=True, text="1. Sitrep",

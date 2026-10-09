@@ -30,6 +30,7 @@ on:
       - "tests/fixtures/sibyl/**"
       - "pythia/config.yaml"
       - "pythia/llm_profiles.py"
+      - "scripts/ci/stage_health.py"
       - ".github/workflows/sibyl-ci.yml"
   pull_request:
     paths:
@@ -53,6 +54,7 @@ on:
       - "tests/fixtures/sibyl/**"
       - "pythia/config.yaml"
       - "pythia/llm_profiles.py"
+      - "scripts/ci/stage_health.py"
       - ".github/workflows/sibyl-ci.yml"
   workflow_dispatch: {}
 
@@ -96,5 +98,6 @@ jobs:
                      tests/test_sibyl_measurement.py \
                      tests/test_sibyl_shadow.py \
                      tests/test_sibyl_postmortem.py \
+                     tests/test_sibyl_research_depth.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

@@ -481,6 +481,13 @@ export type SibylRun = {
   mean_jsd_from_reference?: number | null;
   reference_weight?: number | null;
   reference_weight_source?: string | null;
+  // Research depth (Oct 2026): documents, steps, tool calls, Wikipedia share.
+  median_docs_per_trial?: number | null;
+  share_trials_under_doc_gate?: number | null;
+  steps_per_trial?: number | null;
+  tool_calls_per_trial?: number | null;
+  share_docs_wikipedia?: number | null;
+  n_submit_gate_unmet?: number | null;
   // The shadow arm (Oct 2026): whether it ran, on what, and its own spend.
   shadow_status?: string | null;
   shadow_model?: string | null;

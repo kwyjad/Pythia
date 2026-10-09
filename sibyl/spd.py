@@ -470,10 +470,12 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             share_resolver_done, docs_per_trial, share_ledger_dated_figure,
             share_forecasts_at_floor, mean_jsd_from_reference,
             reference_weight, reference_weight_source, shadow_status, shadow_model,
-            n_shadow_trials, n_shadow_series, n_shadow_skipped, shadow_cost_usd
+            n_shadow_trials, n_shadow_series, n_shadow_skipped, shadow_cost_usd,
+            median_docs_per_trial, share_trials_under_doc_gate, steps_per_trial,
+            tool_calls_per_trial, share_docs_wikipedia, n_submit_gate_unmet
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -512,5 +514,11 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("n_shadow_series"),
             record.get("n_shadow_skipped"),
             record.get("shadow_cost_usd", 0.0),
+            record.get("median_docs_per_trial"),
+            record.get("share_trials_under_doc_gate"),
+            record.get("steps_per_trial"),
+            record.get("tool_calls_per_trial"),
+            record.get("share_docs_wikipedia"),
+            record.get("n_submit_gate_unmet"),
         ],
     )
