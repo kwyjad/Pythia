@@ -13,6 +13,8 @@ import type {
   SibylQuestionsResponse,
   SibylRun,
   SibylShadowComparison,
+  SibylPackComparison,
+  SibylPackStat,
   SibylShadowStat,
   SibylRunsResponse,
   SibylSummaryResponse,
@@ -332,6 +334,56 @@ export const ShadowArm = ({
           </div>
         </div>
       ) : null}
+    </div>
+  );
+};
+
+// The structured-data pack (sibyl/pack.py): half the questions start from the
+// pipeline's feeds. Arms compared apart for selected questions and controls;
+// "not yet" below the thresholds. A finding; nothing here switches it on.
+const fmtPackStat = (st: SibylPackStat | undefined, min: number, n: number) => {
+  if (!st || st.status !== "ok") return `not yet (${n} of ${min})`;
+  const f = (v: number | null | undefined) => (v === null || v === undefined ? "?" : v.toFixed(4));
+  return `${f(st.brier_diff)} [${f(st.lo)}, ${f(st.hi)}]`;
+};
+
+export const PackArms = ({ pack }: { pack: SibylPackComparison | null | undefined }) => {
+  if (!pack || !pack.groups || Object.keys(pack.groups).length === 0) return null;
+  const minI = pack.min_questions_immediate;
+  const minS = pack.min_questions_scored;
+  const num = (v: unknown) => (typeof v === "number" ? v.toFixed(3) : "—");
+  return (
+    <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+      <div className="flex items-center gap-1 text-xs uppercase text-fred-muted">
+        Structured-data starting pack
+        <InfoTooltip text="Half the questions (by a hash of the question id) start from the pipeline's own feeds. Immediate measures show from ten questions an arm. The outcome is Sibyl's Brier minus its own reference's, per question; negative means the research beat the reference. Pack minus no pack is shown from twenty scored questions an arm, with a 90% interval that resamples questions." />
+      </div>
+      {Object.entries(pack.groups).map(([group, g]) => (
+        <div key={group} className="mt-2 text-xs text-fred-text">
+          <div className="font-medium">{group === "control" ? "Controls" : "Selected questions"}</div>
+          {Object.entries(g.arms).map(([arm, a]) => (
+            <div key={arm} className="ml-2">
+              <span className="text-fred-muted">{arm}: </span>
+              {a.n_questions} questions
+              {a.immediate.status === "ok"
+                ? ` · JSD vs standard ${num(a.immediate.jsd_vs_standard)}, from reference ${num(
+                    a.immediate.jsd_month1_from_reference,
+                  )}, documents per trial ${num(a.immediate.docs_per_trial)}`
+                : ` · not yet (${a.n_questions} of ${minI})`}
+              {" · gain over reference "}
+              {fmtPackStat(a.gain_over_reference, minS, a.n_scored)}
+            </div>
+          ))}
+          <div className="ml-2">
+            <span className="text-fred-muted">Pack minus no pack, Δ Brier gain: </span>
+            {fmtPackStat(
+              g.pack_minus_no_pack,
+              minS,
+              Math.min(g.pack_minus_no_pack.n_pack ?? 0, g.pack_minus_no_pack.n_no_pack ?? 0),
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 };
@@ -753,6 +805,7 @@ const SibylClient = ({
 
       <ProcessMeasures run={run} />
       <ShadowArm run={run} shadow={summary.shadow} />
+      <PackArms pack={summary.pack} />
 
       <div className="overflow-x-auto rounded-lg border border-fred-secondary">
         <table className="min-w-full text-sm">

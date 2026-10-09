@@ -224,6 +224,18 @@ RESOLVER_READING = _env_bool("SIBYL_RESOLVER_READING", True)
 # a conflict question shows no reading.
 LIVE_LOOKUPS_ENABLED = _env_bool("SIBYL_LIVE_LOOKUPS_ENABLED", False)
 
+# --- The structured-data starting pack (Oct 2026, review Part 6) ------------
+# A hashed share of questions (salt "sibyl_pack:", controls included) is shown
+# the pipeline's structured feeds as a starting pack (sibyl/pack.py). The
+# conflict forecasts (VIEWS, conflictforecast.org, ACLED CAST) are left out
+# unless PACK_INCLUDE_FORECASTS. Nothing in backtest. The comparison shows
+# immediate measures from 10 questions an arm, the outcome from 20.
+PACK_SHARE = _env_float("SIBYL_PACK_SHARE", 0.5)
+PACK_INCLUDE_FORECASTS = _env_bool("SIBYL_PACK_INCLUDE_FORECASTS", False)
+PACK_MAX_CHARS = _env_int("SIBYL_PACK_MAX_CHARS", 24000)
+PACK_MIN_QUESTIONS_IMMEDIATE = _env_int("SIBYL_PACK_MIN_QUESTIONS_IMMEDIATE", 10)
+PACK_MIN_QUESTIONS_SCORED = _env_int("SIBYL_PACK_MIN_QUESTIONS_SCORED", 20)
+
 # --- Search ------------------------------------------------------------------
 BRAVE_MAX_RESULTS = _env_int("SIBYL_BRAVE_MAX_RESULTS", 8)
 BRAVE_TIMEOUT_SEC = _env_int("SIBYL_BRAVE_TIMEOUT_SEC", 20)

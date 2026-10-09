@@ -875,3 +875,50 @@ segment: under $0.01 a trial, about $0.3 to $0.5 a run.
 
 Tests: `tests/test_sibyl_resolver_reading.py`, against the real response
 shape (`#country+code` or a country name only), including a 200 HTML body.
+
+## 2026-10-09 — Review Part 6: a structured-data starting pack, as an experiment
+
+Evidence: Sibyl was built to be independent of the pipeline's structured
+feeds, and its trials spend steps finding on the open web what the pipeline
+already holds (food security, INFORM, GDACS history, HDX Signals, ENSO,
+NMME, CrisisWatch, GDELT, ACLED political events, ACAPS). Whether a starting
+pack helps the forecast, or only pulls Sibyl toward the ensemble and costs
+the independence the comparison rests on, is not known, so it is measured.
+
+Changed:
+
+- `sibyl/pack.py`. `pack_arm` hashes `"sibyl_pack:" + question_id` against
+  `SIBYL_PACK_SHARE` (0.5), its own salt; controls are hashed too.
+- `build_pack` on the main thread: `_load_structured_data` with no HS run
+  and no RC level (so the ensemble's grounding and adversarial checks never
+  load) plus the NMME loader; only `PACK_SECTIONS`, under the SPD prompt's
+  hazard gates and rendered by its formatters; never the grounding, the
+  adversarial check, ReliefWeb reports or any of the ensemble's own outputs;
+  conflict forecast products only with `SIBYL_PACK_INCLUDE_FORECASTS=1`;
+  food security left out where the resolver reading already shows Phase 3+.
+  Capped at `SIBYL_PACK_MAX_CHARS` (24,000), whole sections dropped from the
+  end of the priority order and named.
+- The block follows the resolver reading in the question segment, for every
+  trial and the shadow trial. Nothing in backtest.
+- Recorded: `sibyl_forecasts.pack_arm` (pack | no_pack | pack_empty) and
+  `pack_json`.
+- `pack_comparison`: selected questions and controls apart; immediate
+  measures from 10 questions an arm; the gain over Sibyl's own reference
+  (`sibyl` minus `__ext_sibyl_ref` Brier) from 20 scored questions an arm,
+  with the pack-minus-no-pack difference and a question-resampling interval.
+  In `findings.pack`, `/v1/sibyl/summary` and a Sibyl page card.
+
+Not done: no extraction from `forecaster/prompts.py` (the pack calls the
+same formatters, so SPD prompts are untouched; a test holds that the SPD
+prompt module never names Sibyl). Nothing switches the pack on for every
+question. Whether to include the forecast products, and the share, are the
+owner's to decide once the comparison has numbers.
+
+Cost: the pack adds up to 24,000 characters (about 6,000 tokens, typically
+2,000 to 4,000) to the cached question segment of half the questions. At
+cache-read prices after the first step, roughly +$0.03 to $0.08 a trial on
+pack questions: about +$1 to $3 a run. A few seconds of DB reads per pack
+question.
+
+Tests: `tests/test_sibyl_pack.py`; an assertion in
+`tests/test_api_sibyl_routes.py`.

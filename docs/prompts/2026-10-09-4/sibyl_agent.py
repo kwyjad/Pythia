@@ -162,7 +162,7 @@ You forecast two months of this window: MONTH 1 ({month_1}) and MONTH 6 ({month_
 {resolver_card}
 
 === REFERENCE (your prior) ===
-{base_rate_block}{resolver_reading_block}{pack_block}{track_record_block}"""
+{base_rate_block}{resolver_reading_block}{track_record_block}"""
 
 _TASK = """=== YOUR TASK EACH STEP ===
 Decide your next actions and update your belief state.
@@ -472,7 +472,6 @@ def build_step_prompt(
     lessons: str = "",
     trial_brief: str = "",
     resolver_reading: str = "",
-    pack: str = "",
 ):
     """Build a step's prompt as ``(text, is_cache_breakpoint)`` segments.
 
@@ -511,8 +510,6 @@ def build_step_prompt(
         # The resolving source's latest reading (sibyl/resolver_reading.py),
         # pre-rendered with its heading; '' leaves the prompt unchanged.
         resolver_reading_block=resolver_reading or "",
-        # The structured-data starting pack (sibyl/pack.py), pack arm only.
-        pack_block=pack or "",
         # The lessons block (sibyl/postmortem.py) comes pre-rendered with its
         # own heading, and is '' when there is nothing to show.
         track_record_block=render_track_record(track_record) + (lessons or ""),
@@ -673,7 +670,6 @@ def run_trial(
     cost_kind: Optional[str] = None,
     trial_brief: str = "",
     resolver_reading: str = "",
-    pack: str = "",
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -748,7 +744,6 @@ def run_trial(
                 lessons=lessons,
                 trial_brief=trial_brief,
                 resolver_reading=resolver_reading,
-                pack=pack,
             )
             prompt = "".join(text for text, _ in segments)
             # The injectable test seam takes a plain prompt string; the

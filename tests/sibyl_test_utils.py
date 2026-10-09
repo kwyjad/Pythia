@@ -29,6 +29,12 @@ def seed_db(tmp_path: Path, monkeypatch) -> str:
     db_url = f"duckdb:///{db_path}"
     monkeypatch.setenv("PYTHIA_DB_URL", db_url)
     monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+    # The structured-data pack (sibyl/pack.py) calls the forecaster's loaders,
+    # some of which fall back to the network; tests that want it set the
+    # share themselves and inject a loader.
+    import sibyl.config as _sibyl_config
+
+    monkeypatch.setattr(_sibyl_config, "PACK_SHARE", 0.0)
 
     from pythia.db.schema import connect, ensure_schema
 

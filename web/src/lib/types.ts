@@ -535,6 +535,34 @@ export type SibylShadowComparison = {
   model: string | null;
 };
 
+// The structured-data pack arms (sibyl/pack.py, Oct 2026 review Part 6).
+export type SibylPackStat = {
+  status: "ok" | "not_yet";
+  brier_diff?: number | null;
+  lo?: number | null;
+  hi?: number | null;
+  n_pack?: number;
+  n_no_pack?: number;
+};
+
+export type SibylPackArm = {
+  n_questions: number;
+  n_scored: number;
+  immediate: { status: "ok" | "not_yet"; [measure: string]: number | null | string | undefined };
+  gain_over_reference: SibylPackStat;
+};
+
+export type SibylPackGroup = {
+  arms: Record<string, SibylPackArm>;
+  pack_minus_no_pack: SibylPackStat;
+};
+
+export type SibylPackComparison = {
+  min_questions_immediate: number;
+  min_questions_scored: number;
+  groups: Record<string, SibylPackGroup>;
+};
+
 export type SibylQuestionRow = {
   sibyl_run_id?: string;
   run_id?: string | null;
@@ -564,6 +592,7 @@ export type SibylSummaryResponse = {
   run: SibylRun | null;
   questions: SibylQuestionRow[];
   shadow?: SibylShadowComparison | null;
+  pack?: SibylPackComparison | null;
 };
 
 export type SibylQuestionsResponse = {

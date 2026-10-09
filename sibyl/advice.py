@@ -797,6 +797,16 @@ def generate(con, *, as_of_month: Optional[str] = None) -> List[Dict[str, Any]]:
                 row["findings"]["variants"] = variant_comparison(con)
     except Exception as exc:  # noqa: BLE001
         logger.warning("sibyl.advice: variant comparison failed: %s", exc)
+    # The structured-data pack arms (sibyl/pack.py): selected questions and
+    # controls apart, "not yet" below the thresholds. A finding, never a switch.
+    try:
+        from sibyl.pack import pack_comparison  # noqa: PLC0415
+
+        for row in rows:
+            if row["scope"] == "pooled":
+                row["findings"]["pack"] = pack_comparison(con)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sibyl.advice: pack comparison failed: %s", exc)
     # Failure types from the post-mortems (sibyl/postmortem.py): pooled row
     # only, a finding for the dashboard; never in the advice text.
     try:

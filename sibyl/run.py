@@ -74,6 +74,7 @@ from sibyl.evidence import backfill_evidence_ok
 from sibyl.leakage import LeakageStats
 from sibyl.measure import process_measures, reference_weight, write_evidence
 from sibyl.postmortem import lessons_block_for
+from sibyl.pack import Pack, build_pack
 from sibyl.resolver_reading import LIVE_OK, LIVE_UNAVAILABLE, ResolverReading, build_resolver_reading
 from sibyl.shadow import ShadowContext, run_shadow_phase, shadow_setup
 from sibyl.reconcile import RECONCILE_LANE, build_brief as build_reconcile_brief
@@ -148,6 +149,8 @@ class QuestionOutcome:
     shadow_ctx: Optional[ShadowContext] = None
     # The resolving source's latest reading, shown to every trial (Part 5).
     resolver_reading: ResolverReading = field(default_factory=ResolverReading)
+    # The structured-data starting pack and its arm (Part 6).
+    pack: Pack = field(default_factory=Pack)
 
 
 def _write_log(**kw: Any) -> None:
@@ -264,6 +267,12 @@ def process_question(
         con, question, as_of, forecast_keys=forecast_keys, country_name=country,
     )
     outcome.resolver_reading = reading
+    # The structured-data starting pack (sibyl/pack.py): a hashed half of
+    # questions, controls included, built here before any trial starts.
+    pack = build_pack(question, as_of, forecast_keys=forecast_keys,
+                      resolver_reading_shown=bool(reading.text))
+    outcome.pack = pack
+    con = _ensure_live(con)
 
     is_control = question.is_control
 
@@ -286,6 +295,7 @@ def process_question(
             log_sink=sink,
             trial_brief=briefs.get(lane, ""),
             resolver_reading=reading.text,
+            pack=pack.text,
         )
 
     def _batch(jobs, role: str) -> None:
@@ -534,6 +544,8 @@ def process_question(
             "extra_trials_rule": outcome.extra_trials_rule,
             "trial_checks": outcome.trial_checks,
             "resolver_reading": reading.record or None,
+            "pack_arm": pack.arm,
+            "pack": pack.record() if pack.arm else None,
         },
     )
     outcome.status = "ok"
@@ -556,6 +568,7 @@ def process_question(
                 lessons=lessons,
                 log_sink=sink,
                 resolver_reading=reading.text,
+                pack=pack.text,
                 provider=provider,
                 model_id=model_id,
                 cost_kind=COST_KIND_SHADOW,
@@ -586,6 +599,7 @@ def _persist_non_ok(
     extra_trials_rule: Optional[str] = None,
     trial_checks: Optional[Dict[str, Any]] = None,
     resolver_reading: Optional[Dict[str, Any]] = None,
+    pack: Optional[Pack] = None,
 ) -> None:
     qcost = tracker.question_breakdown(question.question_id)
     persist_sibyl_forecast(
@@ -621,8 +635,21 @@ def _persist_non_ok(
             "extra_trials_rule": extra_trials_rule,
             "trial_checks": trial_checks,
             "resolver_reading": resolver_reading or None,
+            "pack_arm": pack.arm if pack is not None else None,
+            "pack": pack.record() if (pack is not None and pack.arm) else None,
         },
     )
+
+
+def _ensure_live(con: Any) -> Any:
+    """The connection, or a fresh one if a loader closed it (Part 6: the
+    pack calls forecaster loaders that open and close their own handles)."""
+    try:
+        con.execute("SELECT 1").fetchone()
+        return con
+    except Exception:  # noqa: BLE001
+        logger.warning("sibyl.run: DB connection closed under a loader; reopening")
+        return connect(read_only=False)
 
 
 def _reading_evidence(outcome: "QuestionOutcome") -> List[Any]:
@@ -757,6 +784,7 @@ def run_sibyl(
                 )
                 continue
 
+            con = _ensure_live(con)
             outcomes.append(outcome)
             n_evidence_rows += write_evidence(
                 con, sibyl_run_id=sibyl_run_id, question_id=question.question_id,
@@ -784,6 +812,7 @@ def run_sibyl(
                     extra_trials_rule=outcome.extra_trials_rule,
                     trial_checks=outcome.trial_checks,
                     resolver_reading=outcome.resolver_reading.record,
+                    pack=outcome.pack,
                 )
 
         # The cap can also fire during the LAST question's trials (no
