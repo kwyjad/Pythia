@@ -22,8 +22,9 @@ untouched). ``build_reference`` returns one bucket vector per window month:
   (that month's event rate and PA records; pooled severity below three).
 * DR/PHASE3PLUS_IN_NEED: ``SIBYL_DR_PERSISTENCE_WEIGHT`` (0.5) x the
   persistence vector of the last observed value + the rest x the 36-month
-  Phase 3+ history vector, the same for all six months. The weight is a
-  starting value with no backtest behind it.
+  Phase 3+ history vector, the same for all six months unless
+  ``SIBYL_DR_PERSISTENCE_WEIGHTS`` gives one weight per month. The weight is
+  a starting value; sibyl/reference_backtest.py scores the alternatives.
 
 It also renders the block the prompt shows in place of the old outside view.
 Every sentence describing the distribution is read off the vectors printed
@@ -174,12 +175,22 @@ def build_reference(
             pers = persistence_spd(last[0], metric) if last else None
             if not hist_probs and not pers:
                 return None
-            w = float(_cfg.DR_PERSISTENCE_WEIGHT)
+            # One weight per window month (SIBYL_DR_PERSISTENCE_WEIGHTS); at
+            # the default all six equal SIBYL_DR_PERSISTENCE_WEIGHT and the
+            # vectors, source and detail are as they were.
+            weights = tuple(float(x) for x in _cfg.DR_PERSISTENCE_WEIGHTS)
+            w = weights[0]
+            same = all(x == w for x in weights)
+            by_month: Dict[int, List[float]] = {}
             if hist_probs and pers:
-                vec = _norm([w * a + (1.0 - w) * b for a, b in zip(pers, hist_probs)])
-                source = f"pool:persistence_{w:g}+{hsrc}"
+                for m in MONTHS:
+                    wm = weights[m - 1]
+                    by_month[m] = _norm([wm * a + (1.0 - wm) * b for a, b in zip(pers, hist_probs)])
+                source = (f"pool:persistence_{w:g}+{hsrc}" if same
+                          else f"pool:persistence_schedule+{hsrc}")
             else:
                 vec = _norm(pers or hist_probs)
+                by_month = {m: list(vec) for m in MONTHS}
                 source = f"persistence:{last[1]}" if pers else hsrc
             detail = {
                 "method": "persistence_x_phase3_history",
@@ -187,8 +198,10 @@ def build_reference(
                 "last_observed": list(last) if last else None,
                 "history": hdetail,
             }
+            if hist_probs and pers and not same:
+                detail["persistence_weights"] = list(weights)
             history = _phase3_series(con, iso3, window)
-            return _finish(Reference(by_month={m: list(vec) for m in MONTHS}, source=source,
+            return _finish(Reference(by_month={m: list(v) for m, v in by_month.items()}, source=source,
                                      detail=detail, history=history,
                                      current_value=(last[0] if last else None)),
                            question, forecast_keys)

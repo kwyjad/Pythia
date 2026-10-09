@@ -1,0 +1,123 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: replay Sibyl's references over history at production timing and
+# score them (sibyl/reference_backtest.py, Oct 2026 review Part 7). Reads the
+# canonical DB, falling back to the published release DB, and writes nothing
+# back, so it is not in the pythia-resolver-db concurrency group and can never
+# queue behind or block a pipeline stage. It changes no production weight.
+name: Backtest Sibyl reference
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First forecast month (YYYY-MM)"
+        required: false
+        default: "2021-03"
+        type: string
+      end:
+        description: "Last forecast month (YYYY-MM)"
+        required: false
+        default: "2025-06"
+        type: string
+      fit_end:
+        description: "Last forecast month the drought schedule is fitted on (YYYY-MM)"
+        required: false
+        default: "2023-12"
+        type: string
+      classes:
+        description: "Comma-separated classes: ACE, DR, FL, TC"
+        required: false
+        default: "ACE,DR,FL,TC"
+        type: string
+      db_run_id:
+        description: "Optional: force the canonical DB from a specific Actions run ID"
+        required: false
+        default: ""
+        type: string
+  pull_request:
+    paths:
+      - "sibyl/reference_backtest.py"
+      - ".github/workflows/backtest_sibyl_reference.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB
+        id: db
+        continue-on-error: true
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+
+      # The release copy carries every table the backtest reads
+      # (acled_monthly_fatalities, facts_resolved); it is the fallback when no
+      # canonical artifact can be downloaded.
+      - name: Fall back to the published release DB
+        if: steps.db.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          if [ ! -f data/resolver.duckdb ]; then
+            gh release download pythia-data-latest -R "${GH_REPO}" \
+              -p resolver.duckdb -D data --clobber
+          fi
+
+      - name: Run the backtest
+        env:
+          IN_START: ${{ inputs.start || '2021-03' }}
+          IN_END: ${{ inputs.end || '2025-06' }}
+          IN_FIT_END: ${{ inputs.fit_end || '2023-12' }}
+          IN_CLASSES: ${{ inputs.classes || 'ACE,DR,FL,TC' }}
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m sibyl.reference_backtest --db data/resolver.duckdb \
+            --out-dir diagnostics/sibyl_reference_backtest \
+            --start "${IN_START}" --end "${IN_END}" \
+            --fit-end "${IN_FIT_END}" --classes "${IN_CLASSES}"
+
+      - name: Render the report into the step summary
+        if: always()
+        run: |
+          if [ -f diagnostics/sibyl_reference_backtest/reference_backtest.md ]; then
+            cat diagnostics/sibyl_reference_backtest/reference_backtest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The backtest produced no report; check the previous step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the backtest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sibyl-reference-backtest
+          path: diagnostics/sibyl_reference_backtest/
+          if-no-files-found: warn
+          retention-days: 14
