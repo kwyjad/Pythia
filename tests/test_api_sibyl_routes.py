@@ -155,6 +155,8 @@ def test_calibration_endpoint_serves_the_newest_month(tmp_path, monkeypatch, res
     assert group["n_questions"] == 24 and group["advice"]
     assert group["diagnostics"]["coverage_10_90"]["n_questions"] == 24
     assert body["arm_comparison"]["status"] == "not yet"
+    # Failure types (Oct 2026): absent from a generation written before.
+    assert body["failure_types"] is None
 
     old = c.get("/v1/sibyl/calibration?as_of_month=2026-10").json()
     assert old["as_of_month"] == "2026-10"

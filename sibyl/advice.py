@@ -787,6 +787,16 @@ def generate(con, *, as_of_month: Optional[str] = None) -> List[Dict[str, Any]]:
                 row["findings"]["shadow"] = shadow_comparison(con)
     except Exception as exc:  # noqa: BLE001
         logger.warning("sibyl.advice: shadow comparison failed: %s", exc)
+    # Failure types from the post-mortems (sibyl/postmortem.py): pooled row
+    # only, a finding for the dashboard; never in the advice text.
+    try:
+        from sibyl.postmortem import failure_rates  # noqa: PLC0415
+
+        for row in rows:
+            if row["scope"] == "pooled":
+                row["findings"]["failure_types"] = failure_rates(con)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sibyl.advice: failure rates failed: %s", exc)
     write_rows(con, rows)
     for row in rows:
         logger.info(

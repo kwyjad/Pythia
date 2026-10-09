@@ -698,3 +698,47 @@ trials).
 Tests: `tests/test_sibyl_research_depth.py`; `tests/test_sibyl_documents.py`,
 `tests/test_sibyl_smoke.py` and `tests/sibyl_test_utils.py` moved to five
 documents.
+
+## 2026-10-09 — Review Part 2: failure types in post-mortems
+
+Evidence: FutureSearch's audit of its worst forecasts found a short list of
+errors that repeat. Sibyl's notes were free text, so they could not be
+counted.
+
+Changed (`sibyl/postmortem.py`):
+
+- `FAILURE_TYPES`: seventeen labels with one-line definitions, the single
+  source for the prompt, validation, rates and the dashboard.
+- The note prompt (`pm_v2`) now carries each trial's plan findings, its
+  `baserate_reconciliation` and its ledger items (id, date, tier, kind,
+  quote, direction), inside `SIBYL_POSTMORTEM_PROMPT_MAX_CHARS` (20,000;
+  whole ledger items dropped and counted). For each resolved month it shows
+  the reference, raw-pool and published vectors and the outcome bucket; the
+  code, not the model, says whether the outcome fell inside the raw pool's
+  0.05 to 0.95 range.
+- The note returns up to three `failure_types` with `label_evidence`. The
+  model is told a label must rest on what the trial recorded then, and that
+  information that did not exist at forecast time is `unforeseeable`.
+  Validation drops unknown labels into `failure_types_raw`; a note with no
+  valid label is `unlabelled`.
+- New columns on `sibyl_postmortem_notes`: `failure_types_json`,
+  `prompt_version`. Notes from before (`prompt_version` NULL) are
+  re-labelled, oldest first, inside `SIBYL_POSTMORTEM_CAP_USD`. A `pm_v2`
+  note that came back unlabelled is not asked again.
+- `failure_rates(con)`: per class and pooled, distinct questions per label
+  over questions with a labelled note (newest note per question). Counts
+  always; a share from `SIBYL_FAILURE_RATE_MIN_QUESTIONS` (10).
+- Shown in the pooled `sibyl_calibration_advice` row's
+  `findings.failure_types`, `/v1/sibyl/calibration` and a table on the
+  Calibration tab. The lessons prompt sees each note's labels; the rates
+  never reach a trial's prompt.
+
+Not done: the labels are not used to choose analogues or to weight lessons.
+
+Cost: the note prompt is longer (up to 20,000 characters, about 5,000
+tokens), at medium effort; within the existing $5 monthly cap. Re-labelling
+the existing notes is a one-off inside the same cap. No change to the cost
+of a Sibyl run.
+
+Tests: `tests/test_sibyl_failure_types.py`, a case in
+`tests/test_api_sibyl_routes.py`.
