@@ -120,6 +120,8 @@ def test_memory_diagnostics_need_the_debug_token(api_env):
     ok = client.get("/v1/diagnostics/memory", headers={"X-Fred-Debug-Token": TOKEN})
     assert ok.status_code == 200
     assert "rss_mb" in ok.json()
+    # The peak is not what a request costs; the current figure is reported too.
+    assert ok.json()["current_rss_mb"] is None or ok.json()["current_rss_mb"] > 0
 
 
 def test_docs_and_schema_are_off_by_default():

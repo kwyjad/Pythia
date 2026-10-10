@@ -117,6 +117,7 @@ on:
       - "resolver/hazard_resolution/extract.py"
       - "resolver/tests/test_hazard_resolution_extraction.py"
       - "pythia/api/routes/costs.py"
+      - "pythia/tests/test_api_costs_cache.py"
       - "scripts/ci/poll_llm_batches.py"
       - "scripts/ci/poller_rearm.py"
       - "scripts/ci/tests/test_poller_rearm.py"
@@ -418,6 +419,7 @@ jobs:
           pytest -vv \
             pythia/tests/test_llm_batch.py \
             pythia/tests/test_api_llm_costs.py \
+            pythia/tests/test_api_costs_cache.py \
             forecaster/tests/test_batch_phase.py \
             forecaster/tests/test_prompt_v3_order.py \
             forecaster/tests/test_prompt_cache_wiring.py \

@@ -10,6 +10,7 @@ decomposition); shared helpers come from pythia.api.core.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import duckdb
@@ -129,6 +130,29 @@ def _resolve_question_row(
         row["requested_hs_run_id"] = hs_run_id
         row["requested_hs_run_id_matched"] = False
     return row
+
+
+# How many calls one ``/v1/llm_call_text`` request may ask for. A stage of the
+# question page holds a handful of calls; the cap keeps one request small.
+LLM_CALL_TEXT_MAX_IDS = 25
+_CALL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]{1,200}$")
+
+
+def fetch_call_texts(con: duckdb.DuckDBPyConnection, call_ids: List[str]) -> Dict[str, Dict[str, str]]:
+    """Prompt and response text for the given call ids, read by id alone."""
+    ids = list(dict.fromkeys(cid for cid in call_ids if cid))
+    if not ids or not _table_has_columns(con, "llm_calls", ["call_id", "prompt_text", "response_text"]):
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    out: Dict[str, Dict[str, str]] = {}
+    for cid, prompt, response in _execute(
+        con,
+        f"SELECT call_id, prompt_text, response_text FROM llm_calls WHERE call_id IN ({placeholders})",
+        ids,
+    ).fetchall():
+        if cid:
+            out[str(cid)] = {"prompt_text": prompt or "", "response_text": response or ""}
+    return out
 
 
 def _build_llm_calls_bundle(
@@ -268,33 +292,25 @@ def _build_llm_calls_bundle(
     sql += " LIMIT :limit"
     rows = _rows_from_cursor(_execute(con, sql, params))
 
-    # Query 2: fetch transcripts ONLY for rows matching transcript_phases.
-    # This keeps peak memory bounded (~4 MB for ~20 matching rows instead of
-    # ~40 MB for all 200 rows).
+    # Query 2: transcripts for the rows whose phase (or hazard-code prefix)
+    # was named. The ids come from query 1, so the text is read by a plain
+    # ``call_id IN (...)`` filter DuckDB can push into the scan. The old
+    # ``OR``/``LIKE`` filter could not be pushed down, read the text columns
+    # far beyond the rows it kept, and ran the API out of memory on
+    # 2026-10-10.
     transcript_map: Dict[str, Dict[str, str]] = {}
     has_call_id = "call_id" in available_columns
     if transcripts_included and transcript_phases and has_call_id and transcripts_available:
-        tp_conditions: List[str] = []
-        tp_params = dict(params)  # copy base params (includes filters' params + limit)
-        for i, tp in enumerate(transcript_phases):
-            pk = f"tp_{i}"
-            tp_params[pk] = tp.upper()
-            tp_conditions.append(f"UPPER(phase) = :{pk}")
-            tp_conditions.append(f"UPPER(hazard_code) LIKE :{pk} || '%'")
-        phase_filter = " OR ".join(tp_conditions)
-        transcript_sql = f"""
-          SELECT call_id, prompt_text, response_text
-          FROM llm_calls
-          WHERE ({where_clause}) AND ({phase_filter})
-          LIMIT :limit
-        """
-        for t_row in _rows_from_cursor(_execute(con, transcript_sql, tp_params)):
-            cid = t_row.get("call_id")
-            if cid:
-                transcript_map[cid] = {
-                    "prompt_text": t_row.get("prompt_text") or "",
-                    "response_text": t_row.get("response_text") or "",
-                }
+        wanted = [tp.upper() for tp in transcript_phases]
+        ids: List[str] = []
+        for row in rows:
+            phase_up = str(row.get("phase") or "").upper()
+            hz_up = str(row.get("hazard_code") or "").upper()
+            if any(phase_up == tp or hz_up.startswith(tp) for tp in wanted):
+                cid = row.get("call_id")
+                if cid:
+                    ids.append(str(cid))
+        transcript_map = fetch_call_texts(con, ids)
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
@@ -440,6 +456,33 @@ def get_questions(
     return {"rows": rows}
 
 
+@router.get("/v1/llm_call_text")
+def get_llm_call_text(
+    call_ids: str = Query(..., description=f"Comma-separated llm_calls call ids (at most {LLM_CALL_TEXT_MAX_IDS})"),
+):
+    """Prompt and response text for a few calls, fetched when a reader opens a panel.
+
+    The question page used to receive every transcript of a question with the
+    page itself; most visits read none of it, and that bundle was what ran the
+    API out of memory.
+    """
+    ids = [c.strip() for c in call_ids.split(",") if c.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="No call ids given")
+    if len(ids) > LLM_CALL_TEXT_MAX_IDS:
+        raise HTTPException(status_code=400, detail=f"At most {LLM_CALL_TEXT_MAX_IDS} call ids per request")
+    if not all(_CALL_ID_PATTERN.match(c) for c in ids):
+        raise HTTPException(status_code=400, detail="Invalid call id")
+    if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=30):
+        raise HTTPException(status_code=503, detail="Server busy, try again")
+    try:
+        con = _con()
+        texts = fetch_call_texts(con, ids) if _table_exists(con, "llm_calls") else {}
+    finally:
+        _HEAVY_REQUEST_SEMAPHORE.release()
+    return {"rows": [{"call_id": cid, **texts[cid]} for cid in ids if cid in texts]}
+
+
 @router.get("/v1/question_bundle")
 def get_question_bundle(
     question_id: str = Query(..., description="Question identifier"),
@@ -448,7 +491,7 @@ def get_question_bundle(
     include_llm_calls: bool = Query(False, description="Include llm_calls rows"),
     include_transcripts: bool = Query(False, description="Include prompt/response text in llm_calls"),
     transcript_phases: Optional[str] = Query(None, description="Comma-separated phases to keep transcripts for (strips others to save memory)"),
-    limit_llm_calls: int = Query(200, ge=1, le=2000, description="Max llm_calls rows to return"),
+    limit_llm_calls: int = Query(200, ge=1, le=200, description="Max llm_calls rows to return"),
     include_test: bool = Query(False),
 ):
     if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=30):

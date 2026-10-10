@@ -93,7 +93,16 @@ def diagnostics_memory(
         rss_mb = rss_bytes / (1024 * 1024)
     else:
         rss_mb = rss_bytes / 1024
-    result: Dict[str, Any] = {"rss_mb": round(rss_mb, 1)}
+    # ``ru_maxrss`` is the PEAK since the process started, so it cannot show
+    # what a request costs. ``rss_mb`` keeps its old meaning for existing
+    # readers; ``current_rss_mb`` is read from /proc where there is one.
+    result: Dict[str, Any] = {"rss_mb": round(rss_mb, 1), "peak_rss_mb": round(rss_mb, 1)}
+    try:
+        with open("/proc/self/statm", encoding="ascii") as fh:
+            resident_pages = int(fh.read().split()[1])
+        result["current_rss_mb"] = round(resident_pages * resource.getpagesize() / (1024 * 1024), 1)
+    except (OSError, ValueError, IndexError):
+        result["current_rss_mb"] = None
     try:
         con = _con()
         result["duckdb_memory"] = _rows_from_cursor(con.execute("SELECT * FROM duckdb_memory()"))

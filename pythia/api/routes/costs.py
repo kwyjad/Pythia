@@ -10,10 +10,12 @@ decomposition); shared helpers come from pythia.api.core.
 """
 
 import logging
-from typing import List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
+from pythia.api import core as _core
 from pythia.api.core import (
     _con,
     _execute,
@@ -32,6 +34,41 @@ from resolver.query.costs import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# The Costs page fires its five /v1/costs/* requests at once, and each one
+# reads the whole of llm_calls into pandas. Built one at a time under a lock
+# and kept until the next DB swap, the page costs one frame at a time on its
+# first view and nothing on later ones. Keyed on the mtime the read
+# connection was opened with (as /v1/version's probes are), so a swapped DB
+# is never answered from the old one. ``track`` is a free integer, so only
+# the values the dashboard sends are cached: a free parameter that becomes a
+# cache key is a way to fill memory.
+_COSTS_CACHE: Dict[Tuple[str, Optional[int], bool], Tuple[float, Dict[str, Any]]] = {}
+_COSTS_BUILD_LOCK = threading.Lock()
+_CACHEABLE_TRACKS = (None, 1, 2)
+
+
+def _cached_costs(
+    name: str, track: Optional[int], include_test: bool, build: Callable[[Any], Dict[str, Any]]
+) -> Dict[str, Any]:
+    con = _con()
+    mtime = _core._READ_CON_MTIME
+    key = (name, track, bool(include_test))
+    cacheable = mtime is not None and track in _CACHEABLE_TRACKS
+    hit = _COSTS_CACHE.get(key) if cacheable else None
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    with _COSTS_BUILD_LOCK:
+        hit = _COSTS_CACHE.get(key) if cacheable else None
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+        payload = build(con)
+        if cacheable:
+            for stale in [k for k, v in _COSTS_CACHE.items() if v[0] != mtime]:
+                del _COSTS_CACHE[stale]
+            _COSTS_CACHE[key] = (mtime, payload)
+    return payload
 
 def _llm_calls_columns(con) -> set[str]:
     try:
@@ -239,80 +276,86 @@ def llm_costs_summary(
 
 @router.get("/v1/costs/total")
 def costs_total(track: Optional[int] = Query(None), include_test: bool = Query(False)):
-    con = _con()
-    try:
-        tables = build_costs_total(con, track=track, include_test=include_test)
-    except Exception as exc:
-        logger.exception("Failed to build total costs")
-        raise HTTPException(status_code=500, detail="Failed to build total costs") from exc
+    def _build(con):
+        try:
+            tables = build_costs_total(con, track=track, include_test=include_test)
+        except Exception as exc:
+            logger.exception("Failed to build total costs")
+            raise HTTPException(status_code=500, detail="Failed to build total costs") from exc
 
-    return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
+        return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
 
+    return _cached_costs("total", track, include_test, _build)
 
 @router.get("/v1/costs/monthly")
 def costs_monthly(track: Optional[int] = Query(None), include_test: bool = Query(False)):
-    con = _con()
-    try:
-        tables = build_costs_monthly(con, track=track, include_test=include_test)
-    except Exception as exc:
-        logger.exception("Failed to build monthly costs")
-        raise HTTPException(status_code=500, detail="Failed to build monthly costs") from exc
+    def _build(con):
+        try:
+            tables = build_costs_monthly(con, track=track, include_test=include_test)
+        except Exception as exc:
+            logger.exception("Failed to build monthly costs")
+            raise HTTPException(status_code=500, detail="Failed to build monthly costs") from exc
 
-    return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
+        return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
 
+    return _cached_costs("monthly", track, include_test, _build)
 
 @router.get("/v1/costs/runs")
 def costs_runs(track: Optional[int] = Query(None), include_test: bool = Query(False)):
-    con = _con()
-    try:
-        tables = build_costs_runs(con, track=track, include_test=include_test)
-    except Exception as exc:
-        logger.exception("Failed to build run costs")
-        raise HTTPException(status_code=500, detail="Failed to build run costs") from exc
+    def _build(con):
+        try:
+            tables = build_costs_runs(con, track=track, include_test=include_test)
+        except Exception as exc:
+            logger.exception("Failed to build run costs")
+            raise HTTPException(status_code=500, detail="Failed to build run costs") from exc
 
-    return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
+        return {"tables": {key: _rows_from_df(df) for key, df in tables.items()}}
 
+    return _cached_costs("runs", track, include_test, _build)
 
 @router.get("/v1/costs/latencies")
 def costs_latencies(track: Optional[int] = Query(None), include_test: bool = Query(False)):
-    con = _con()
-    try:
-        df = build_latencies_runs(con, track=track, include_test=include_test)
-    except Exception as exc:
-        logger.exception("Failed to build run latencies")
-        raise HTTPException(status_code=500, detail="Failed to build run latencies") from exc
+    def _build(con):
+        try:
+            df = build_latencies_runs(con, track=track, include_test=include_test)
+        except Exception as exc:
+            logger.exception("Failed to build run latencies")
+            raise HTTPException(status_code=500, detail="Failed to build run latencies") from exc
 
-    return {"rows": _rows_from_df(df)}
+        return {"rows": _rows_from_df(df)}
 
+    return _cached_costs("latencies", track, include_test, _build)
 
 @router.get("/v1/costs/run_runtimes")
 def costs_run_runtimes(track: Optional[int] = Query(None), include_test: bool = Query(False)):
-    con = _con()
-    try:
-        df = build_run_runtimes(con, track=track, include_test=include_test)
-    except Exception as exc:
-        logger.exception("Failed to build run runtimes")
-        raise HTTPException(status_code=500, detail="Failed to build run runtimes") from exc
+    def _build(con):
+        try:
+            df = build_run_runtimes(con, track=track, include_test=include_test)
+        except Exception as exc:
+            logger.exception("Failed to build run runtimes")
+            raise HTTPException(status_code=500, detail="Failed to build run runtimes") from exc
 
-    rows = _rows_from_df(df)
-    missing_question_p50 = sum(
-        1 for row in rows if row.get("question_p50_ms") is None
-    )
-    missing_country_p50 = sum(
-        1 for row in rows if row.get("country_p50_ms") is None
-    )
-    logger.info(
-        "costs/run_runtimes rows=%d missing_question_p50=%d missing_country_p50=%d",
-        len(rows),
-        missing_question_p50,
-        missing_country_p50,
-    )
-    if not rows:
-        logger.warning(
-            "costs/run_runtimes empty total_rows=%s missing_elapsed_ms=%s missing_created_at=%s missing_run_id=%s",
-            df.attrs.get("total_rows"),
-            df.attrs.get("missing_elapsed_ms"),
-            df.attrs.get("missing_created_at"),
-            df.attrs.get("missing_run_id"),
+        rows = _rows_from_df(df)
+        missing_question_p50 = sum(
+            1 for row in rows if row.get("question_p50_ms") is None
         )
-    return {"rows": rows}
+        missing_country_p50 = sum(
+            1 for row in rows if row.get("country_p50_ms") is None
+        )
+        logger.info(
+            "costs/run_runtimes rows=%d missing_question_p50=%d missing_country_p50=%d",
+            len(rows),
+            missing_question_p50,
+            missing_country_p50,
+        )
+        if not rows:
+            logger.warning(
+                "costs/run_runtimes empty total_rows=%s missing_elapsed_ms=%s missing_created_at=%s missing_run_id=%s",
+                df.attrs.get("total_rows"),
+                df.attrs.get("missing_elapsed_ms"),
+                df.attrs.get("missing_created_at"),
+                df.attrs.get("missing_run_id"),
+            )
+        return {"rows": rows}
+
+    return _cached_costs("run_runtimes", track, include_test, _build)

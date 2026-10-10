@@ -20,9 +20,10 @@ const QuestionPage = async ({ params, searchParams }: QuestionPageProps) => {
     apiGet<QuestionBundleResponse>("/question_bundle", {
       question_id: params.questionId,
       hs_run_id: hsRunId,
+      // Call metadata only. Prompt and response text is fetched by the page
+      // when a reader opens a stage: sending every transcript with the page
+      // ran the API out of memory (2026-10-10).
       include_llm_calls: true,
-      include_transcripts: true,
-      transcript_phases: "hs_triage,hs_web_research,spd_v2,scenario_v2",
       limit_llm_calls: 200,
       include_test: includeTest || undefined,
     });
