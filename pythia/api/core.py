@@ -56,7 +56,9 @@ logger = logging.getLogger(__name__)
 
 _DUCKDB_MEMORY_LIMIT = os.getenv("PYTHIA_DUCKDB_MEMORY_LIMIT", "150MB")
 _DUCKDB_THREADS = int(os.getenv("PYTHIA_DUCKDB_THREADS", "2"))
-_HEAVY_REQUEST_SEMAPHORE = threading.Semaphore(int(os.getenv("PYTHIA_MAX_CONCURRENT_HEAVY", "2")))
+# One heavy request at a time: two question bundles with transcripts at once
+# took the 2 GB Render instance past its memory limit (2026-10-10).
+_HEAVY_REQUEST_SEMAPHORE = threading.Semaphore(int(os.getenv("PYTHIA_MAX_CONCURRENT_HEAVY", "1")))
 
 _COUNTRY_NAME_BY_ISO3: dict[str, str] = {}
 _POPULATION_BY_ISO3: dict[str, int] = {}
@@ -713,6 +715,11 @@ def _execute(
         raise TypeError(f"_execute expected a DuckDB connection, got {type(con)}")
     try:
         return _execute_on(con, sql, params)
+    except duckdb.OutOfMemoryException as exc:
+        # A query over the DuckDB cap is the visitor's request being too
+        # large, not the server being broken: answer 503 and keep serving.
+        logger.warning("DuckDB out of memory on a query; answering 503: %s", exc)
+        raise HTTPException(status_code=503, detail="Query too large, try a narrower request") from exc
     except Exception as exc:  # filtered immediately below; non-matching re-raise
         if not _is_connection_level_error(exc):
             raise

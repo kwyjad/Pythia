@@ -299,3 +299,61 @@ def test_question_bundle_says_no_transcripts_when_no_phase_is_named(client: Test
 
     assert data["llm_calls"]["transcripts_included"] is False
     assert all("prompt_text" not in row for row in data["llm_calls"]["rows"])
+
+
+def test_transcripts_are_read_only_for_the_named_phases(client: TestClient) -> None:
+    resp = client.get(
+        "/v1/question_bundle",
+        params={
+            "question_id": "Q1", "include_llm_calls": True, "include_transcripts": True,
+            "transcript_phases": "hs_web_research",
+        },
+    )
+    assert resp.status_code == 200
+    rows = {row["call_id"]: row for row in resp.json()["llm_calls"]["rows"]}
+    assert rows["c3"]["prompt_text"] == "hs web"
+    assert "prompt_text" not in rows["c2"]
+
+
+def test_llm_call_text_returns_text_for_the_ids_asked(client: TestClient) -> None:
+    resp = client.get("/v1/llm_call_text", params={"call_ids": "c2,c4,missing"})
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert [r["call_id"] for r in rows] == ["c2", "c4"]
+    assert rows[0]["prompt_text"] == "hs prompt"
+    assert rows[1]["response_text"] == "web response"
+
+
+def test_llm_call_text_refuses_a_malformed_id(client: TestClient) -> None:
+    resp = client.get("/v1/llm_call_text", params={"call_ids": "c1,x' OR 1=1 --"})
+    assert resp.status_code == 400
+
+
+def test_llm_call_text_refuses_more_than_the_cap(client: TestClient) -> None:
+    from pythia.api.routes.questions import LLM_CALL_TEXT_MAX_IDS
+
+    ids = ",".join(f"c{i}" for i in range(LLM_CALL_TEXT_MAX_IDS + 1))
+    assert client.get("/v1/llm_call_text", params={"call_ids": ids}).status_code == 400
+
+
+def test_the_bundle_caps_llm_calls_at_200(client: TestClient) -> None:
+    resp = client.get(
+        "/v1/question_bundle",
+        params={"question_id": "Q1", "include_llm_calls": True, "limit_llm_calls": 201},
+    )
+    assert resp.status_code == 422
+
+
+def test_a_query_over_the_duckdb_cap_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from pythia.api import core
+
+    def _boom(con, sql, params=None):
+        raise duckdb.OutOfMemoryException("Out of Memory Error")
+
+    monkeypatch.setattr(core, "_execute_on", _boom)
+    con = duckdb.connect()
+    with pytest.raises(HTTPException) as info:
+        core._execute(con, "SELECT 1")
+    assert info.value.status_code == 503

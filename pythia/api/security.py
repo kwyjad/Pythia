@@ -46,6 +46,7 @@ class Bucket:
 _GROUPS: Tuple[Tuple[str, Bucket], ...] = (
     ("/v1/downloads/", Bucket("downloads", 10, 10)),
     ("/v1/question_bundle", Bucket("bundle", 30, 30)),
+    ("/v1/llm_call_text", Bucket("bundle", 30, 30)),
     ("/v1/forecasts/", Bucket("forecasts", 30, 30)),
     ("/v1/diagnostics/", Bucket("diagnostics", 60, 60)),
     ("/v1/debug/", Bucket("debug", 30, 30)),

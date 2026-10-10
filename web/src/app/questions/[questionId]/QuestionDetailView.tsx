@@ -10,6 +10,9 @@ import { asArray, asString } from "../../../lib/excerpts";
 import { extractForecastRationale } from "../../../lib/forecast_rationale";
 import { formatModelList } from "../../../lib/model_names";
 import { formatScenario } from "../../../lib/scenario_format";
+import { apiGet } from "../../../lib/api";
+import { callIdsToFetch, createTranscriptLoader } from "../../../lib/transcripts";
+import type { TranscriptText } from "../../../lib/transcripts";
 import type { QuestionBundleResponse } from "../../../lib/types";
 
 type QuestionDetailViewProps = {
@@ -329,6 +332,14 @@ const PROMPT_STAGES: PromptStage[] = [
   { key: "scenario", label: "Scenario", promptOnly: true },
 ];
 
+// Shared across panels and re-renders, so a stage opened twice costs one request.
+const loadTranscripts = createTranscriptLoader(async (ids) => {
+  const data = await apiGet<{ rows: Array<{ call_id: string } & TranscriptText> }>("/llm_call_text", {
+    call_ids: ids.join(","),
+  });
+  return Object.fromEntries(data.rows.map((row) => [row.call_id, row]));
+});
+
 const renderPromptBlock = (label: string, text: string) => (
   <div>
     <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">{label}</div>
@@ -344,11 +355,44 @@ const PromptViewerSection = ({
 }: {
   groupedLlmCalls: Record<string, ModelRow[]>;
   tracesByModel: Map<string, ReasoningTrace>;
-}) => (
+}) => {
+  const [texts, setTexts] = useState<Record<string, TranscriptText>>({});
+  const [stageState, setStageState] = useState<Record<string, "loading" | "error" | "done">>({});
+
+  const openStage = (stageKey: string, stage: PromptStage, rows: ModelRow[]) => {
+    if (stageState[stageKey] === "loading" || stageState[stageKey] === "done") return;
+    // Rows that already carry text (an older bundle) need no fetch.
+    const ids = callIdsToFetch(stage, rows).filter((id) => {
+      const row = rows.find((r) => r.call_id === id);
+      return !(row && (asString(row.prompt_text) || asString(row.response_text)));
+    });
+    if (!ids.length) {
+      setStageState((prev) => ({ ...prev, [stageKey]: "done" }));
+      return;
+    }
+    setStageState((prev) => ({ ...prev, [stageKey]: "loading" }));
+    loadTranscripts(ids)
+      .then((got) => {
+        setTexts((prev) => ({ ...prev, ...got }));
+        setStageState((prev) => ({ ...prev, [stageKey]: "done" }));
+      })
+      .catch(() => setStageState((prev) => ({ ...prev, [stageKey]: "error" })));
+  };
+
+  const textFor = (row: ModelRow) => {
+    const loaded = typeof row.call_id === "string" ? texts[row.call_id] : undefined;
+    return {
+      prompt: asString(row.prompt_text) ?? loaded?.prompt_text ?? "",
+      response: asString(row.response_text) ?? loaded?.response_text ?? "",
+    };
+  };
+
+  return (
   <section className="space-y-3">
     <h2 className="text-lg font-semibold text-fred-text">Model Prompts & Responses</h2>
     {PROMPT_STAGES.map((stage) => {
       const rows = groupedLlmCalls[stage.key] ?? [];
+      const status = stageState[stage.key];
       if (!rows.length) {
         return (
           <CollapsiblePanel key={stage.key} title={stage.label}>
@@ -356,13 +400,28 @@ const PromptViewerSection = ({
           </CollapsiblePanel>
         );
       }
-      const firstPrompt = asString(rows[0]?.prompt_text) ?? "";
+      const firstPrompt = rows[0] ? textFor(rows[0]).prompt : "";
       const shouldDedup = stage.dedup && rows.length > 1;
       const isForecast = stage.key === "forecast";
 
       return (
-        <CollapsiblePanel key={stage.key} title={stage.label}>
+        <CollapsiblePanel
+          key={stage.key}
+          title={stage.label}
+          onToggle={(open) => {
+            if (open) openStage(stage.key, stage, rows);
+          }}
+        >
           <div className="space-y-4">
+            {status === "loading" ? (
+              <p className="text-xs text-fred-muted">Loading prompts and responses…</p>
+            ) : null}
+            {status === "error" ? (
+              <p className="text-xs text-red-600">
+                Could not load the prompt text for this stage. The server may be busy; close and reopen
+                the panel to try again.
+              </p>
+            ) : null}
             {/* Shared prompt (for deduplicated stages) */}
             {shouldDedup && firstPrompt ? (
               <div className="rounded border border-fred-secondary bg-fred-surface p-3">
@@ -373,8 +432,7 @@ const PromptViewerSection = ({
             {rows.map((row, index) => {
               const modelName = asString(row.model_name) ?? asString(row.model_id) ?? "Unknown model";
               const timestamp = asString(row.timestamp) ?? asString(row.created_at) ?? "";
-              const promptText = asString(row.prompt_text) ?? "";
-              const responseText = asString(row.response_text) ?? "";
+              const { prompt: promptText, response: responseText } = textFor(row);
 
               // For forecast stage, look up the reasoning trace by model name
               const trace = isForecast ? tracesByModel.get(modelName) : undefined;
@@ -406,7 +464,7 @@ const PromptViewerSection = ({
                             responseText
                           )
                         : null}
-                      {!promptText && !responseText ? (
+                      {status === "done" && !promptText && !responseText ? (
                         <p className="text-xs text-fred-muted">No transcript data available for this call.</p>
                       ) : null}
                     </>
@@ -419,7 +477,8 @@ const PromptViewerSection = ({
       );
     })}
   </section>
-);
+  );
+};
 
 const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const question = (bundle.question ?? {}) as Record<string, unknown>;
