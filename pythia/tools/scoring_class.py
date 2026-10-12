@@ -43,15 +43,18 @@ INDICATIVE = "indicative"
 
 #: Plain words for the dashboard, the Interpreter and the bundle.
 INDICATIVE_REASON = (
-    "IDMC does not report this country every month: a month resolves only "
-    "when IDMC reports it, so the forecast stands but cannot be marked"
+    "no source reports this country's conflict displacement most months "
+    "(IDMC, OCHA/UN reports, IOM DTM): a month resolves only when one of "
+    "them reports it, so the forecast stands but cannot be marked"
 )
-INDICATIVE_REASON_SHORT = "not a regular IDMC reporter"
+INDICATIVE_REASON_SHORT = "not a regular reporter on the displacement ladder"
 
 
 def conflict_scoring_class(reported: Mapping[str, Any], ym: str) -> Tuple[str, Optional[str]]:
     """(class, reason) for one ACE/PA country-month, from the regular-reporter
-    rule as it stands for ``ym`` (``base_rate_spd.conflict_regular_reporter``)."""
+    rule as it stands for ``ym`` (``base_rate_spd.conflict_regular_reporter``).
+    ``reported`` is the months with a figure on ANY ladder rung
+    (``base_rate_spd.conflict_ladder_months``) since 2026-10-12."""
     from pythia.tools.base_rate_spd import (  # noqa: PLC0415
         CONFLICT_REGULAR_MIN_MONTHS,
         CONFLICT_REGULAR_WINDOW_MONTHS,

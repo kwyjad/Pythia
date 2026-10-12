@@ -303,6 +303,36 @@ def _months_between(a: str, b: str):
         return None
 
 
+
+def _conflict_ladder_lines(rungs: list) -> list[str]:
+    """How an ACE/PA question resolves, and which source answered each month
+    shown. Generated from ``base_rate_spd``'s ladder, never written by hand."""
+    try:
+        from pythia.tools.base_rate_spd import CONFLICT_LADDER, CONFLICT_RUNG_LABEL  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return []
+    order = ", then ".join(CONFLICT_RUNG_LABEL[r] for r in CONFLICT_LADDER)
+    lines = [
+        f"  This question resolves on the best reported figure: {order}. "
+        "A DTM figure is the rise in the displaced population between two "
+        "close survey rounds, so it is a floor on new displacement."
+    ]
+    shown = []
+    for r in rungs:
+        rung = r.get("rung")
+        value = r.get("value")
+        if value is None:
+            continue
+        if rung == "zero":
+            src = "no displacement (IDMC regular reporter, month bracketed by later reports)"
+        else:
+            src = CONFLICT_RUNG_LABEL.get(rung, str(rung))
+        floor = "at least " if r.get("lower_bound") else ""
+        shown.append(f"{r.get('ym')} {floor}{float(value):,.0f} ({src})")
+    if shown and any(r.get("rung") not in ("idmc", "zero") for r in rungs):
+        lines.append("  Months shown, by source: " + "; ".join(shown) + ".")
+    return lines
+
 def _format_base_rate_for_prompt(
     history_summary: Dict[str, Any],
     forecast_keys: list[str],
@@ -593,6 +623,8 @@ def _format_base_rate_for_prompt(
                         "the last 12 months, so a month with no report is unknown, not zero."
                     )
                 out.append(settled_line)
+            if is_anchor and series.get("rungs") is not None:
+                out.extend(_conflict_ladder_lines(series.get("rungs") or []))
             if series.get("n_negative_dropped"):
                 out.append(
                     f"  ({series['n_negative_dropped']} negative monthly value(s) left out: "

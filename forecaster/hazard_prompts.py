@@ -117,17 +117,21 @@ Even in moderate conflicts, there is always some probability of a major escalati
 _ACE_PA = """\
 HAZARD-SPECIFIC REASONING GUIDANCE: ARMED CONFLICT — DISPLACEMENT (PA)
 
-This question asks about internally displaced people (IDPs) due to armed conflict, \
-as recorded by IDMC with IOM DTM as fallback. Conflict displacement has different \
-dynamics from conflict fatalities:
+This question asks about people NEWLY displaced inside the country by armed conflict \
+each month. It resolves on the best reported figure: IDMC first; where IDMC has no \
+settled monthly figure, new displacement that OCHA or a UN agency reported for the \
+month; failing that, the rise in IOM DTM's count of displaced people between two \
+survey rounds no more than 35 days apart, which is a LOWER BOUND (people who went \
+home in the same interval reduce it). A month with none of these is unresolved, \
+not zero. Conflict displacement has different dynamics from conflict fatalities:
 
 Key reasoning principles for conflict displacement:
 - Displacement is STOCK-LIKE with FLOW SHOCKS. Monthly displacement figures reflect \
 new displacements, not total IDP population. A major offensive can displace hundreds \
 of thousands in a single month, then flows drop sharply — but the displaced people \
 remain displaced. Your SPD should capture the probability of flow shocks.
-- IDMC history may be SHORT or SPARSE. Unlike ACLED fatalities (which have strong \
-monthly coverage), IDMC displacement data may have gaps or only cover recent years. \
+- The displacement history may be SHORT or SPARSE. Unlike ACLED fatalities (which \
+have strong monthly coverage), the sources may have gaps or only cover recent years. \
 If the history summary shows few months of data, widen your prior — you have less \
 information to anchor on, so your SPD should be more spread across buckets.
 - Displacement often LAGS fatalities. A battle in month 1 produces displacement in \

@@ -340,10 +340,12 @@ _RESOLUTION_SEMANTICS = """\
   own date had reached (d60 / d90 for FATALITIES, d180 / d270 for ACE/PA).
 """
 
-_INDICATIVE_SEMANTICS = """ACE/PA (conflict displacement) resolves from IDMC, which most countries
-report late and irregularly. For a country IDMC does not report in at least
-8 of the 12 months before a month, that month resolves only when IDMC
-reports something, so its resolved months are a selected sample. Such a
+_INDICATIVE_SEMANTICS = """ACE/PA (conflict displacement) resolves on a ladder: IDMC first, then
+new displacement OCHA or a UN agency reported (extracted from ReliefWeb),
+then the rise in IOM DTM's displaced count between two close rounds (a
+lower bound). For a country with a figure from none of them in at least
+8 of the 12 months before a month, that month resolves only when one of
+them reports something, so its resolved months are a selected sample. Such a
 resolution carries `scoring_class = 'indicative'` (with
 `scoring_class_reason`); every other resolution is `scored` (NULL for
 hazards and metrics other than ACE/PA reads as scored).

@@ -133,7 +133,10 @@ from pythia.tools.base_rate_spd import (
     CONFLICT_STATUS_UNSETTLED,
     conflict_displacement_coverage,
     conflict_displacement_series,
+    conflict_ladder_lower,
+    conflict_ladder_months,
     resolve_conflict_month,
+    resolve_conflict_month_detail,
 )
 from pythia.tools.source_coverage import (
     acled_complete_clause as _acled_complete_clause,
@@ -1328,14 +1331,26 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                         outcome_counts[group]["unresolved_future"] += 1
                         continue
                     if conflict_series is None:
-                        conflict_series = conflict_displacement_series(conn)
-                    reported_all, held_all = conflict_series
-                    value_cd, status = resolve_conflict_month(
+                        reported_all_, held_all_ = conflict_displacement_series(conn)
+                        conflict_series = (reported_all_, held_all_, conflict_ladder_lower(conn))
+                    reported_all, held_all, lower_all = conflict_series
+                    lower_iso = lower_all.get(iso3_norm, {})
+                    res_cd = resolve_conflict_month_detail(
                         reported_all.get(iso3_norm, {}), cal_month, today,
                         held=held_all.get(iso3_norm, set()),
+                        lower=lower_iso.get(cal_month, ()),
                     )
+                    value_cd, status = res_cd.value, res_cd.status
                     conflict_status_counts[status] += 1
-                    scoring = conflict_scoring_class(reported_all.get(iso3_norm, {}), cal_month)
+                    if res_cd.rung:
+                        conflict_status_counts[f"rung:{res_cd.rung}"] += 1
+                    for flag in res_cd.flags:
+                        conflict_status_counts[f"flag:{flag}"] += 1
+                    # Scored under the LADDER: a figure on any rung counts.
+                    scoring = conflict_scoring_class(
+                        conflict_ladder_months(reported_all.get(iso3_norm, {}), lower_iso),
+                        cal_month,
+                    )
                     if status not in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
                         skipped_conflict_displacement_gate += 1
                         outcome_counts[group][
@@ -1354,7 +1369,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                     else:
                         resolved_from_source += 1
                         outcome_counts[group]["sourced"] += 1
-                        resolved = (float(value_cd), None, CONFLICT_DISPLACEMENT_SERIES)
+                        resolved = (float(value_cd), None,
+                                    res_cd.source_desc or CONFLICT_DISPLACEMENT_SERIES)
                     scoring_counts[scoring[0]] += 1
 
                 # A FATALITIES cell whose only row was written before its

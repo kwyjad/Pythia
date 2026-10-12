@@ -51,8 +51,12 @@ RESOLUTION_SERIES: dict[tuple[str, str], str] = {
         "resolves to 0"
     ),
     ("ACE", "PA"): (
-        "facts_resolved/facts_deltas IDMC conflict displacement flow "
-        "(new_displacements), per country-month; unresolved when absent"
+        "conflict displacement ladder, per country-month: IDMC conflict "
+        "new_displacements (settled 90 days), else new displacement OCHA or a UN "
+        "agency reported (ReliefWeb extraction, conflict_displacement_candidates), "
+        "else the IOM DTM IDP stock increase between rounds <= 35 days apart (a "
+        "LOWER BOUND); zero only for an IDMC regular reporter bracketed by later "
+        "reports; unresolved when absent"
     ),
     ("*", "PHASE3PLUS_IN_NEED"): (
         "facts_resolved phase3plus_in_need: FEWS NET or IPC Current Situation "

@@ -1,11 +1,11 @@
 // Pythia / Copyright (c) 2025 Kevin Wyjad
-// Conflict displacement (ACE/PA) is forecast only for countries IDMC reports
-// regularly (pythia/tools/ace_pa_eligibility.py). Where a country has a
+// Conflict displacement (ACE/PA) is forecast only for countries some source on the
+// displacement ladder (IDMC, OCHA/UN reports, IOM DTM) reports regularly (pythia/tools/ace_pa_eligibility.py). Where a country has a
 // conflict-deaths question and no displacement question, say so: a missing
 // question must never read as no displacement risk.
 
 export const CONFLICT_DISPLACEMENT_NOT_FORECAST =
-  "Conflict displacement not forecast (IDMC does not report this country regularly)";
+  "Conflict displacement not forecast (no source reports this country's displacement regularly)";
 
 type QuestionLike = {
   iso3?: string | null;

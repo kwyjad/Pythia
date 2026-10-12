@@ -739,7 +739,8 @@ def get_risk_index(
 
 
 CONFLICT_DISPLACEMENT_NOTE = (
-    "Conflict displacement is forecast only for countries IDMC reports regularly. "
+    "Conflict displacement is forecast only for countries a displacement source "
+    "(IDMC, OCHA or UN reports, IOM DTM) reports regularly. "
     "For the countries listed it is not forecast, so their people-affected figure "
     "leaves it out; this is not a forecast of no displacement."
 )

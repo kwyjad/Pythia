@@ -55,7 +55,11 @@ codebase is `PHASE3PLUS_IN_NEED` (IPC Phase 3+ population).
 fatalities; DR/FL/TC affected" scope, are:
 `{(ACE, FATALITIES), (FL, PA), (TC, PA), (DR, PHASE3PLUS_IN_NEED)}`.
 EVENT_OCCURRENCE (binary) is excluded everywhere. ACE/PA is excluded (the
-spec names ACE *fatalities* only). The set is a config constant
+spec names ACE *fatalities* only). If ACE/PA is ever added, it needs a
+resolver card: since 2026-10-12 it resolves on a ladder (IDMC first, then
+new displacement OCHA or a UN agency reported, then the rise in IOM DTM's
+displaced count between two close rounds, a lower bound;
+`base_rate_spd.resolve_conflict_month_detail`). The set is a config constant
 (`sibyl/config.py: ELIGIBLE_HAZARD_METRICS`) so it can be widened later.
 
 ## 2. SPD serialization

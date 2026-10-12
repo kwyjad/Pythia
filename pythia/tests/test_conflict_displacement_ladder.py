@@ -102,3 +102,46 @@ def test_negative_and_future_lower_readings_are_ignored():
     r = resolve_conflict_month_detail({}, "2026-08", LATE,
                                       lower=[_ex(-5.0), _dtm(100, avail=date(2027, 3, 1))])
     assert r.status == CONFLICT_STATUS_IRREGULAR
+
+
+def test_the_resolver_writes_the_answering_rung_and_scores_under_the_ladder(tmp_path, monkeypatch):
+    """compute_resolutions: an extracted figure resolves a month IDMC held
+    out, its rung is in source_desc, and the scoring class counts any rung."""
+    import duckdb
+
+    from pythia.tests.test_ace_pa_conflict_displacement import _db, _flow
+    from pythia.tools import compute_resolutions as cr
+    from resolver.ingestion import conflict_displacement_extract as cde
+
+    db = tmp_path / "ladder.duckdb"
+    db_url = f"duckdb:///{db}"
+    monkeypatch.setattr(cr, "load_cfg", lambda: {"app": {"db_url": db_url}})
+    con = _db(db)
+    _flow(con, "2025-01", "COD", 500)
+    cde.ensure_schema(con)
+    # COD: IDMC holds out its multi-month records; OCHA reported each month.
+    for m in ("2024-01", "2024-02", "2024-03", "2024-04", "2024-05", "2024-06",
+              "2024-07", "2024-08", "2024-09", "2024-10", "2024-11", "2024-12",
+              "2025-02", "2025-03"):
+        con.execute(
+            "INSERT INTO conflict_displacement_candidates (iso3, ym, source_ref, "
+            "preference_rank, value_type, value_persons, quote) VALUES "
+            "('COD', ?, 'rw:' || ?, 0, 'new_displacements', 40000, 'q')",
+            [m, m],
+        )
+    con.execute(
+        "INSERT INTO questions VALUES ('COD_ACE_PA_2025-02', 'run1', 'COD', 'ACE', 'PA', "
+        "'2025-07', DATE '2025-02-01', 'active', FALSE)"
+    )
+    con.close()
+    cr.compute_resolutions(db_url=db_url, today=date(2025, 10, 1))
+    con = duckdb.connect(str(db))
+    rows = con.execute(
+        "SELECT horizon_m, value, source_desc, scoring_class FROM resolutions "
+        "ORDER BY horizon_m"
+    ).fetchall()
+    con.close()
+    assert rows[0][:3] == (1, 40000.0, "conflict_displacement_candidates:reliefweb_extracted:new_displacements")
+    assert rows[1][:2] == (2, 40000.0)
+    # Regular under the ladder (12 of the 12 months before 2025-02 carry a figure).
+    assert rows[0][3] == "scored"
