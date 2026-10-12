@@ -397,3 +397,21 @@ def test_every_canonical_download_checks_disk_room() -> None:
         bespoke = "gh run download" in text and "pythia-resolver-db" in text
         if bespoke and "download-canonical-db" not in text and wf.name != "publish_latest_data.yml":
             assert "scripts.ci.db_growth downloaded" in text, wf.name
+
+
+def test_weekly_ingest_skips_the_monthly_ingest_window() -> None:
+    """11 October 2026 was a Sunday: the weekly ingest and the monthly
+    Resolver Update both fired, the ingest uploaded first, and the
+    resolutions chain was refused at its upload. A scheduled weekly ingest
+    now skips the 10th to the 13th, and the gate's output honours the skip."""
+    path = pathlib.Path(".github/workflows/ingest-structured-data.yml")
+    data = _load_yaml(path)
+    gate = data["jobs"]["gate"]
+    steps = gate["steps"]
+    assert steps[0]["id"] == "window", "the window check must run before anything else"
+    script = steps[0]["run"]
+    assert '"${EVENT_NAME}" = "schedule"' in script
+    assert '-ge 10' in script and '-le 13' in script
+    assert "steps.window.outputs.skip != 'true'" in gate["outputs"]["proceed"]
+    pipeline_check = next(s for s in steps if s.get("id") == "gate")
+    assert pipeline_check.get("if") == "steps.window.outputs.skip != 'true'"

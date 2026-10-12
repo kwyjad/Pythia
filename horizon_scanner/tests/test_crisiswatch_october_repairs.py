@@ -163,3 +163,37 @@ def test_prompt_for_a_country_icg_does_not_cover(monkeypatch):
     assert "8 edition(s) held (January 2026 to September 2026)" in text
     # One line beyond the header: nothing invented.
     assert len(text.splitlines()) == 2
+
+
+# ------------------------------------------- 11 October 2026 Resolver Update
+
+
+def test_china_japan_names_both_countries():
+    """The September 2026 edition's 'China/Japan' heading matched no country
+    and its entry was dropped."""
+    assert cw.multi_country_heading("China/Japan") == "China/Japan"
+    members = {iso3 for _name, iso3 in cw.MULTI_COUNTRY_HEADINGS["China/Japan"]}
+    assert members == {"CHN", "JPN"}
+
+
+def _cw_table(path):
+    con = duckdb.connect(str(path))
+    con.execute("CREATE TABLE crisiswatch_entries (iso3 TEXT, year INTEGER, month INTEGER)")
+    con.close()
+
+
+def test_the_backfill_does_not_chase_a_registered_gap(tmp_path, monkeypatch):
+    """2026-05 is registered as unrecoverable until 2026-12-31; the Resolver
+    Update of 11 October still spent 40 downloads on it."""
+    from datetime import date
+
+    path = tmp_path / "cw.duckdb"
+    _cw_table(path)
+    monkeypatch.setattr("pythia.db.schema.connect",
+                        lambda *a, **k: duckdb.connect(str(path)), raising=False)
+    wanted = cw.missing_editions(12, today=date(2026, 10, 11))
+    assert "2026-05" not in wanted
+    assert "2026-04" in wanted and "2026-09" in wanted
+    # Once the register's review date has passed, it is asked for again.
+    later = cw.missing_editions(12, today=date(2027, 1, 5))
+    assert "2026-05" in later
