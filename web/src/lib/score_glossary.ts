@@ -137,10 +137,12 @@ export const SCORE_GLOSSARY: Array<{ term: string; text: string }> = [
 // does not report every month, so those resolved months are a selected
 // sample. Keep in sync with pythia/tools/scoring_class.py INDICATIVE_REASON.
 export const ACE_PA_INDICATIVE_NOTE =
-  "Conflict displacement: the forecast stands, but for most countries it cannot be " +
-  "marked, because IDMC does not report them every month. Only countries IDMC " +
-  "reports in at least 8 of the 12 months before a month are scored; the rest are " +
-  "indicative and kept out of calibration and the skill figures.";
+  "Conflict displacement: the forecast stands, but for some countries it cannot be " +
+  "marked, because no source reports them most months. A month resolves on IDMC " +
+  "first, then a figure OCHA or a UN agency reported, then the rise in IOM DTM's " +
+  "displaced count (a floor). Only countries with a figure from any of them in at " +
+  "least 8 of the 12 months before a month are scored; the rest are indicative and " +
+  "kept out of calibration and the skill figures.";
 
 export function isAcePa(hazard: string | null | undefined, metric: string | null | undefined): boolean {
   return (hazard || "").toUpperCase() === "ACE" && (metric || "").toUpperCase() === "PA";

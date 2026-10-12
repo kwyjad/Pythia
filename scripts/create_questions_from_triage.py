@@ -235,8 +235,10 @@ def _build_question_wording(
 
     if hz == "ACE" and m == "PA":
         return (
-            f"How many people will be displaced each month by armed conflict in {country} "
-            f"between {start_str} and {end_str}, as resolved by IDMC?"
+            f"How many people will be newly displaced each month by armed conflict in {country} "
+            f"between {start_str} and {end_str}, as resolved on the best reported figure: "
+            f"IDMC first, then new displacement reported by OCHA or a UN agency, then the "
+            f"rise in IOM DTM's displaced count between two close rounds (a lower bound)?"
         )
 
     if hz == "ACE" and m == "FATALITIES":

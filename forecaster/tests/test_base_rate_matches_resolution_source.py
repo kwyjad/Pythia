@@ -242,3 +242,76 @@ def test_prompt_anchor_references_and_resolver_read_one_conflict_series():
         brs.CONFLICT_DISPLACEMENT_METRIC,
         brs.CONFLICT_DISPLACEMENT_PUBLISHER,
     )
+
+
+def _add_lower_rungs(con):
+    """Rung 2 (an extracted OCHA/UN figure) and rung 3 (a DTM lower bound),
+    in the tables the Part A sources write."""
+    import json as _json
+
+    from resolver.ingestion import conflict_displacement_extract as cde
+    from resolver.ingestion import dtm_conflict as dtm
+
+    cde.ensure_schema(con)
+    dtm.ensure_schema(con)
+    con.execute(
+        "INSERT INTO conflict_displacement_candidates (iso3, ym, source_ref, preference_rank, "
+        "value_type, value_persons, quote, doc_url) VALUES "
+        "('PHL', '2026-06', 'rw:1', 0, 'new_displacements', 8000, "
+        "'some 8,000 people were newly displaced', 'https://reliefweb.int/report/1')"
+    )
+    con.execute(
+        "INSERT INTO dtm_conflict_lower_bounds (iso3, ym, value, value_type, operation, "
+        "n_pairs, pairs_json, operations_json, max_gap_days) VALUES "
+        "('PHL', '2026-08', 1500, 'displaced_lower_bound', 'op', 1, ?, '{}', 35)",
+        [_json.dumps([{"from": "2026-07-20", "to": "2026-08-15", "gap_days": 26}])],
+    )
+
+
+def test_prompt_anchor_references_and_resolver_read_one_conflict_ladder():
+    """The ladder (IDMC, then an extracted figure, then a DTM lower bound) is
+    read by the same readers: the resolver, the anchor, the persistence
+    reference, the prompt rows, the scoring class and eligibility."""
+    from pythia.tools import base_rate_spd as brs
+
+    con = _conflict_db()
+    _add_lower_rungs(con)
+    later = date(2027, 6, 1)
+    # Resolver: IDMC's months, then rung 2 for June, rung 3 for August.
+    assert brs.conflict_displacement_value(con, "PHL", "2026-07", today=later) == (
+        3000.0, brs.CONFLICT_DISPLACEMENT_SERIES)
+    june = brs.conflict_displacement_value(con, "PHL", "2026-06", today=later)
+    assert june[0] == 8000.0 and "reliefweb_extracted" in june[1]
+    aug = brs.conflict_displacement_value(con, "PHL", "2026-08", today=later)
+    assert aug[0] == 1500.0 and "lower_bound" in aug[1]
+    # Anchor at the forecast date for a December window (13 Nov): May, June
+    # (extracted, available 30 days after June), July, August (DTM round of
+    # 15 Aug) are all known; the window reads four values.
+    _probs, source, detail = brs.base_rate_spd(con, "PHL", "ACE", "PA", "2026-12")
+    assert sorted(detail["values"]) == sorted([12000.0, 8000.0, 3000.0, 1500.0])
+    # Persistence: the newest month resolved on the forecast day is August, DTM.
+    val, ym, src = brs.last_observed_value(con, "PHL", "ACE", "PA", "2026-12")
+    assert (val, ym) == (1500.0, "2026-08") and "lower_bound" in src
+    # Prompt rows carry the rung per month and mark the lower bound.
+    rows = brs.conflict_displacement_settled_rows(con, "PHL", later)
+    by_ym = {r["ym"]: r for r in rows["rows_detail"]}
+    assert by_ym["2026-06"]["rung"] == brs.CONFLICT_RUNG_EXTRACTED
+    assert by_ym["2026-08"]["lower_bound"] is True
+    # Eligibility and the scoring class count any rung.
+    ladder = brs.conflict_ladder_reported(con, before_ym="2026-09")
+    assert set(ladder["PHL"]) == {"2026-05", "2026-06", "2026-07", "2026-08"}
+
+
+def test_the_ace_pa_prompt_names_the_rung_per_month():
+    from forecaster.history_loaders import _conflict_ladder_lines
+
+    lines = _conflict_ladder_lines([
+        {"ym": "2026-06", "value": 8000.0, "rung": "reliefweb_extracted", "lower_bound": False},
+        {"ym": "2026-08", "value": 1500.0, "rung": "dtm_lower_bound", "lower_bound": True},
+    ])
+    text = "\n".join(lines)
+    assert "IDMC, then OCHA/UN report (ReliefWeb), then IOM DTM increase, a lower bound" in text
+    assert "2026-08 at least 1,500 (IOM DTM increase, a lower bound)" in text
+    # IDMC alone: the resolution line, no per-month list.
+    only = _conflict_ladder_lines([{"ym": "2026-06", "value": 10.0, "rung": "idmc"}])
+    assert len(only) == 1

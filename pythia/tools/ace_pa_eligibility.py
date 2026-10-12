@@ -140,7 +140,7 @@ def decide(con: Any, *, window_start: str, hs_run_id: str) -> Decision:
     (``YYYY-MM``). Never raises: a failure is a guard condition."""
     from pythia.tools.base_rate_spd import (  # noqa: PLC0415
         _add_months,
-        conflict_displacement_series,
+        conflict_ladder_reported,
         conflict_regular_reporter,
     )
 
@@ -148,14 +148,16 @@ def decide(con: Any, *, window_start: str, hs_run_id: str) -> Decision:
     newest: Optional[str] = None
     rule: Set[str] = set()
     try:
-        reported, _held = conflict_displacement_series(con, before_ym=window_start)
+        # The LADDER: a month counts when any rung (IDMC, an extracted
+        # OCHA/UN figure, a DTM lower bound) gives it a figure.
+        reported = conflict_ladder_reported(con, before_ym=window_start)
         months = [m for d in reported.values() for m in d]
         newest = max(months) if months else None
         if not reported:
-            reason = "IDMC conflict displacement series is missing (no rows)"
+            reason = "conflict displacement ladder is missing (no IDMC, extracted or DTM rows)"
         elif newest < _add_months(window_start, -STALE_MONTHS):
             reason = (
-                f"IDMC conflict displacement series is stale: newest month {newest}, "
+                f"conflict displacement ladder is stale: newest month {newest}, "
                 f"more than {STALE_MONTHS} months before {window_start}"
             )
         else:
@@ -163,7 +165,7 @@ def decide(con: Any, *, window_start: str, hs_run_id: str) -> Decision:
             if not rule:
                 reason = f"the regular-reporter rule admits no country for {window_start}"
     except Exception as exc:  # noqa: BLE001
-        reason = f"IDMC conflict displacement series unreadable: {exc}"
+        reason = f"conflict displacement ladder unreadable: {exc}"
 
     if not reason:
         return Decision(window_start, SOURCE_RULE, set(rule), "", newest, set(rule))

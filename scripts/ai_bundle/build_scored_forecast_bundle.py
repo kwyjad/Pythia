@@ -1574,8 +1574,8 @@ def _write_digest(
         lines += [
             "",
             f"_{n_ind} indicative ACE/PA (question, horizon) resolution(s) are left out of the "
-            "table above and of every skill figure: IDMC does not report those countries "
-            "regularly, so their resolved months are a selected sample. They are listed in "
+            "table above and of every skill figure: no displacement source (IDMC, OCHA/UN "
+            "reports, IOM DTM) reports those countries regularly, so their resolved months are a selected sample. They are listed in "
             "`indicative_questions.csv`._",
         ]
     lines += _sharpness_lines(fvo_rows or [])
@@ -2008,8 +2008,8 @@ def build_bundle(
                     "rows": n_indicative_rows,
                     "error": indicative_error,
                     "note": (
-                        "ACE/PA months whose resolution is indicative (IDMC does not report "
-                        "the country regularly): resolved and scored, but left out of every "
+                        "ACE/PA months whose resolution is indicative (no displacement source "
+                        "reports the country regularly): resolved and scored, but left out of every "
                         "skill figure and calibration step"
                     ),
                 },

@@ -27,7 +27,7 @@ CREATE TABLE resolutions (
   is_test BOOLEAN DEFAULT FALSE, scoring_class TEXT, scoring_class_reason TEXT
 )
 """
-REASON = "not a regular IDMC reporter: reported in fewer than 8 of the 12 months before 2026-03"
+REASON = "not a regular reporter on the displacement ladder: reported in fewer than 8 of the 12 months before 2026-03"
 
 
 def _base(con, questions, *, with_class: bool = True) -> None:

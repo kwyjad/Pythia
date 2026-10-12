@@ -49,6 +49,7 @@ labels, or centroid lists here.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -435,30 +436,159 @@ def conflict_regular_reporter(reported: Mapping[str, Any], ym: str) -> bool:
     return sum(1 for m in months if m in reported) >= CONFLICT_REGULAR_MIN_MONTHS
 
 
+# The conflict displacement LADDER (owner decision 2026-10-12). ACE/PA
+# resolves on the best reported figure: IDMC first, then OCHA/UN-reported
+# new displacement extracted from ReliefWeb, then the increase in IOM DTM's
+# IDP stock between two close rounds, which is a LOWER BOUND on new
+# displacement. The first populated rung wins; a lower rung that disagrees
+# by more than an order of magnitude flags and never substitutes.
+CONFLICT_RUNG_IDMC = "idmc"
+CONFLICT_RUNG_EXTRACTED = "reliefweb_extracted"
+CONFLICT_RUNG_DTM = "dtm_lower_bound"
+CONFLICT_LADDER = (CONFLICT_RUNG_IDMC, CONFLICT_RUNG_EXTRACTED, CONFLICT_RUNG_DTM)
+#: An extracted figure is read once this many days have passed since the
+#: month ended (the extraction window runs to month end + 30 days).
+CONFLICT_EXTRACTED_AVAILABLE_DAYS = 30
+#: Two populated rungs further apart than this factor flag the resolution.
+CONFLICT_OOM_FACTOR = 10.0
+CONFLICT_FLAG_OOM = "adjacent_rung_order_of_magnitude"
+#: ``resolutions.source_desc`` per rung (IDMC keeps its pre-ladder value).
+CONFLICT_RUNG_SOURCE_DESC = {
+    CONFLICT_RUNG_IDMC: CONFLICT_DISPLACEMENT_SERIES,
+    CONFLICT_RUNG_EXTRACTED: "conflict_displacement_candidates:reliefweb_extracted:new_displacements",
+    CONFLICT_RUNG_DTM: "dtm_conflict:idp_stock_increase:displaced_lower_bound",
+}
+#: Plain words for prompts, cards and bundles: what each rung is.
+CONFLICT_RUNG_LABEL = {
+    CONFLICT_RUNG_IDMC: "IDMC",
+    CONFLICT_RUNG_EXTRACTED: "OCHA/UN report (ReliefWeb)",
+    CONFLICT_RUNG_DTM: "IOM DTM increase, a lower bound",
+}
+
+
+@dataclass(frozen=True)
+class ConflictReading:
+    """One lower-rung figure for a country-month (rungs 2 and 3)."""
+
+    rung: str
+    value: float
+    available_on: date
+    lower_bound: bool = False
+    ref: str = ""
+
+
+@dataclass(frozen=True)
+class ConflictResolution:
+    """What :func:`resolve_conflict_month_detail` decided for a month."""
+
+    value: Optional[float]
+    status: str
+    rung: Optional[str] = None
+    lower_bound: bool = False
+    flags: Tuple[str, ...] = field(default_factory=tuple)
+    ref: str = ""
+
+    @property
+    def source_desc(self) -> Optional[str]:
+        if self.status == CONFLICT_STATUS_QUIET:
+            return "zero_default"
+        if self.rung:
+            return CONFLICT_RUNG_SOURCE_DESC.get(self.rung)
+        return None
+
+
+def _rung_order(rung: str) -> int:
+    try:
+        return CONFLICT_LADDER.index(rung)
+    except ValueError:
+        return len(CONFLICT_LADDER)
+
+
+def _oom_apart(a: float, b: float) -> bool:
+    lo, hi = sorted((abs(float(a)), abs(float(b))))
+    if hi <= 0:
+        return False
+    if lo <= 0:
+        return hi >= CONFLICT_OOM_FACTOR
+    return hi / lo > CONFLICT_OOM_FACTOR
+
+
+def resolve_conflict_month_detail(
+    reported: Mapping[str, float], ym: str, today: date,
+    *, held: Optional[set] = None, lower: Sequence[ConflictReading] = (),
+) -> ConflictResolution:
+    """How one country-month of conflict displacement resolves: THE rule.
+
+    Pure. ``reported`` is the country's IDMC monthly figures, ``held`` its
+    IDMC held-out months, ``lower`` the month's figures from the lower rungs.
+
+    1. IDMC: a reported, settled (``CONFLICT_SETTLE_DAYS``), not held-out
+       month resolves to its figure.
+    2. Otherwise the first lower rung available by ``today`` (an extracted
+       figure 30 days after month end, a DTM lower bound once its bracketing
+       round exists) resolves it. A held-out or unsettled IDMC month can be
+       answered here; a settled IDMC figure arriving later replaces it on a
+       later run.
+    3. Otherwise a month is zero only under the IDMC rule: settled, an IDMC
+       regular reporter, and bracketed by a later IDMC report. Every other
+       month is unknown, never quiet.
+
+    The winner is flagged when the next populated rung differs from it by
+    more than an order of magnitude; the lower rung never substitutes.
+    """
+    settled = conflict_month_settled(ym, today)
+    is_held = bool(held and ym in held)
+    candidates: List[Tuple[int, str, float, bool, str]] = []
+    if settled and not is_held and ym in reported:
+        candidates.append((0, CONFLICT_RUNG_IDMC, float(reported[ym]), False, ""))
+    for r in lower or ():
+        if r.value is None or float(r.value) < 0 or r.available_on > today:
+            continue
+        candidates.append((_rung_order(r.rung), r.rung, float(r.value), bool(r.lower_bound), r.ref))
+    if candidates:
+        candidates.sort(key=lambda c: (c[0], -c[2]))
+        best = candidates[0]
+        flags: Tuple[str, ...] = ()
+        nxt = next((c for c in candidates[1:] if c[0] != best[0]), None)
+        if nxt is not None and _oom_apart(best[2], nxt[2]):
+            flags = (CONFLICT_FLAG_OOM,)
+        return ConflictResolution(best[2], CONFLICT_STATUS_REPORTED, best[1], best[3], flags, best[4])
+    if not settled:
+        return ConflictResolution(None, CONFLICT_STATUS_UNSETTLED)
+    if is_held:
+        return ConflictResolution(None, CONFLICT_STATUS_HELD)
+    if not conflict_regular_reporter(reported, ym):
+        return ConflictResolution(None, CONFLICT_STATUS_IRREGULAR)
+    if not any(m > ym for m in reported):
+        return ConflictResolution(None, CONFLICT_STATUS_TRAILING)
+    return ConflictResolution(0.0, CONFLICT_STATUS_QUIET)
+
+
 def resolve_conflict_month(
     reported: Mapping[str, float], ym: str, today: date,
-    *, held: Optional[set] = None,
+    *, held: Optional[set] = None, lower: Sequence[ConflictReading] = (),
 ) -> Tuple[Optional[float], str]:
-    """``(value, status)`` for one country-month of conflict displacement.
+    """``(value, status)`` for one country-month: :func:`resolve_conflict_month_detail`."""
+    res = resolve_conflict_month_detail(reported, ym, today, held=held, lower=lower)
+    return res.value, res.status
 
-    Pure: ``reported`` is the country's reported months and values, ``held``
-    its held-out months. A month resolves only once it is settled; a
-    reported figure then resolves it; a missing month is zero only for a
-    regular reporter with a reported figure in a LATER month (the gap is
-    bracketed). A trailing month, a held-out month and an irregular
-    reporter's missing month are unknown, never quiet.
-    """
-    if not conflict_month_settled(ym, today):
-        return None, CONFLICT_STATUS_UNSETTLED
-    if held and ym in held:
-        return None, CONFLICT_STATUS_HELD
-    if ym in reported:
-        return float(reported[ym]), CONFLICT_STATUS_REPORTED
-    if not conflict_regular_reporter(reported, ym):
-        return None, CONFLICT_STATUS_IRREGULAR
-    if not any(m > ym for m in reported):
-        return None, CONFLICT_STATUS_TRAILING
-    return 0.0, CONFLICT_STATUS_QUIET
+
+def conflict_ladder_months(
+    reported: Mapping[str, float], lower: Mapping[str, Sequence[ConflictReading]],
+) -> Dict[str, float]:
+    """Months with a figure on ANY rung (the best rung's value), which is
+    what the regular-reporter rule counts for eligibility and scoring."""
+    out: Dict[str, float] = {}
+    for ym, readings in (lower or {}).items():
+        vals = sorted(
+            ((_rung_order(r.rung), float(r.value)) for r in readings
+             if r.value is not None and float(r.value) >= 0),
+        )
+        if vals:
+            out[ym] = vals[0][1]
+    for ym, v in (reported or {}).items():
+        out[ym] = float(v)
+    return out
 
 
 def conflict_displacement_series(
@@ -503,6 +633,80 @@ def conflict_displacement_series(
     return reported, held
 
 
+ConflictLower = Dict[str, Dict[str, List[ConflictReading]]]
+
+
+def _iso_date(text: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(text)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def conflict_ladder_lower(con, *, before_ym: Optional[str] = None) -> ConflictLower:
+    """The lower rungs for every country: ``{iso3: {ym: [ConflictReading]}}``.
+
+    Rung 2 is the rank-0 extracted figure in ``conflict_displacement_candidates``
+    (``resolver.ingestion.conflict_displacement_extract``), available
+    ``CONFLICT_EXTRACTED_AVAILABLE_DAYS`` after the month ends. Rung 3 is the
+    DTM lower bound in ``dtm_conflict_lower_bounds``
+    (``resolver.ingestion.dtm_conflict``), available on the date of the later
+    round that brackets it. ``before_ym`` keeps months strictly before it.
+    Empty when neither table exists (the readers are not called, because
+    they create their tables and a read path must write nothing).
+    """
+    out: ConflictLower = {}
+    try:
+        if _table_exists(con, "conflict_displacement_candidates"):
+            from resolver.ingestion.conflict_displacement_extract import extracted_figures  # noqa: PLC0415
+
+            for (iso, ym), row in extracted_figures(con).items():
+                value = row.get("value_persons")
+                if value is None or (before_ym and str(ym) >= before_ym):
+                    continue
+                avail = _month_end(str(ym)) + timedelta(days=CONFLICT_EXTRACTED_AVAILABLE_DAYS)
+                ref = str(row.get("doc_url") or row.get("doc_id") or "")
+                out.setdefault(str(iso).upper(), {}).setdefault(str(ym), []).append(
+                    ConflictReading(CONFLICT_RUNG_EXTRACTED, float(value), avail, False, ref)
+                )
+        if _table_exists(con, "dtm_conflict_lower_bounds"):
+            import json as _json  # noqa: PLC0415
+
+            from resolver.ingestion.dtm_conflict import dtm_lower_bounds  # noqa: PLC0415
+
+            for (iso, ym), row in dtm_lower_bounds(con).items():
+                value = row.get("value")
+                if value is None or (before_ym and str(ym) >= before_ym):
+                    continue
+                try:
+                    pairs = _json.loads(row.get("pairs_json") or "[]")
+                except ValueError:
+                    pairs = []
+                dates = [d for d in (_iso_date(p.get("to")) for p in pairs) if d]
+                avail = max(dates) if dates else _month_end(str(ym))
+                out.setdefault(str(iso).upper(), {}).setdefault(str(ym), []).append(
+                    ConflictReading(CONFLICT_RUNG_DTM, float(value), avail, True,
+                                    f"dtm:{row.get('operation') or ''}")
+                )
+    except Exception as exc:  # noqa: BLE001 - IDMC alone is the safe fallback
+        LOGGER.warning("conflict_ladder_lower: lower rungs unreadable: %s", exc)
+        return {}
+    return out
+
+
+def conflict_ladder_reported(
+    con, *, before_ym: Optional[str] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Per country, the months with a figure on ANY rung (eligibility and
+    the scoring class count these)."""
+    reported, _held = conflict_displacement_series(con, before_ym=before_ym)
+    lower = conflict_ladder_lower(con, before_ym=before_ym)
+    return {
+        iso: conflict_ladder_months(reported.get(iso, {}), lower.get(iso, {}))
+        for iso in set(reported) | set(lower)
+    }
+
+
 def conflict_displacement_status(
     con, iso3: str, ym: str, *, today: Optional[date] = None,
     series: Optional[Tuple[Dict[str, Dict[str, float]], Dict[str, set]]] = None,
@@ -510,10 +714,23 @@ def conflict_displacement_status(
     """:func:`resolve_conflict_month` for one country-month read from the DB."""
     if not _conflict_displacement_table_ok(con):
         return None, CONFLICT_STATUS_NO_SERIES
+    res = conflict_displacement_detail(con, iso3, ym, today=today, series=series)
+    return res.value, res.status
+
+
+def conflict_displacement_detail(
+    con, iso3: str, ym: str, *, today: Optional[date] = None,
+    series: Optional[Tuple[Dict[str, Dict[str, float]], Dict[str, set]]] = None,
+) -> ConflictResolution:
+    """:func:`resolve_conflict_month_detail` for one country-month read from the DB."""
+    if not _conflict_displacement_table_ok(con):
+        return ConflictResolution(None, CONFLICT_STATUS_NO_SERIES)
     reported, held = series if series is not None else conflict_displacement_series(con)
     iso = (iso3 or "").upper()
-    return resolve_conflict_month(
+    lower = conflict_ladder_lower(con).get(iso, {})
+    return resolve_conflict_month_detail(
         reported.get(iso, {}), ym, today or date.today(), held=held.get(iso, set()),
+        lower=lower.get(ym, ()),
     )
 
 
@@ -531,9 +748,10 @@ def conflict_displacement_value(
     ``coverage`` is accepted for old callers and ignored.
     """
     del coverage
-    value, status = conflict_displacement_status(con, iso3, ym, today=today, series=series)
+    res = conflict_displacement_detail(con, iso3, ym, today=today, series=series)
+    value, status = res.value, res.status
     if status == CONFLICT_STATUS_REPORTED:
-        return float(value), CONFLICT_DISPLACEMENT_SERIES
+        return float(value), res.source_desc or CONFLICT_DISPLACEMENT_SERIES
     if status == CONFLICT_STATUS_QUIET:
         return 0.0, "zero_default"
     return None
@@ -544,36 +762,50 @@ def conflict_displacement_settled_rows(
 ) -> Dict[str, Any]:
     """What the prompt's displacement block shows, under the resolution rule.
 
-    ``rows``: settled months resolved as reported or quiet, ascending (an
-    irregular reporter's rows are its reported months alone);
-    ``latest_settled_month``; ``regular_reporter`` (as of the month after the
-    latest settled one) with ``n_reported_12m``.
+    ``rows``: months that resolve today (a figure on any rung, or a quiet
+    month), ascending, as ``(ym, value)``; ``rows_detail`` the same months
+    with the rung that answered and whether the figure is a lower bound;
+    ``latest_settled_month`` (the newest month IDMC has settled);
+    ``latest_month_shown``; ``regular_reporter`` under the LADDER (as of the
+    month after the latest settled one) with ``n_reported_12m``.
     """
     reported_all, held_all = conflict_displacement_series(con, before_ym=before_ym)
     iso = (iso3 or "").upper()
     reported = reported_all.get(iso, {})
     held = held_all.get(iso, set())
-    # The newest settled month: walk back from the month before today.
+    lower = conflict_ladder_lower(con, before_ym=before_ym).get(iso, {})
+    ladder = conflict_ladder_months(reported, lower)
+    # The newest IDMC-settled month: walk back from the month before today.
     probe = _add_months(today.strftime("%Y-%m"), -1)
     for _ in range(6):
         if conflict_month_settled(probe, today):
             break
         probe = _add_months(probe, -1)
     latest_settled = probe
-    regular = conflict_regular_reporter(reported, _add_months(latest_settled, 1))
-    n_12 = sum(1 for m in _window_months(_add_months(latest_settled, 1), 12) if m in reported)
+    next_month = _add_months(latest_settled, 1)
+    regular = conflict_regular_reporter(ladder, next_month)
+    n_12 = sum(1 for m in _window_months(next_month, 12) if m in ladder)
     rows: List[Tuple[str, float]] = []
-    first = min(reported) if reported else None
+    detail: List[Dict[str, Any]] = []
+    first = min(ladder) if ladder else None
+    last = _add_months(today.strftime("%Y-%m"), -1)
     if first:
         ym = first
-        while ym <= latest_settled:
-            value, status = resolve_conflict_month(reported, ym, today, held=held)
-            if status in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
-                rows.append((ym, float(value)))
+        while ym <= last:
+            res = resolve_conflict_month_detail(reported, ym, today, held=held, lower=lower.get(ym, ()))
+            if res.status in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
+                rows.append((ym, float(res.value)))
+                detail.append({
+                    "ym": ym, "value": float(res.value),
+                    "rung": res.rung or ("zero" if res.status == CONFLICT_STATUS_QUIET else None),
+                    "lower_bound": bool(res.lower_bound), "flags": list(res.flags),
+                })
             ym = _add_months(ym, 1)
     return {
         "rows": rows,
+        "rows_detail": detail,
         "latest_settled_month": latest_settled,
+        "latest_month_shown": rows[-1][0] if rows else None,
         "regular_reporter": regular,
         "n_reported_12m": n_12,
         "n_unsettled_reported": sum(1 for m in reported if m > latest_settled),
@@ -710,10 +942,11 @@ def _conflict_displacement(
     iso = (iso3 or "").upper()
     reported = reported_all.get(iso, {})
     held = held_all.get(iso, set())
+    lower = conflict_ladder_lower(con, before_ym=before_ym).get(iso, {})
     values: List[float] = []
     n_reported = n_quiet = n_unknown = 0
     for ym in months:
-        value, status = resolve_conflict_month(reported, ym, when, held=held)
+        value, status = resolve_conflict_month(reported, ym, when, held=held, lower=lower.get(ym, ()))
         if status == CONFLICT_STATUS_REPORTED:
             values.append(float(value))
             n_reported += 1
@@ -829,11 +1062,16 @@ def last_observed_value(
             reported_all, held_all = conflict_displacement_series(con, before_ym=before)
             reported = reported_all.get(iso, {})
             held = held_all.get(iso, set())
+            lower = conflict_ladder_lower(con, before_ym=before).get(iso, {})
             ym = _add_months(before, -1)
             for _ in range(CONFLICT_WINDOW_MONTHS):
-                value, status = resolve_conflict_month(reported, ym, when, held=held)
+                res = resolve_conflict_month_detail(
+                    reported, ym, when, held=held, lower=lower.get(ym, ()),
+                )
+                status = res.status
+                value = res.value
                 if status == CONFLICT_STATUS_REPORTED:
-                    return float(value), ym, CONFLICT_DISPLACEMENT_SERIES
+                    return float(value), ym, res.source_desc or CONFLICT_DISPLACEMENT_SERIES
                 if status == CONFLICT_STATUS_QUIET:
                     return 0.0, ym, f"{CONFLICT_DISPLACEMENT_SERIES}:quiet_month"
                 ym = _add_months(ym, -1)

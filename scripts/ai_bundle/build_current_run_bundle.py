@@ -208,10 +208,10 @@ def _ace_pa_scoring_classes(con, questions: list[dict[str, Any]]) -> dict[str, s
     if not acepa:
         return {}
     try:
-        from pythia.tools.base_rate_spd import conflict_displacement_series  # noqa: PLC0415
+        from pythia.tools.base_rate_spd import conflict_ladder_reported  # noqa: PLC0415
         from pythia.tools.scoring_class import conflict_scoring_class  # noqa: PLC0415
 
-        reported, _held = conflict_displacement_series(con)
+        reported = conflict_ladder_reported(con)
     except Exception as exc:  # noqa: BLE001 - a missing series leaves the class unknown
         LOGGER.warning("ACE/PA scoring class unavailable: %s", exc)
         return {}
@@ -1497,7 +1497,7 @@ def displacement_coverage(con, attention_rows: list[dict[str, Any]]) -> dict[str
         parts.append(
             "Conflict displacement was not asked again in this run for "
             + _join_names([_names.country_name(i) for i in not_asked_again])
-            + ", which IDMC does not report regularly; the earlier forecast for "
+            + ", which no displacement source reports regularly; the earlier forecast for "
             "this window stands, and it cannot be marked."
         )
     return {

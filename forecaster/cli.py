@@ -885,7 +885,12 @@ def _build_conflict_base_rate(
             settled = conflict_displacement_settled_rows(con, iso3_up, date.today())
             disp_rows = settled["rows"][-6:]
             logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(disp_rows))
-            displacements_data = _compute_trajectory(disp_rows, "IDMC")
+            rungs = settled.get("rows_detail", [])[-6:]
+            non_idmc = any(r.get("rung") not in ("idmc", "zero") for r in rungs)
+            displacements_data = _compute_trajectory(
+                disp_rows, "IDMC, then OCHA/UN reports, then IOM DTM" if non_idmc else "IDMC"
+            )
+            displacements_data["rungs"] = rungs
             displacements_data["latest_settled_month"] = settled["latest_settled_month"]
             displacements_data["regular_reporter"] = settled["regular_reporter"]
             displacements_data["n_reported_12m"] = settled["n_reported_12m"]

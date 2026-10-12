@@ -93,7 +93,7 @@ def test_resolutions_carry_the_class_and_readers_can_leave_indicative_out(tmp_pa
     afg = [r for r in rows if r[0].startswith("AFG")]
     assert [r[1] for r in afg] == [1, 3]                     # only reported months resolve
     assert {r[2] for r in afg} == {INDICATIVE}
-    assert all("not a regular IDMC reporter" in r[3] for r in afg)
+    assert all("not a regular reporter on the displacement ladder" in r[3] for r in afg)
 
     con.execute(
         "CREATE TABLE scores (question_id TEXT, horizon_m INTEGER, model_name TEXT, value DOUBLE)"
@@ -140,7 +140,7 @@ def test_the_report_and_the_page_say_an_indicative_forecast_cannot_be_marked():
     entry = {"rank": 1, "iso3": "AFG", "hazard_code": "ACE", "metric": "PA",
              "question_ids": ["AFG_ACE_PA_2026-11"]}
     text = "\n".join(render._render_entry(entry, resolver, extras=extras))
-    assert "cannot be marked: IDMC does not report this country every month" in text
+    assert "cannot be marked: no source (IDMC, OCHA or UN" in text
     other = dict(entry, iso3="SDN", question_ids=["SDN_ACE_PA_2026-11"])
     assert "cannot be marked" not in "\n".join(render._render_entry(other, resolver, extras=extras))
     content = {"attention": [dict(entry), dict(other)]}
