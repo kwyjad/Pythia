@@ -310,3 +310,32 @@ def test_a_run_shows_the_reading_to_every_lane_and_records_it(run_env, monkeypat
         assert (ok, failed) == (1, 0) and nowcast is not None
     finally:
         con.close()
+
+
+def test_the_pa_block_reads_the_resolution_machine_when_it_exists(monkeypatch):
+    """Since 2026-10-12 FL/TC PA resolve on haz_resolutions; the reading shows it."""
+    import json
+
+    import duckdb
+
+    monkeypatch.setattr(sibyl_config, "BACKTEST_MODE", False)
+    con = duckdb.connect()
+    today = date.today()
+    prev = f"{today.year - (today.month == 1):04d}-{(today.month - 2) % 12 + 1:02d}"
+    _facts(con, [(prev, "SOM", "FL", "affected", 42000, None, "IFRC", None, None)])
+    con.execute(
+        "CREATE TABLE haz_resolutions (iso3 TEXT, year INTEGER, month INTEGER, hazard TEXT, "
+        "status TEXT, value DOUBLE, provenance_json TEXT, rule_fired TEXT, provisional BOOLEAN)"
+    )
+    y, m = int(prev[:4]), int(prev[5:7])
+    con.execute(
+        "INSERT INTO haz_resolutions VALUES ('SOM', ?, ?, 'FL', 'RESOLVED_VALUE', 1500, ?, "
+        "'ladder:idmc_idu:lower_bound', TRUE)",
+        [y, m, json.dumps({"winning_rung": "idmc_idu", "value_is_lower_bound": True})],
+    )
+    reading = rr.build_resolver_reading(con, _q("FL", "PA"), today, country_name="Somalia")
+    t = reading.text
+    assert "as the resolution machine answers them" in t
+    assert f"- {prev}: 1,500 people affected (idmc_idu, a displacement count: a LOWER BOUND" in t
+    assert "42,000" not in t
+    assert reading.record["source"] == "haz_resolutions+gdacs"

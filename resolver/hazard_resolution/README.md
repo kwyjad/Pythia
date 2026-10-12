@@ -801,9 +801,10 @@ question). The second file exists because the failure mode at this seam is
 silent: a loader whose text nobody renders costs money and changes nothing,
 which is how CrisisWatch and the HS grounding packs were both lost.
 
-## Production wiring (Aug 2026 — shadow mode)
+## Production wiring (Aug 2026; flood and cyclone grade forecasts since Oct 2026)
 
-The machine runs in two workflows, and its answers grade nothing yet:
+The machine runs in two workflows. Since 2026-10-12 its flood and cyclone
+answers grade the FL/PA and TC/PA forecasts (see "Scoring" below):
 
 - **`resolver_update.yml` Phase 2.4 + 2.5** (11th monthly): Phase 2.4 first
   refreshes what the machine reads from the same DB — the NMME ingest and
@@ -823,12 +824,21 @@ The machine runs in two workflows, and its answers grade nothing yet:
   canonical-DB re-upload. Self-converging: once the window is covered the
   run is a near-instant no-op that rolls forward as months freeze.
 
-**Shadow mode** means `pythia/tools/compute_resolutions.py` still resolves PA
-questions from `facts_resolved` (IFRC first) — nothing reads
-`haz_resolutions` outside this package except the Phase 6 prompt block. The
-flip to scoring is a deliberate follow-up change, taken only after the
-monthly acceptance reports show the machine meeting its ≥80% target with
-credible provenance.
+**Scoring (since 2026-10-12, owner decision).** `pythia/tools/compute_resolutions.py`
+resolves FL/PA and TC/PA questions from `haz_resolutions` (`MACHINE_PA_HAZARDS`):
+`RESOLVED_VALUE` and `RESOLVED_ZERO` resolve whether provisional or frozen (a
+provisional answer is re-read every run, so a revision before the freeze
+flows through, and `resolution_vintages` keeps the `first` and `at_freeze`
+readings); `NO_DATA` and no row leave the horizon unresolved, with no
+fall-back to the IFRC rows the ladder already read. `source_desc` names the
+answering rung and value type (`haz_resolutions:idmc_idu:displaced_lower_bound`
+for an IDMC win, which is scored as the answer and is a lower bound on
+people affected; `haz_resolutions:detection_absence:zero` for a zero). The
+Phase 6 block states this rule to the forecaster. Drought answers are still
+shadow: DR questions resolve on IPC Phase 3+ (`PHASE3PLUS_IN_NEED`), not on
+this machine. On the canonical DB of 12 Oct 2026 the switch took FL/PA from
+9 to 47 of 66 due horizon-months and TC/PA from 1 to 24 of 33; the rest
+were cells still pending before the freeze.
 
 **Telemetry**: every real extraction call writes a rich `llm_calls` row
 (`phase='hazard_extraction'`, mapped to the Costs page's "PA resolution"

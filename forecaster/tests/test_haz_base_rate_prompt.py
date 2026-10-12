@@ -149,6 +149,22 @@ def test_flood_prompt_states_the_gdacs_alert_rule(seeded_db):
     assert "silent ReliefWeb sweep resolves ZERO, not missing" in prompt_text
 
 
+@pytest.mark.parametrize("case", ["flood", "cyclone"])
+def test_flood_and_cyclone_prompts_say_the_question_resolves_on_the_machine(case, seeded_db):
+    """Since 2026-10-12 FL/TC PA questions are SCORED on the machine's answer
+    (compute_resolutions.MACHINE_PA_HAZARDS), and a displacement figure can
+    be that answer. A forecaster not told so forecasts the wrong quantity."""
+    iso3, _name, hazard, window_start, _months, _window = CASES[case]
+    prompt_text = _build(_question(iso3, hazard, window_start))
+
+    assert "HOW THIS RESOLVES (on this machine's answer)" in prompt_text
+    assert (
+        "IDMC displacement, when it is the best figure, IS the answer and a "
+        "LOWER BOUND on people affected." in prompt_text
+    )
+    assert "No figure on any rung by the freeze: unresolved" in prompt_text
+
+
 def test_drought_prompt_states_the_ipc_rule_and_its_caveat(seeded_db):
     iso3, _name, hazard, window_start, _months, _window = CASES["drought"]
     prompt_text = _build(_question(iso3, hazard, window_start))

@@ -254,9 +254,10 @@ def render_reference_block(ref: Reference, question: Any, forecast_keys: Sequenc
         )
     else:
         lines.append(
-            "Source: people-affected records (IFRC GO, then IDMC) and the GDACS event rate "
-            "for each calendar month. Reference = P(no impact or no record) from that "
-            "month's event rate; the rest spread like that month's past records."
+            "Built from people-affected records (IFRC GO, then IDMC) and the GDACS event "
+            "rate for each calendar month (the question itself resolves on the resolution "
+            "machine; see HOW THIS RESOLVES). Reference = P(no impact) from that month's "
+            "event rate; the rest spread like that month's past records."
         )
     if ref.history:
         lines.append("")
@@ -292,7 +293,7 @@ def render_reference_block(ref: Reference, question: Any, forecast_keys: Sequenc
     elif v1:
         lines.append("")
         lines.append(
-            f"Read off these vectors: no impact or no record {_pct(v1[0])} in month 1 "
+            f"Read off these vectors: no impact {_pct(v1[0])} in month 1 "
             f"and {_pct(v6[0])} in month 6."
         )
     return "\n".join(lines)

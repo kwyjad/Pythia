@@ -205,7 +205,14 @@ improving in neighbouring countries.\
 _FL = """\
 HAZARD-SPECIFIC REASONING GUIDANCE: FLOOD (FL)
 
-This question asks about people affected by flooding as recorded by IFRC Montandon.
+This question asks about people affected by flooding as resolved by Pythia's \
+people-affected resolution machine. In a month with a qualifying flood it takes the \
+first figure on a fixed ladder of sources: EM-DAT (not read today), figures stated in ReliefWeb \
+reports, IFRC GO, then IDMC displacement records. When an IDMC displacement count is \
+the best figure available it IS the answer, and it is a floor on people affected \
+(only those displaced), not an estimate of everyone affected. A month with no \
+qualifying flood and no ReliefWeb report of one resolves to ZERO. The resolution \
+machine's base-rate block, where present, states the exact rule.
 
 Key reasoning principles for flood forecasting:
 - Flooding is HIGHLY SEASONAL. Your prior should be strongly shaped by whether the \
@@ -227,9 +234,9 @@ stage.
 - Urban vs. rural matters enormously for PA. Flooding in densely populated river \
 basins or coastal cities produces far more people affected than equivalent rainfall \
 in sparsely populated areas.
-- IFRC Montandon data may be SPARSE for smaller events. The base rate from Resolver \
-may undercount routine seasonal flooding if it only captures events large enough for \
-IFRC reporting. Treat a sparse base rate as a lower bound, not the full picture.
+- The historical record mixes sources of different scope. Where much of it is \
+displacement counts, the severity quantiles sit below the truth; the base-rate block \
+says how much of the record is displacement.
 - Month-to-month SPDs should vary with the seasonal cycle. Do not assign identical \
 SPDs to a dry-season month and a peak-monsoon month.
 
@@ -383,8 +390,14 @@ food insecurity driver.\
 _TC = """\
 HAZARD-SPECIFIC REASONING GUIDANCE: TROPICAL CYCLONE (TC)
 
-This question asks about people affected by tropical cyclones as recorded by IFRC \
-Montandon.
+This question asks about people affected by tropical cyclones as resolved by Pythia's \
+people-affected resolution machine. In a month with a qualifying storm track it takes \
+the first figure on a fixed ladder of sources: EM-DAT (not read today), figures stated in ReliefWeb \
+reports, IFRC GO, then IDMC displacement records. When an IDMC displacement count \
+(often pre-emptive evacuations) is the best figure available it IS the answer, and it \
+is a floor on people affected, not an estimate of everyone affected. A month with no \
+qualifying storm and no ReliefWeb report of one resolves to ZERO. The resolution \
+machine's base-rate block, where present, states the exact rule.
 
 Key reasoning principles for tropical cyclone forecasting:
 - Cyclone impacts are EPISODIC and BINARY. In any given month, either a significant \

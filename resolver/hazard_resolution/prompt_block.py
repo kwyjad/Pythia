@@ -328,11 +328,27 @@ def resolution_process_text(rulebook: Rulebook, hazard: str) -> str:
     if bool(rulebook.get("sanity.population_cap")):
         cap_clause += " and national population"
 
+    # Since 2026-10-12 a flood or cyclone people-affected question RESOLVES
+    # on this machine's answer (pythia/tools/compute_resolutions.py,
+    # MACHINE_PA_HAZARDS), so the block states it as the resolution rule, not
+    # as background. The displacement sentence names the lower-bound rungs
+    # from the rulebook: a forecaster who does not know a displacement count
+    # can be the answer will forecast the wrong quantity.
+    lower = [str(r) for r in (rulebook.get("lower_bound_rungs") or [])]
+    lower_names = " / ".join(
+        _RUNG_LABEL.get(r, r).replace(" (lower bound)", "") for r in lower
+    )
+    lower_clause = (
+        f" {lower_names}, when it is the best figure, IS the answer and a "
+        f"LOWER BOUND on people affected."
+        if lower_names else ""
+    )
     return (
-        f"HOW THIS RESOLVES: {detection}; no qualifying event plus a silent "
-        f"ReliefWeb sweep resolves ZERO, not missing. A detected month takes the "
-        f"first figure on the fixed ladder {ladder_text}, capped by {cap_clause}; "
-        f"{freeze}."
+        f"HOW THIS RESOLVES (on this machine's answer): {detection}; no "
+        f"qualifying event plus a silent ReliefWeb sweep resolves ZERO, not "
+        f"missing. A detected month takes the first figure on the fixed ladder "
+        f"{ladder_text}, capped by {cap_clause}.{lower_clause} No figure on any "
+        f"rung by the freeze: unresolved; {freeze}."
     )
 
 
