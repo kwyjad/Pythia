@@ -1639,7 +1639,94 @@ class BundleBuilder:
         self._backcast_progress(dest)
         fetches = self._source_fetches(dest)
         self._crisiswatch_backfill(dest)
-        return {"cells": cells, "figures": figures, "source_fetches": fetches}
+        conflict = self._conflict_displacement(dest)
+        return {"cells": cells, "figures": figures, "source_fetches": fetches,
+                "conflict_displacement": conflict}
+
+    #: The conflict displacement sources' tables (Oct 2026, Part A): recorded
+    #: and reported only; nothing resolves on them yet.
+    CONFLICT_DISPLACEMENT_TABLES = (
+        "conflict_displacement_cell_ledger",
+        "conflict_displacement_candidates",
+        "dtm_conflict_lower_bounds",
+    )
+
+    def _conflict_displacement(self, dest: Path) -> dict[str, Any]:
+        """Counts, the per-cell ledger, the admitted figures and the DTM bounds.
+
+        The ledger says why each (country, month) the ReliefWeb extraction
+        assessed has or has no figure; the candidates are the admitted
+        figures with their quotes; the DTM table is the lower bound per
+        month with the rounds it came from.
+        """
+
+        out: dict[str, Any] = {}
+        for name in ("conflict_displacement_extract.json",
+                     "conflict_displacement_extract_plan.json", "dtm_conflict.json"):
+            path = self.diagnostics_dir / name
+            if path.is_file():
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception as exc:  # noqa: BLE001
+                    self.problem(f"{name} unreadable: {exc}")
+                    continue
+                write_json(dest / "conflict_displacement" / name,
+                           redact_obj(payload, self.secrets))
+        tables = self.tables()
+        if "conflict_displacement_cell_ledger" in tables:
+            result = self.query(
+                "SELECT iso3, ym, reason, best_value, best_source_ref, docs_selected, "
+                "docs_read, docs_cached, docs_failed, calls_made, cost_usd, "
+                "figures_extracted, figures_admitted, rejected_counts_json, "
+                "budget_capped, window_closed, run_id, updated_at "
+                "FROM conflict_displacement_cell_ledger ORDER BY iso3, ym"
+            )
+            if result is not None:
+                write_csv(
+                    dest / "conflict_displacement" / "cell_ledger.csv", result[1], result[0],
+                    preamble=(
+                        "SQL: SELECT ... FROM conflict_displacement_cell_ledger.\n"
+                        "One row per (country, month) the ReliefWeb extraction assessed,\n"
+                        "with the reason it has or has no admitted figure."
+                    ),
+                )
+                reasons: dict[str, int] = {}
+                for row in result[1]:
+                    reasons[str(row[2])] = reasons.get(str(row[2]), 0) + 1
+                out["cells"] = len(result[1])
+                out["cells_by_reason"] = reasons
+        if "conflict_displacement_candidates" in tables:
+            result = self.query(
+                "SELECT iso3, ym, preference_rank, value_persons, stated_value, stated_unit, "
+                "period_start, period_end, period_end_source, cumulative_or_new, cause, "
+                "stated_by, authority_tier, area, doc_id, doc_url, doc_publisher, "
+                "doc_primary_country, quote "
+                "FROM conflict_displacement_candidates ORDER BY iso3, ym, preference_rank"
+            )
+            if result is not None:
+                write_csv(
+                    dest / "conflict_displacement" / "candidates.csv", result[1], result[0],
+                    preamble="SQL: SELECT ... FROM conflict_displacement_candidates.",
+                )
+                out["admitted_figures"] = len(result[1])
+        if "dtm_conflict_lower_bounds" in tables:
+            result = self.query(
+                "SELECT iso3, ym, value, value_type, operation, n_pairs, max_gap_days, "
+                "pairs_json, computed_at FROM dtm_conflict_lower_bounds ORDER BY iso3, ym"
+            )
+            if result is not None:
+                write_csv(
+                    dest / "conflict_displacement" / "dtm_lower_bounds.csv", result[1],
+                    result[0],
+                    preamble=(
+                        "SQL: SELECT ... FROM dtm_conflict_lower_bounds.\n"
+                        "value is a LOWER BOUND on people newly displaced by conflict:\n"
+                        "the rise in DTM's conflict IDP stock between two rounds at most\n"
+                        "max_gap_days apart, attributed to the later round's month."
+                    ),
+                )
+                out["dtm_lower_bound_months"] = len(result[1])
+        return out
 
     #: The stream `scripts/refresh_crisiswatch.py` writes its accounting to.
     CRISISWATCH_BACKFILL_STREAM = "crisiswatch_backfill"
@@ -2455,6 +2542,7 @@ class BundleBuilder:
             self._check_crisiswatch_headings_all_map_to_a_country,
             self._check_spei3_feed_is_current,
             self._check_spei3_producer_can_commit,
+            self._check_conflict_displacement_inside_its_month,
         ):
             try:
                 check()
@@ -3708,6 +3796,70 @@ class BundleBuilder:
             "; ".join(offenders[:10])
             or "Every accepted figure with a date is about a date inside its cell's "
             "reporting window, and about the cell's own country.",
+        )
+
+    def _check_conflict_displacement_inside_its_month(self) -> None:
+        """No admitted conflict displacement figure lies outside its month.
+
+        A figure is admitted only when its own date or period lies inside
+        the month, from a document about the cell's country; a DTM bound
+        only from rounds at most ``max_gap_days`` apart, the later one in
+        the month. This re-tests both over the stored rows, so it fails the
+        day either rule stops holding.
+        """
+
+        name = "no_conflict_displacement_figure_lies_outside_its_month"
+        tables = self.tables()
+        have = [t for t in ("conflict_displacement_candidates", "dtm_conflict_lower_bounds")
+                if t in tables]
+        if not have:
+            return self._check(name, "SKIP", "", "", "neither conflict displacement table exists")
+        from resolver.hazard_resolution.sources import month_bounds, parse_date
+
+        offenders: list[str] = []
+        tested = 0
+        if "conflict_displacement_candidates" in tables:
+            result = self.query(
+                "SELECT iso3, ym, period_start, period_end, doc_primary_country, doc_id "
+                "FROM conflict_displacement_candidates"
+            )
+            for iso3, ym, p_start, p_end, primary, doc_id in (result[1] if result else []):
+                tested += 1
+                start, end = parse_date(p_start), parse_date(p_end)
+                try:
+                    m_start, m_end = month_bounds(str(ym))
+                except Exception:  # noqa: BLE001
+                    offenders.append(f"{iso3}/{ym} doc {doc_id}: unreadable month")
+                    continue
+                if start is None or end is None or start < m_start or end > m_end:
+                    offenders.append(f"{iso3}/{ym} doc {doc_id}: period {p_start}..{p_end}")
+                if primary and str(primary).upper() != str(iso3).upper():
+                    offenders.append(f"{iso3}/{ym} doc {doc_id}: document is about {primary}")
+        if "dtm_conflict_lower_bounds" in tables:
+            result = self.query(
+                "SELECT iso3, ym, max_gap_days, pairs_json FROM dtm_conflict_lower_bounds"
+            )
+            for iso3, ym, gap_cap, pairs_json in (result[1] if result else []):
+                tested += 1
+                try:
+                    pairs = json.loads(pairs_json or "[]")
+                except Exception:  # noqa: BLE001
+                    pairs = []
+                for pair in pairs:
+                    to = parse_date(pair.get("to"))
+                    if to is None or to.strftime("%Y-%m") != str(ym):
+                        offenders.append(f"DTM {iso3}/{ym}: later round {pair.get('to')}")
+                    if int(pair.get("gap_days") or 0) > int(gap_cap or 0):
+                        offenders.append(f"DTM {iso3}/{ym}: gap {pair.get('gap_days')} d")
+        if not tested:
+            return self._check(name, "SKIP", "", "", "no conflict displacement rows yet "
+                               "(they fill once the backfill has run)")
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {tested} rows", "0",
+            "; ".join(offenders[:10])
+            or "Every admitted extracted figure is about a period inside its month and "
+            "its own country, and every DTM bound comes from close rounds ending in its month.",
         )
 
     def _check_resolution_above_rejection_ceiling(self) -> None:

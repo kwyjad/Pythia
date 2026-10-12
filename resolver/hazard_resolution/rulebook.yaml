@@ -1086,3 +1086,61 @@ idmc_idu:
     DR: ["drought"]
   lookback_months: 3
   lookahead_months: 1
+
+# ---------------------------------------------------------------------------
+# CONFLICT DISPLACEMENT SOURCES (Oct 2026, Part A of the ACE/PA ladder)
+#
+# Two further sources for people newly displaced by conflict, beside IDMC:
+# figures transcribed from OCHA / UN / government documents on ReliefWeb
+# (resolver/ingestion/conflict_displacement_extract.py) and the increase in
+# IOM DTM's conflict IDP stock between two close rounds, a lower bound
+# (resolver/ingestion/dtm_conflict.py). In Part A they are recorded and
+# reported only: nothing here changes how any question resolves.
+#
+# A TOP-LEVEL section on purpose. It is neither a hazard section nor one of
+# Rulebook._SHARED_SECTIONS, so it is outside every hazard fingerprint: an
+# edit here must never re-walk flood, cyclone or drought history
+# (resolver/tests/test_conflict_displacement_extract.py pins the three
+# digests). Do not move it under `reliefweb:` or `extraction:`, which ARE
+# shared sections.
+# ---------------------------------------------------------------------------
+conflict_displacement:
+  extraction:
+    enabled: true
+    # The cache key. Distinct from extraction.prompt_version, so a PA cache
+    # entry can never answer a conflict question or the reverse.
+    prompt_version: conflict_v1
+    # Its OWN monthly cap, counted over conflict_doc_extractions only. It
+    # never draws on extraction.max_calls_per_month or the PA machine's
+    # live reserve, which count haz_doc_extractions. At the observed USD
+    # 0.0018 a call, 2000 calls is about USD 4 a month. A one-dispatch
+    # backfill raises it through PYTHIA_CONFLICT_EXTRACTION_MONTHLY_CAP;
+    # this default is never edited to clear a backlog.
+    max_calls_per_month: 2000
+  documents:
+    # Documents read per country-month. The extraction call count per cell,
+    # so the first lever if the cap binds. Five, because the ranking puts
+    # OCHA and government documents first and the backfill (about 1,080
+    # cells) must fit one workflow job.
+    max_docs_per_cell: 5
+    # Published month start .. month end + this many days. A figure for a
+    # month is admissible only if its own date or period lies inside the
+    # month; the pad only lets a later report state it.
+    publication_pad_days: 30
+    # ReliefWeb source types read. OCHA and UN agencies file as
+    # "International Organization".
+    source_types: ["International Organization", "Government"]
+    formats: ["Situation Report", "News and Press Release", "Assessment", "UN Document"]
+    # Full-text query over title and body. Unverified against the live API
+    # from the build sandbox (api.reliefweb.int is denied there); a wrong
+    # query fails loud as a fetch error naming the API's answer.
+    query: "(displaced OR displacement OR fled OR flee) AND (conflict OR violence OR attack OR attacks OR clashes OR fighting OR armed OR insecurity)"
+  # Causes a figure may be attributed to and still count. Anything else
+  # (disaster, other, unstated) is rejected and counted.
+  admissible_causes: ["conflict", "violence"]
+  dtm:
+    # Two consecutive rounds bracket a month only when they are at most this
+    # many days apart. Never differenced across a longer gap, never
+    # apportioned across months.
+    max_gap_days: 35
+    months: 36

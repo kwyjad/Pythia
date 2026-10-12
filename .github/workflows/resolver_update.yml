@@ -31,6 +31,9 @@ concurrency:
           Context: enso, seasonal_tc, hdx_signals, crisiswatch.
           History: acled_history (ACLED monthly fatalities from 2018-01 to the month before last,
           one API year at a time, then the reference scores re-run; months_back is ignored).
+          Conflict displacement: displacement_sources (ReliefWeb extraction for the trailing
+          3 months + IOM DTM lower bounds), displacement_backfill (the extraction for the last
+          24 complete months, with the cap raised for this dispatch, + DTM).
           Leave empty to run all. Examples: "gdacs" or "gdacs, fewsnet_ipc".
         required: false
         default: ""
@@ -956,6 +959,82 @@ jobs:
           set -o pipefail
           echo "::group::PA machine raw-cache retention"
           python -m resolver.hazard_resolution.retention --apply 2>&1 | tee diagnostics/phase25_haz_retention.log || echo "::warning::raw-cache retention failed (non-fatal)"
+          echo "::endgroup::"
+
+      # === PHASE 2.6: CONFLICT DISPLACEMENT SOURCES (non-fatal) ===
+      # Two further sources for people newly displaced by conflict, beside
+      # IDMC: figures transcribed from OCHA / UN / government documents on
+      # ReliefWeb, and the increase in IOM DTM's conflict IDP stock between
+      # two rounds at most 35 days apart (a lower bound). Recorded and
+      # reported only (Part A, Oct 2026): nothing resolves on them yet.
+      #
+      # The extraction has its own monthly cap (rulebook
+      # conflict_displacement.extraction.max_calls_per_month, 2000) and its
+      # own ledger, so it never draws on the PA machine's cap or reserve. The
+      # live pass reads the three complete months before today. The plan
+      # (cells, the most calls, the most it can cost) is printed before any
+      # call is made.
+      #
+      # One-dispatch backfill: only_connector=displacement_backfill reads the
+      # last 24 complete months for every ACE country, with the cap raised
+      # for THIS dispatch only. ~1,080 cells x at most 5 documents; the plan
+      # line prices it before it starts. A run that hits the clock says which
+      # cells it did not reach; a second dispatch resumes from the cache.
+      - name: "Phase 2.6: Conflict displacement, ReliefWeb extraction (trailing months)"
+        id: phase26_extract
+        timeout-minutes: 30
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'displacement_sources') }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p diagnostics
+          echo "::group::Conflict displacement extraction"
+          timeout 27m python -m resolver.ingestion.conflict_displacement_extract \
+            --db "${BACKFILL_DB_PATH}" --trailing 3 --max-minutes 24 \
+            --summary-out diagnostics/conflict_displacement_extract.json \
+            2>&1 | tee diagnostics/phase26_conflict_extract.log \
+            || echo "::warning::conflict displacement extraction failed or timed out (non-fatal; exit $?)"
+          echo "::endgroup::"
+
+      - name: "Phase 2.6: Conflict displacement, ReliefWeb extraction BACKFILL (24 months, dispatch)"
+        id: phase26_extract_backfill
+        timeout-minutes: 270
+        if: ${{ contains(inputs.only_connector, 'displacement_backfill') }}
+        continue-on-error: true
+        env:
+          # One dispatch only: the rulebook default (2000) is never edited.
+          PYTHIA_CONFLICT_EXTRACTION_MONTHLY_CAP: "6000"
+        run: |
+          set -o pipefail
+          mkdir -p diagnostics
+          echo "::group::Conflict displacement extraction backfill (plan first)"
+          python -m resolver.ingestion.conflict_displacement_extract \
+            --db "${BACKFILL_DB_PATH}" --trailing 24 --plan-only \
+            --summary-out diagnostics/conflict_displacement_extract_plan.json \
+            2>&1 | tee diagnostics/phase26_conflict_extract_plan.log
+          timeout 265m python -m resolver.ingestion.conflict_displacement_extract \
+            --db "${BACKFILL_DB_PATH}" --trailing 24 --max-minutes 255 \
+            --summary-out diagnostics/conflict_displacement_extract.json \
+            2>&1 | tee diagnostics/phase26_conflict_extract.log \
+            || echo "::warning::conflict displacement backfill failed or timed out (non-fatal; exit $?)"
+          echo "::endgroup::"
+
+      - name: "Phase 2.6: Conflict displacement, IOM DTM lower bounds"
+        id: phase26_dtm
+        timeout-minutes: 15
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'displacement_sources') || contains(inputs.only_connector, 'displacement_backfill') }}
+        continue-on-error: true
+        env:
+          DTM_API_KEY: ${{ secrets.DTM_API_KEY }}
+          DTM_API_PRIMARY_KEY: ${{ secrets.DTM_API_PRIMARY_KEY }}
+        run: |
+          set -o pipefail
+          mkdir -p diagnostics
+          echo "::group::DTM conflict lower bounds"
+          timeout 13m python -m resolver.ingestion.dtm_conflict \
+            --db "${BACKFILL_DB_PATH}" --summary-out diagnostics/dtm_conflict.json \
+            2>&1 | tee diagnostics/phase26_dtm_conflict.log \
+            || echo "::warning::DTM conflict lower bounds failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===

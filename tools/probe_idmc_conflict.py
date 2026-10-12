@@ -149,6 +149,92 @@ def settle_curve(
     }
 
 
+#: Span buckets (days, inclusive) for the held-out records. A record over 31
+#: days is held out of every month by the ingest (idmc_conflict.MAX_SPAN_DAYS).
+SPAN_BUCKETS = ((32, 62), (63, 92), (93, 183), (184, 365), (366, None))
+HELD_SPAN_MIN_DAYS = 32
+
+
+def _bucket_label(lo: int, hi: int | None) -> str:
+    return f"{lo}-{hi}d" if hi is not None else f"{lo}d+"
+
+
+def _quarter(day: dt.date) -> tuple[int, int]:
+    return day.year, (day.month - 1) // 3
+
+
+def held_span_distribution(
+    conflict: list[Mapping[str, Any]], *, since: str | None = "2025-01",
+) -> dict[str, Any]:
+    """The span distribution of HELD-OUT conflict records, per country.
+
+    A held-out record is a recommended conflict figure spanning more than 31
+    days (the ingest never apportions it, so no month carries it). Report
+    only: for each country the spans in days, how many records fit inside
+    one calendar quarter, how many inside a six-calendar-month window (the
+    forecast window), and the people in each span bucket. This decides
+    whether quarterly ACE/PA questions could resolve the biggest crises.
+    Records starting before ``since`` (YYYY-MM) are left out.
+    """
+
+    per_country: dict[str, dict[str, Any]] = {}
+    for r in conflict:
+        role = str(r.get("role") or "").lower()
+        if role and not role.startswith("recommended"):
+            continue
+        start, end, fig = _start(r), _end(r), _figure(r)
+        if not (start and end and fig is not None) or end < start:
+            continue
+        # The ingest's own test: (end - start).days > MAX_SPAN_DAYS (31).
+        span = (end - start).days
+        if span < HELD_SPAN_MIN_DAYS:
+            continue
+        if since and start.strftime("%Y-%m") < since:
+            continue
+        iso3 = str(r.get("iso3") or "").upper() or "?"
+        c = per_country.setdefault(iso3, {
+            "records": 0, "people": 0.0, "spans": [],
+            "fit_one_quarter": 0, "people_fit_one_quarter": 0.0,
+            "fit_six_month_window": 0, "people_fit_six_month_window": 0.0,
+            "people_by_span": {_bucket_label(lo, hi): 0.0 for lo, hi in SPAN_BUCKETS},
+            "records_by_span": {_bucket_label(lo, hi): 0 for lo, hi in SPAN_BUCKETS},
+        })
+        c["records"] += 1
+        c["people"] += fig
+        c["spans"].append(span)
+        if _quarter(start) == _quarter(end):
+            c["fit_one_quarter"] += 1
+            c["people_fit_one_quarter"] += fig
+        months_spanned = (end.year - start.year) * 12 + end.month - start.month + 1
+        if months_spanned <= 6:
+            c["fit_six_month_window"] += 1
+            c["people_fit_six_month_window"] += fig
+        for lo, hi in SPAN_BUCKETS:
+            if span >= lo and (hi is None or span <= hi):
+                label = _bucket_label(lo, hi)
+                c["people_by_span"][label] += fig
+                c["records_by_span"][label] += 1
+                break
+    out: dict[str, Any] = {}
+    for iso3, c in sorted(per_country.items(), key=lambda kv: -kv[1]["people"]):
+        spans = c.pop("spans")
+        c["span_days"] = _quantiles([float(s) for s in spans], (0.1, 0.5, 0.9)) | {
+            "min": min(spans), "max": max(spans),
+        }
+        out[iso3] = c
+    return {
+        "since": since,
+        "countries": len(out),
+        "records": sum(c["records"] for c in out.values()),
+        "people": sum(c["people"] for c in out.values()),
+        "people_fit_one_quarter": sum(c["people_fit_one_quarter"] for c in out.values()),
+        "people_fit_six_month_window": sum(
+            c["people_fit_six_month_window"] for c in out.values()
+        ),
+        "per_country": out,
+    }
+
+
 def analyse(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     """Everything the report says, from the records alone (pure; tested)."""
 
@@ -251,6 +337,7 @@ def analyse(records: list[Mapping[str, Any]]) -> dict[str, Any]:
         "multi_month_records": multi_month,
         "records_over_31_days": over_31,
         "composition": [_composition(i, m) for i, m in targets],
+        "held_spans": held_span_distribution(conflict),
     }
 
 
@@ -275,6 +362,33 @@ def _markdown(report: dict[str, Any]) -> str:
         lines.append(f"by role: {comp['people_by_role']}; spans: {comp.get('spans')}")
         for rec in comp["largest_records"]:
             lines.append(f"- {rec}")
+    held = report.get("held_spans") or {}
+    if held:
+        lines.append("")
+        lines.append(
+            f"## Held-out records (recommended, > 31 days) since {held.get('since')}"
+        )
+        lines.append(
+            f"{held.get('records')} records, {held.get('people', 0):,.0f} people in "
+            f"{held.get('countries')} countries; {held.get('people_fit_one_quarter', 0):,.0f} "
+            f"people in records inside one calendar quarter, "
+            f"{held.get('people_fit_six_month_window', 0):,.0f} inside a six-month window"
+        )
+        labels = [_bucket_label(lo, hi) for lo, hi in SPAN_BUCKETS]
+        lines.append(
+            "| ISO3 | records | people | span p10/p50/p90 (d) | in one quarter | in 6-month window | "
+            + " | ".join(f"people {lab}" for lab in labels) + " |"
+        )
+        lines.append("|---" * (6 + len(labels)) + "|")
+        for iso3, c in (held.get("per_country") or {}).items():
+            q = c["span_days"]
+            lines.append(
+                f"| {iso3} | {c['records']} | {c['people']:,.0f} | "
+                f"{q.get('p10')}/{q.get('p50')}/{q.get('p90')} | "
+                f"{c['fit_one_quarter']} ({c['people_fit_one_quarter']:,.0f}) | "
+                f"{c['fit_six_month_window']} ({c['people_fit_six_month_window']:,.0f}) | "
+                + " | ".join(f"{c['people_by_span'][lab]:,.0f}" for lab in labels) + " |"
+            )
     lines.append("")
     lines.append(f"Keys: {report['conflict_keys']}")
     rule = report.get("ingest_rule")
