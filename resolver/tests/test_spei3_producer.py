@@ -2564,7 +2564,8 @@ def test_the_live_feed_passes_the_matched_gate_with_the_numbers_on_record():
     """Run 34835609446's own data, which is why the gate was sharpened.
 
     Pinned loosely, because the feed grows: what is being asserted is that
-    the matched reference is JJA rather than the whole record, that the gap
+    the matched reference is the intermediate months' own calendar months
+    rather than the whole record, that the gap
     is the 0.536 the matched form measures and not the 0.589 the whole-record
     form did, and that a real drying summer still passes.
     """
@@ -2581,8 +2582,17 @@ def test_the_live_feed_passes_the_matched_gate_with_the_numbers_on_record():
 
     report = spei.compare_releases(rows)
     assert report["verdict"] == "ok"
-    # Summer months, and the reference is every other year's summer.
-    assert report["reference_months"] == ["06", "07", "08"]
+    # The reference is every other year's same calendar months, and those are
+    # whichever months the feed still holds as intermediate. They move as the
+    # producer upgrades a month to consolidated: JJA in September 2026, July
+    # and August after the October run, so they are read off the feed.
+    intermediate_months = sorted({
+        spei._calendar_month(r.get("ym"))
+        for r in rows
+        if spei.row_dataset_type(r) == spei.CDS_DATASET_TYPE_INTERMEDIATE
+    })
+    assert report["reference_months"] == intermediate_months
+    assert report["intermediate_months_unmatched"] == []
     assert report["reference_rows"] > report["intermediate_matched_rows"]
     # Season explains almost none of the gap: matched and whole-record agree
     # to within a tenth of a sigma, which is the finding that motivated this.
