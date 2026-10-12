@@ -46,6 +46,8 @@ on:
       - "tools/probe_inform_warning.py"
       - "tools/probe_idmc_conflict.py"
       - "tools/probe_dtm_conflict.py"
+      - "tools/probe_cadre_harmonise.py"
+      - "pythia/tools/phase3_eligibility.py"
       # Guards resolver/hazard_resolution/emdat.py the same way.
       - "scripts/ci/diagnose_emdat.py"
       - "scripts/ci/tests/test_diagnose_emdat.py"
@@ -130,6 +132,8 @@ on:
       - "tools/probe_inform_warning.py"
       - "tools/probe_idmc_conflict.py"
       - "tools/probe_dtm_conflict.py"
+      - "tools/probe_cadre_harmonise.py"
+      - "pythia/tools/phase3_eligibility.py"
       # Guards resolver/hazard_resolution/emdat.py the same way.
       - "scripts/ci/diagnose_emdat.py"
       - "scripts/ci/tests/test_diagnose_emdat.py"

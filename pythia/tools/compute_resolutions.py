@@ -567,10 +567,14 @@ def _try_phase3plus(
         return None
     if not _table_exists(conn, "facts_resolved"):
         return None
-    publisher_col = (
-        "publisher"
-        if _has_column(conn, "facts_resolved", "publisher")
-        else "NULL AS publisher"
+    has_publisher = _has_column(conn, "facts_resolved", "publisher")
+    publisher_col = "publisher" if has_publisher else "NULL AS publisher"
+    # FEWS NET first where FEWS NET and IPC both cover a month: the IPC
+    # connector now fills FEWS NET countries whose FEWS NET feed went stale
+    # (pythia/tools/phase3_eligibility.py), and their histories overlap.
+    publisher_order = (
+        "CASE WHEN upper(COALESCE(publisher, '')) = 'FEWS NET' THEN 0 ELSE 1 END, "
+        if has_publisher else ""
     )
     sql = f"""
         SELECT value, created_at, {publisher_col}
@@ -578,7 +582,7 @@ def _try_phase3plus(
         WHERE iso3 = ? AND hazard_code = 'DR'
           AND ym = ?
           AND lower(metric) = 'phase3plus_in_need'
-        ORDER BY created_at DESC LIMIT 1
+        ORDER BY {publisher_order}created_at DESC LIMIT 1
     """
     try:
         row = conn.execute(sql, [iso3, calendar_month]).fetchone()
