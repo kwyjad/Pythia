@@ -114,7 +114,10 @@ def test_ace_pa_keeps_readings_at_first_180_and_270_days(tmp_path):
     milestones = cr.vintage_milestones("ACE", "PA")
     assert milestones == (("d180", 180), ("d270", 270))
     assert cr.vintage_milestones("ACE", "FATALITIES") == cr.VINTAGE_MILESTONES
-    assert cr.vintage_milestones("FL", "PA") is None
+    # FL/PA and TC/PA keep first and at_freeze since they resolve from the
+    # PA resolution machine (2026-10-12); a hazard with no group keeps none.
+    assert cr.vintage_milestones("FL", "PA") == (("at_freeze", 60),)
+    assert cr.vintage_milestones("DR", "PA") is None
     kw = dict(question_id="Q", horizon_m=1, observed_month="2025-01", source_desc="s",
               source_ts=None, is_test=False, milestones=milestones)
     assert cr.record_vintages(con, value=10.0, today=date(2025, 5, 1), **kw) == ["first"]
