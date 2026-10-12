@@ -6,8 +6,13 @@
 """IPC API connector — fetches IPC Phase 3+ population estimates from
 the IPC public API (api.ipcinfo.org).
 
-Supplements FEWS NET data for countries not covered by FEWS NET.  Countries
-already in ``fewsnet_countries.json`` are excluded to prevent overlap.
+Supplements FEWS NET data for countries not covered by FEWS NET.  A country
+in ``fewsnet_countries.json`` is excluded only while FEWS NET still publishes
+for it: when the DB is reachable, a FEWS NET country whose newest FEWS NET
+``phase3plus_in_need`` row is older than the Phase 3+ staleness bound
+(``pythia/tools/phase3_eligibility.py``, 9 months before next month) is let
+through so IPC can fill it. With no DB, or no FEWS NET rows in it, the whole
+list is excluded as before. FEWS NET still takes precedence where both exist.
 
 Endpoint: https://api.ipcinfo.org/population?format=json
 Requires API key (``IPC_API_KEY`` env var).
@@ -99,6 +104,51 @@ def _load_fewsnet_country_list() -> set[str]:
     except Exception as exc:
         LOG.warning("[ipc_api] failed to load fewsnet_countries.json: %s", exc)
         return set()
+
+
+def _fewsnet_exclusion_set(today: date | None = None) -> set[str]:
+    """FEWS NET countries to exclude from the IPC pull.
+
+    The whole ``fewsnet_countries.json`` list, minus FEWS NET countries whose
+    FEWS NET Phase 3+ rows are stale (or absent) in the DB named by
+    ``RESOLVER_DB_URL``. Falls back to the whole list when no DB is reachable
+    or it holds no FEWS NET rows, because then "FEWS NET stopped publishing"
+    and "FEWS NET was not ingested" cannot be told apart.
+    """
+    fewsnet = _load_fewsnet_country_list()
+    if not fewsnet:
+        return fewsnet
+    db_url = os.getenv("RESOLVER_DB_URL", "").strip()
+    if not db_url:
+        LOG.info("[ipc_api] no RESOLVER_DB_URL; excluding all %d FEWS NET countries", len(fewsnet))
+        return fewsnet
+    try:
+        from pythia.tools import phase3_eligibility
+        from resolver.db.duckdb_io import get_db
+
+        con = get_db(db_url)
+        reference = phase3_eligibility.window_start_for(today or date.today())
+        result = phase3_eligibility.fewsnet_exclusions(con, fewsnet, reference_ym=reference)
+    except Exception as exc:  # noqa: BLE001 - a recency check never stops the pull
+        LOG.warning(
+            "[ipc_api] FEWS NET recency check failed (%s); excluding all %d FEWS NET countries",
+            scrub_text(str(exc)), len(fewsnet),
+        )
+        return fewsnet
+    if result is None:
+        LOG.info(
+            "[ipc_api] DB holds no FEWS NET phase3plus_in_need rows; excluding all %d FEWS NET countries",
+            len(fewsnet),
+        )
+        return fewsnet
+    excluded, let_through = result
+    LOG.info(
+        "[ipc_api] excluding %d FEWS NET countries with recent FEWS NET data; letting %d through",
+        len(excluded), len(let_through),
+    )
+    for iso3, why in sorted(let_through.items()):
+        LOG.info("[ipc_api] FEWS NET country let through to IPC: %s (%s)", iso3, why)
+    return excluded
 
 
 def _iso2_to_iso3(code: str) -> str | None:
@@ -311,8 +361,8 @@ class IpcApiConnector:
 
         LOG.info("[ipc_api] fetched %d raw records", len(records))
 
-        # Load FEWS NET countries for exclusion
-        fewsnet_countries = _load_fewsnet_country_list()
+        # FEWS NET countries to exclude: those FEWS NET still publishes for
+        fewsnet_countries = _fewsnet_exclusion_set()
 
         # Parse records into flat rows.
         # Each IPC API record contains BOTH current and projected data:
