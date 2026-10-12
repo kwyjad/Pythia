@@ -49,6 +49,7 @@ labels, or centroid lists here.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -435,30 +436,159 @@ def conflict_regular_reporter(reported: Mapping[str, Any], ym: str) -> bool:
     return sum(1 for m in months if m in reported) >= CONFLICT_REGULAR_MIN_MONTHS
 
 
+# The conflict displacement LADDER (owner decision 2026-10-12). ACE/PA
+# resolves on the best reported figure: IDMC first, then OCHA/UN-reported
+# new displacement extracted from ReliefWeb, then the increase in IOM DTM's
+# IDP stock between two close rounds, which is a LOWER BOUND on new
+# displacement. The first populated rung wins; a lower rung that disagrees
+# by more than an order of magnitude flags and never substitutes.
+CONFLICT_RUNG_IDMC = "idmc"
+CONFLICT_RUNG_EXTRACTED = "reliefweb_extracted"
+CONFLICT_RUNG_DTM = "dtm_lower_bound"
+CONFLICT_LADDER = (CONFLICT_RUNG_IDMC, CONFLICT_RUNG_EXTRACTED, CONFLICT_RUNG_DTM)
+#: An extracted figure is read once this many days have passed since the
+#: month ended (the extraction window runs to month end + 30 days).
+CONFLICT_EXTRACTED_AVAILABLE_DAYS = 30
+#: Two populated rungs further apart than this factor flag the resolution.
+CONFLICT_OOM_FACTOR = 10.0
+CONFLICT_FLAG_OOM = "adjacent_rung_order_of_magnitude"
+#: ``resolutions.source_desc`` per rung (IDMC keeps its pre-ladder value).
+CONFLICT_RUNG_SOURCE_DESC = {
+    CONFLICT_RUNG_IDMC: CONFLICT_DISPLACEMENT_SERIES,
+    CONFLICT_RUNG_EXTRACTED: "conflict_displacement_candidates:reliefweb_extracted:new_displacements",
+    CONFLICT_RUNG_DTM: "dtm_conflict:idp_stock_increase:displaced_lower_bound",
+}
+#: Plain words for prompts, cards and bundles: what each rung is.
+CONFLICT_RUNG_LABEL = {
+    CONFLICT_RUNG_IDMC: "IDMC",
+    CONFLICT_RUNG_EXTRACTED: "OCHA/UN report (ReliefWeb)",
+    CONFLICT_RUNG_DTM: "IOM DTM increase, a lower bound",
+}
+
+
+@dataclass(frozen=True)
+class ConflictReading:
+    """One lower-rung figure for a country-month (rungs 2 and 3)."""
+
+    rung: str
+    value: float
+    available_on: date
+    lower_bound: bool = False
+    ref: str = ""
+
+
+@dataclass(frozen=True)
+class ConflictResolution:
+    """What :func:`resolve_conflict_month_detail` decided for a month."""
+
+    value: Optional[float]
+    status: str
+    rung: Optional[str] = None
+    lower_bound: bool = False
+    flags: Tuple[str, ...] = field(default_factory=tuple)
+    ref: str = ""
+
+    @property
+    def source_desc(self) -> Optional[str]:
+        if self.status == CONFLICT_STATUS_QUIET:
+            return "zero_default"
+        if self.rung:
+            return CONFLICT_RUNG_SOURCE_DESC.get(self.rung)
+        return None
+
+
+def _rung_order(rung: str) -> int:
+    try:
+        return CONFLICT_LADDER.index(rung)
+    except ValueError:
+        return len(CONFLICT_LADDER)
+
+
+def _oom_apart(a: float, b: float) -> bool:
+    lo, hi = sorted((abs(float(a)), abs(float(b))))
+    if hi <= 0:
+        return False
+    if lo <= 0:
+        return hi >= CONFLICT_OOM_FACTOR
+    return hi / lo > CONFLICT_OOM_FACTOR
+
+
+def resolve_conflict_month_detail(
+    reported: Mapping[str, float], ym: str, today: date,
+    *, held: Optional[set] = None, lower: Sequence[ConflictReading] = (),
+) -> ConflictResolution:
+    """How one country-month of conflict displacement resolves: THE rule.
+
+    Pure. ``reported`` is the country's IDMC monthly figures, ``held`` its
+    IDMC held-out months, ``lower`` the month's figures from the lower rungs.
+
+    1. IDMC: a reported, settled (``CONFLICT_SETTLE_DAYS``), not held-out
+       month resolves to its figure.
+    2. Otherwise the first lower rung available by ``today`` (an extracted
+       figure 30 days after month end, a DTM lower bound once its bracketing
+       round exists) resolves it. A held-out or unsettled IDMC month can be
+       answered here; a settled IDMC figure arriving later replaces it on a
+       later run.
+    3. Otherwise a month is zero only under the IDMC rule: settled, an IDMC
+       regular reporter, and bracketed by a later IDMC report. Every other
+       month is unknown, never quiet.
+
+    The winner is flagged when the next populated rung differs from it by
+    more than an order of magnitude; the lower rung never substitutes.
+    """
+    settled = conflict_month_settled(ym, today)
+    is_held = bool(held and ym in held)
+    candidates: List[Tuple[int, str, float, bool, str]] = []
+    if settled and not is_held and ym in reported:
+        candidates.append((0, CONFLICT_RUNG_IDMC, float(reported[ym]), False, ""))
+    for r in lower or ():
+        if r.value is None or float(r.value) < 0 or r.available_on > today:
+            continue
+        candidates.append((_rung_order(r.rung), r.rung, float(r.value), bool(r.lower_bound), r.ref))
+    if candidates:
+        candidates.sort(key=lambda c: (c[0], -c[2]))
+        best = candidates[0]
+        flags: Tuple[str, ...] = ()
+        nxt = next((c for c in candidates[1:] if c[0] != best[0]), None)
+        if nxt is not None and _oom_apart(best[2], nxt[2]):
+            flags = (CONFLICT_FLAG_OOM,)
+        return ConflictResolution(best[2], CONFLICT_STATUS_REPORTED, best[1], best[3], flags, best[4])
+    if not settled:
+        return ConflictResolution(None, CONFLICT_STATUS_UNSETTLED)
+    if is_held:
+        return ConflictResolution(None, CONFLICT_STATUS_HELD)
+    if not conflict_regular_reporter(reported, ym):
+        return ConflictResolution(None, CONFLICT_STATUS_IRREGULAR)
+    if not any(m > ym for m in reported):
+        return ConflictResolution(None, CONFLICT_STATUS_TRAILING)
+    return ConflictResolution(0.0, CONFLICT_STATUS_QUIET)
+
+
 def resolve_conflict_month(
     reported: Mapping[str, float], ym: str, today: date,
-    *, held: Optional[set] = None,
+    *, held: Optional[set] = None, lower: Sequence[ConflictReading] = (),
 ) -> Tuple[Optional[float], str]:
-    """``(value, status)`` for one country-month of conflict displacement.
+    """``(value, status)`` for one country-month: :func:`resolve_conflict_month_detail`."""
+    res = resolve_conflict_month_detail(reported, ym, today, held=held, lower=lower)
+    return res.value, res.status
 
-    Pure: ``reported`` is the country's reported months and values, ``held``
-    its held-out months. A month resolves only once it is settled; a
-    reported figure then resolves it; a missing month is zero only for a
-    regular reporter with a reported figure in a LATER month (the gap is
-    bracketed). A trailing month, a held-out month and an irregular
-    reporter's missing month are unknown, never quiet.
-    """
-    if not conflict_month_settled(ym, today):
-        return None, CONFLICT_STATUS_UNSETTLED
-    if held and ym in held:
-        return None, CONFLICT_STATUS_HELD
-    if ym in reported:
-        return float(reported[ym]), CONFLICT_STATUS_REPORTED
-    if not conflict_regular_reporter(reported, ym):
-        return None, CONFLICT_STATUS_IRREGULAR
-    if not any(m > ym for m in reported):
-        return None, CONFLICT_STATUS_TRAILING
-    return 0.0, CONFLICT_STATUS_QUIET
+
+def conflict_ladder_months(
+    reported: Mapping[str, float], lower: Mapping[str, Sequence[ConflictReading]],
+) -> Dict[str, float]:
+    """Months with a figure on ANY rung (the best rung's value), which is
+    what the regular-reporter rule counts for eligibility and scoring."""
+    out: Dict[str, float] = {}
+    for ym, readings in (lower or {}).items():
+        vals = sorted(
+            ((_rung_order(r.rung), float(r.value)) for r in readings
+             if r.value is not None and float(r.value) >= 0),
+        )
+        if vals:
+            out[ym] = vals[0][1]
+    for ym, v in (reported or {}).items():
+        out[ym] = float(v)
+    return out
 
 
 def conflict_displacement_series(
