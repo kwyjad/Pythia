@@ -166,7 +166,7 @@ _CACHEABLE_HAZARDS = frozenset({"ACE", "ACO", "CU", "DI", "DR", "EC", "FL", "HW"
 @router.get("/v1/downloads/rationales.csv")
 def download_rationales_csv(
     hazard: str = Query(..., description="Hazard code filter (e.g. FL, DR, TC)"),
-    model: str | None = Query(None, description="Model name filter (e.g. gpt-6-sol, claude-opus-5-5, gemini-3.5-flash)"),
+    model: str | None = Query(None, description="Model name filter (e.g. gpt-6-sol, claude-opus-5-5, gemini-3.6-flash)"),
     include_test: bool = Query(False),
 ):
     hazard = hazard.strip().upper()

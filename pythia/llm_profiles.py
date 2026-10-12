@@ -33,14 +33,14 @@ from pythia.config import load as load_cfg
 # Last-resort defaults, used only when config.yaml is missing/unreadable or a
 # role is absent from it. Keep in sync with the roles block in config.yaml.
 _ROLE_FALLBACKS: Dict[str, str] = {
-    "hs_default": "google:gemini-3.5-flash",
-    "hs_triage_pass1": "google:gemini-3.5-flash",
-    "hs_triage_pass2": "google:gemini-3.5-flash",
-    "rc_pass1": "google:gemini-3.5-flash",
-    "rc_pass2": "google:gemini-3.5-flash",
+    "hs_default": "google:gemini-3.6-flash",
+    "hs_triage_pass1": "google:gemini-3.6-flash",
+    "hs_triage_pass2": "google:gemini-3.6-flash",
+    "rc_pass1": "google:gemini-3.6-flash",
+    "rc_pass2": "google:gemini-3.6-flash",
     "hs_fallback": "openai:gpt-6-sol",
-    "track2_spd": "google:gemini-3.5-flash",
-    "scenario_writer": "google:gemini-3.5-flash",
+    "track2_spd": "google:gemini-3.6-flash",
+    "scenario_writer": "google:gemini-3.6-flash",
     "grounding_gemini": "google:gemini-2.5-flash",
     "grounding_openai": "openai:gpt-6-sol",
     "grounding_openai_fallback": "openai:gpt-6-luna",
@@ -123,7 +123,7 @@ def split_model_ref(ref: str, default_provider: str = "google") -> Tuple[str, st
     """Split ``provider:model_id`` into (provider, model_id).
 
     A bare model id is attributed to *default_provider* (legacy env-var
-    values like ``HS_MODEL_ID=gemini-3.5-flash``).
+    values like ``HS_MODEL_ID=gemini-3.6-flash``).
     """
 
     if ":" in ref:

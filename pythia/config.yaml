@@ -53,10 +53,10 @@ prediction_markets:
       min_unique_bettors: 10
       min_liquidity_mana: 500
   query_generation:
-    model: "gemini-3.5-flash"  # Cheap/fast model for query generation
+    model: "gemini-3.6-flash"  # Cheap/fast model for query generation
     max_queries: 5
   relevance_filter:
-    model: "gemini-3.5-flash"
+    model: "gemini-3.6-flash"
     min_relevance_score: 6
     max_results: 5
   timeout_sec: 30
@@ -78,7 +78,7 @@ llm:
     gpt_mini:     openai:gpt-6-luna               # OpenAI small
     claude:       anthropic:claude-opus-5-5       # Anthropic frontier (ensemble + interpreter; Sibyl pins its own default)
     gemini_pro:   google:gemini-3.1-pro-preview   # Google frontier
-    gemini_flash: google:gemini-3.5-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
+    gemini_flash: google:gemini-3.6-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
     gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
 
   # MODEL FAMILIES — one line of models across versions, OLDEST FIRST.
@@ -92,7 +92,7 @@ llm:
     gpt_mini:     [gpt-5.4-mini, gpt-5.6-luna, gpt-6-luna]
     claude:       [claude-opus-4-8, claude-opus-5, claude-opus-5-5]
     gemini_pro:   [gemini-3-pro-preview, gemini-3.1-pro-preview]
-    gemini_flash: [gemini-3-flash-preview, gemini-3.5-flash]
+    gemini_flash: [gemini-3-flash-preview, gemini-3.5-flash, gemini-3.6-flash]
 
   # Active profile: "prod" (frontier).
   # Override via PYTHIA_LLM_PROFILE env var.

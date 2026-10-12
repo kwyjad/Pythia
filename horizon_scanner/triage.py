@@ -232,8 +232,8 @@ async def _call_triage_model(
     Pass 2: Secondary triage model for diversity (config role ``hs_triage_pass2``)
 
     Override via env vars:
-      PYTHIA_TRIAGE_MODEL_PASS1=google:gemini-3.5-flash
-      PYTHIA_TRIAGE_MODEL_PASS2=google:gemini-3.5-flash
+      PYTHIA_TRIAGE_MODEL_PASS1=google:gemini-3.6-flash
+      PYTHIA_TRIAGE_MODEL_PASS2=google:gemini-3.6-flash
 
     Returns (text, usage, error, model_spec).
     """

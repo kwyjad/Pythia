@@ -182,7 +182,7 @@ export type RunSummaryResponse = {
   };
   tracks: {
     track1: { questions: number; countries: number; models: number };
-    /** model = specific Track 2 model id (e.g. "gemini-3.5-flash") from config. */
+    /** model = specific Track 2 model id (e.g. "gemini-3.6-flash") from config. */
     track2: { questions: number; countries: number; model?: string | null };
   };
   ensemble: { expected: number; ok: number };

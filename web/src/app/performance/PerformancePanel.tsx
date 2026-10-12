@@ -817,7 +817,7 @@ export default function PerformancePanel({
                   text={
                     "Breakdown of scored questions by track. Track 1 = full " +
                     "ensemble; Track 2 = a single fast model (currently " +
-                    "gemini-3.5-flash). Older questions predate this split " +
+                    "gemini-3.6-flash). Older questions predate this split " +
                     "and are counted only in Scored Questions above."
                   }
                 />

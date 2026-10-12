@@ -108,6 +108,19 @@ def test_estimate_cost_usd_per_million_rates() -> None:
     assert cost == pytest.approx(10.50)
 
 
+def test_estimate_cost_usd_gemini_36_flash_promotional_price() -> None:
+    """gemini-3.6-flash replaced 3.5 Flash in Oct 2026; priced at Google's
+    promotional half of its $1.50/$7.50 list price."""
+    from forecaster import providers
+
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "total_tokens": 2_000_000,
+    }
+    assert providers.estimate_cost_usd("gemini-3.6-flash", usage) == pytest.approx(4.50)
+
+
 def test_estimate_cost_usd_small_call() -> None:
     from forecaster import providers
 
@@ -123,6 +136,7 @@ def test_display_name_is_specific_model_id() -> None:
     from forecaster import providers
 
     assert providers._provider_display_name("google", "gemini-3.5-flash") == "gemini-3.5-flash"
+    assert providers._provider_display_name("google", "gemini-3.6-flash") == "gemini-3.6-flash"
     assert providers._provider_display_name("google", "gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
     assert providers._provider_display_name("openai", "gpt-5.4") == "gpt-5.4"
     assert providers._provider_display_name("anthropic", "claude-opus-4-8") == "claude-opus-4-8"
