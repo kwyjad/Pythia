@@ -49,6 +49,20 @@
 # the hazard-specific centroids, and (3) after the canonical upload
 # dispatches Compute Resolutions, whose workflow_run chain re-resolves under
 # the settled rule and rebuilds scores, calibration and the release.
+#
+# maintenance=sweep_era_rewalk (Oct 2026, owner decision 2026-10-12) is a
+# ONE-TIME exception to "resolutions freeze and are never reopened", scoped
+# by a predicate to the FL/TC NO_DATA rows written before the scoped
+# ReliefWeb sweep landed (2026-09-17 08:51:01 UTC, PR #937), which read no
+# source and assert a detection the current rule does not make. It (1)
+# prints the plan, the extraction estimate and exports an audit copy of the
+# selected rows and their trigger rows as pythia-audit-sweep-era-rows
+# (always, even on a dry run), and (2) on apply deletes those rows, resets
+# their trigger rows and frees their (hazard, month) resume-ledger rows
+# under a one-shot haz_feed_restale token, with a before/after integrity
+# check over every untouched row that exits 1 before the upload. The nightly
+# backcast then re-walks exactly those months, once, and refreshes the base
+# rates and the acceptance report itself.
 
 ---
 name: Compact Resolver DB
@@ -72,7 +86,7 @@ name: Compact Resolver DB
         default: false
         type: boolean
       maintenance:
-        description: "What to do: compact (the raw-cache compaction), conflict_resolution_reset (ACE/FATALITIES audit + relabel + centroid reset) or conflict_displacement_reset (ACE/PA audit + delete + re-resolve)"
+        description: "What to do: compact (the raw-cache compaction), conflict_resolution_reset (ACE/FATALITIES audit + relabel + centroid reset), conflict_displacement_reset (ACE/PA audit + delete + re-resolve) or sweep_era_rewalk (FL/TC pre-2026-09-17 sweep-era NO_DATA audit + retract + re-walk)"
         required: false
         default: compact
         type: choice
@@ -80,6 +94,7 @@ name: Compact Resolver DB
           - compact
           - conflict_resolution_reset
           - conflict_displacement_reset
+          - sweep_era_rewalk
       db_run_id:
         description: "Optional: force canonical DB from an Actions run ID. Blank = latest successful producer."
         required: false
@@ -94,7 +109,10 @@ permissions:
 jobs:
   gate:
     name: Skip if a staged pipeline is in flight
-    if: github.event_name == 'schedule'
+    # A scheduled compaction, and an applied sweep-era re-walk: the re-walk
+    # retracts rows a mid-pipeline canonical upload would otherwise carry or
+    # discard, so it waits for the staged pipeline like the scheduled run.
+    if: ${{ github.event_name == 'schedule' || (inputs.maintenance == 'sweep_era_rewalk' && (inputs.apply == true || inputs.apply == 'true')) }}
     runs-on: ubuntu-latest
     outputs:
       proceed: ${{ steps.gate.outputs.proceed }}
@@ -113,7 +131,7 @@ jobs:
 
   compact:
     needs: gate
-    if: ${{ always() && (github.event_name != 'schedule' || needs.gate.outputs.proceed == 'true') }}
+    if: ${{ always() && (needs.gate.result == 'skipped' || needs.gate.outputs.proceed == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     concurrency:
@@ -396,6 +414,59 @@ jobs:
             echo '```'
             cat diagnostics/conflict_displacement_applied.json
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- maintenance=sweep_era_rewalk ---------------------------------
+      # Owner decision 2026-10-12: a one-time, predicate-scoped retraction of
+      # the FL/TC NO_DATA rows written under the pre-2026-09-17 sweep rule.
+      # The plan, the extraction estimate and the audit copy run on a dry
+      # run as well: they are read-only, and they are what a person reads
+      # before authorising the write.
+      - name: "Sweep-era re-walk: plan, estimate and audit copy"
+        if: env.MODE == 'sweep_era_rewalk'
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m resolver.hazard_resolution.sweep_era_rewalk \
+            --db data/resolver.duckdb --audit-only \
+            --audit-dir audit/sweep_era_rows \
+            --json-out diagnostics/sweep_era_plan.json \
+            --md-out diagnostics/sweep_era_plan.md
+          {
+            echo "#### Sweep-era re-walk plan (rows that will be retracted)"
+            echo ""
+            cat diagnostics/sweep_era_plan.md
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Sweep-era re-walk: upload the audit copy"
+        if: env.MODE == 'sweep_era_rewalk'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-audit-sweep-era-rows
+          path: audit/sweep_era_rows/
+          retention-days: 90
+          if-no-files-found: error
+
+      # Deletes the rows, resets their trigger rows, frees the ledger months
+      # under the one-shot token, and compares counts and checksums over
+      # every untouched row before and after. A mismatch exits 1, so the
+      # canonical upload below never runs.
+      - name: "Sweep-era re-walk: retract the rows and free the ledger months"
+        if: env.APPLY == 'true' && env.MODE == 'sweep_era_rewalk'
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.sweep_era_rewalk \
+            --db data/resolver.duckdb --apply \
+            --json-out diagnostics/sweep_era_applied.json \
+            --md-out diagnostics/sweep_era_applied.md
+          {
+            echo "#### Sweep-era re-walk applied"
+            echo ""
+            cat diagnostics/sweep_era_applied.md
+            echo ""
+            echo "The nightly backcast re-walks the freed months and refreshes"
+            echo "haz-base-rates and haz-acceptance itself."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The proof that the resume ledger and the verdicts survived. A
