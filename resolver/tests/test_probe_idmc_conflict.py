@@ -62,3 +62,44 @@ def test_the_settle_curve_counts_recommended_people_by_arrival():
     assert curve["share_of_people_arrived"]["90d"] == 0.8
     assert curve["share_of_country_months_with_a_first_report"]["15d"] == 0.5
     assert curve["share_of_country_months_with_a_first_report"]["180d"] == 1.0
+
+
+def test_held_out_span_distribution_per_country():
+    from tools.probe_idmc_conflict import held_span_distribution
+
+    rows = [
+        # COD: 59 days, inside one quarter and the six-month window.
+        _rec("COD", "2025-01-01", "2025-03-01", 1000),
+        # COD: 120 days, crosses a quarter, inside six months.
+        _rec("COD", "2025-02-01", "2025-06-01", 500),
+        # COD: 400 days, inside neither.
+        _rec("COD", "2025-03-01", "2026-04-05", 3000),
+        # COD: 31 days is NOT held out (the ingest holds out > 31).
+        _rec("COD", "2025-05-01", "2025-06-01", 7),
+        # SDN: a triangulation is not a recommended figure.
+        _rec("SDN", "2025-01-01", "2025-05-01", 99, role="Triangulation"),
+        # SDN: before the window.
+        _rec("SDN", "2024-06-01", "2024-09-01", 50),
+        _rec("SDN", "2025-04-01", "2025-06-30", 200),
+    ]
+    held = held_span_distribution(rows, since="2025-01")
+    cod = held["per_country"]["COD"]
+    assert cod["records"] == 3 and cod["people"] == 4500
+    assert cod["fit_one_quarter"] == 1 and cod["people_fit_one_quarter"] == 1000
+    assert cod["fit_six_month_window"] == 2 and cod["people_fit_six_month_window"] == 1500
+    assert cod["people_by_span"] == {
+        "32-62d": 1000, "63-92d": 0, "93-183d": 500, "184-365d": 0, "366d+": 3000,
+    }
+    sdn = held["per_country"]["SDN"]
+    assert sdn["records"] == 1 and sdn["people"] == 200 and sdn["fit_one_quarter"] == 1
+    assert list(held["per_country"]) == ["COD", "SDN"]  # most people first
+    assert held["people"] == 4700
+
+
+def test_held_out_spans_are_in_the_report():
+    from tools.probe_idmc_conflict import _markdown
+
+    report = analyse([_rec("COD", "2025-01-01", "2025-03-01", 1000)])
+    assert report["held_spans"]["per_country"]["COD"]["records"] == 1
+    text = _markdown(report)
+    assert "Held-out records" in text and "| COD | 1 | 1,000 |" in text

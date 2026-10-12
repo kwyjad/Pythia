@@ -1144,6 +1144,34 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
             "compare the machine against itself"
         )
 
+    # Conflict displacement sources (Oct 2026). Validated only when present,
+    # so a test rulebook built without it still loads; the shipped file
+    # carries it. A top-level section, outside every hazard fingerprint.
+    if _get("conflict_displacement") is not _MISSING:
+        _require_bool("conflict_displacement.extraction.enabled")
+        prompt = _require("conflict_displacement.extraction.prompt_version")
+        if prompt is not _MISSING and (not isinstance(prompt, str) or not prompt.strip()):
+            problems.append(
+                "conflict_displacement.extraction.prompt_version must be a non-empty string"
+            )
+        elif prompt is not _MISSING and prompt == _get("extraction.prompt_version"):
+            problems.append(
+                "conflict_displacement.extraction.prompt_version must differ from "
+                "extraction.prompt_version, or a PA cache entry could answer a "
+                "conflict question"
+            )
+        _require_int_in("conflict_displacement.extraction.max_calls_per_month", 0, 100_000)
+        _require_int_in("conflict_displacement.documents.max_docs_per_cell", 1, 30)
+        _require_int_in("conflict_displacement.documents.publication_pad_days", 0, 120)
+        _require_str_list("conflict_displacement.documents.source_types")
+        _require_str_list("conflict_displacement.documents.formats")
+        query = _require("conflict_displacement.documents.query")
+        if query is not _MISSING and (not isinstance(query, str) or not query.strip()):
+            problems.append("conflict_displacement.documents.query must be a non-empty string")
+        _require_str_list("conflict_displacement.admissible_causes")
+        _require_int_in("conflict_displacement.dtm.max_gap_days", 1, 120)
+        _require_int_in("conflict_displacement.dtm.months", 1, 240)
+
     # Credential guard: keys come from env vars only, never from the rulebook.
     #
     # The VALUE has to be a string for this to fire. A credential is always

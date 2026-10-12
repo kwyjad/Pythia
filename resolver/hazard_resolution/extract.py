@@ -565,8 +565,16 @@ def _log_llm_call(
     iso3: str,
     hazard: str,
     ym: str,
+    call_type: str = "hazard_extraction",
+    metric: str = "PA",
+    run_id: str | None = None,
 ) -> None:
     """One rich ``llm_calls`` telemetry row per REAL extraction call.
+
+    ``call_type``, ``metric`` and ``run_id`` let another caller of this
+    extraction step (the conflict displacement source) label its own rows
+    while keeping ``phase='hazard_extraction'``, which the Costs page maps to
+    the resolution bucket. Their defaults are the PA machine's values.
 
     ``haz_doc_extractions`` is the machine's cache and per-document ledger;
     ``llm_calls`` is the repo-wide cost telemetry the Costs page, the debug
@@ -587,17 +595,17 @@ def _log_llm_call(
         provider, model_id = split_model_ref(model_ref)
         asyncio.run(
             log_forecaster_llm_call(
-                run_id=f"hazres_{ym}",
+                run_id=run_id or f"hazres_{ym}",
                 question_id="",
                 prompt_text=prompt,
                 model_name=model_id,
                 provider=provider,
                 model_id=model_id,
                 phase="hazard_extraction",
-                call_type="hazard_extraction",
+                call_type=call_type,
                 iso3=iso3.upper(),
                 hazard_code=hazard,
-                metric="PA",
+                metric=metric,
                 response_text=response,
                 usage=usage or {},
                 error_text=(error or None),
@@ -1389,6 +1397,60 @@ def _figures_from_cache(
 # ---------------------------------------------------------------------------
 
 
+def _pa_enabled(rulebook: Rulebook) -> bool:
+    return bool(rulebook.get("extraction.enabled"))
+
+
+def _pa_prompt_version(rulebook: Rulebook) -> str:
+    return str(rulebook.get("extraction.prompt_version"))
+
+
+@dataclass
+class ExtractionProfile:
+    """What one caller of :func:`extract_for_cell` reads, writes and asks.
+
+    The loop itself (cache first, the budget as a hard stop, one call per
+    document, the truncation retry, the billing rule, the error-row rule) is
+    the same for every caller and lives in :func:`extract_for_cell`. What
+    differs between the PA machine and the conflict displacement source is
+    the prompt, its version, the parser and the ledger table, so those are
+    the profile's fields. Every field defaults to the PA machine's own
+    function, so a call without a profile is byte-identical to before.
+    """
+
+    #: ``(rulebook) -> bool``: whether this caller may extract at all.
+    enabled: Callable[[Rulebook], bool] = _pa_enabled
+    #: ``(rulebook) -> str``: the cache-invalidating prompt version.
+    prompt_version: Callable[[Rulebook], str] = _pa_prompt_version
+    #: ``(document, iso3, hazard, country_name, ym=) -> prompt``.
+    build_prompt: Callable[..., str] | None = None
+    #: ``(text, document, model) -> (figures, rejected)``.
+    parse: Callable[..., Any] | None = None
+    #: ``(con, doc_id, model, prompt_version, *, iso3, hazard, ym) -> dict | None``.
+    load_cached: Callable[..., Any] | None = None
+    #: ``(cached, model, document) -> figures``.
+    figures_from_cache: Callable[..., Any] | None = None
+    #: Same keywords as :func:`write_extraction`.
+    write: Callable[..., Any] | None = None
+    #: Extra keywords for :func:`_log_llm_call` (``call_type``, ``metric``,
+    #: ``run_id``).
+    log_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def resolved(self) -> "ExtractionProfile":
+        """A copy with every unset seam filled by the PA machine's function."""
+
+        return ExtractionProfile(
+            enabled=self.enabled,
+            prompt_version=self.prompt_version,
+            build_prompt=self.build_prompt or build_prompt,
+            parse=self.parse or parse_response,
+            load_cached=self.load_cached or load_cached_extraction,
+            figures_from_cache=self.figures_from_cache or _figures_from_cache,
+            write=self.write or write_extraction,
+            log_kwargs=dict(self.log_kwargs),
+        )
+
+
 def _account_call(
     budget: ExtractionBudget,
     result: CellExtraction,
@@ -1429,8 +1491,13 @@ def extract_for_cell(
     call: CallFn | None = None,
     model_ref: str | None = None,
     country_name: str | None = None,
+    profile: ExtractionProfile | None = None,
 ) -> CellExtraction:
     """Read this cell's cached documents and transcribe their figures.
+
+    ``profile`` swaps the prompt, parser and ledger for another caller of
+    the same loop (see :class:`ExtractionProfile`); omitted, the PA
+    machine's own functions are used.
 
     Callers must only reach this for TRIGGERED country-months — the
     acceptance criterion is that no extraction call is ever made for a cell
@@ -1442,8 +1509,9 @@ def extract_for_cell(
 
     iso3 = iso3.upper()
     result = CellExtraction(iso3=iso3, ym=ym, hazard=hazard)
+    prof = (profile or ExtractionProfile()).resolved()
 
-    if not bool(rulebook.get("extraction.enabled")):
+    if not prof.enabled(rulebook):
         result.skipped_reason = "extraction_disabled"
         return result
 
@@ -1455,7 +1523,7 @@ def extract_for_cell(
         result.skipped_reason = "no_documents"
         return result
 
-    prompt_version = str(rulebook.get("extraction.prompt_version"))
+    prompt_version = prof.prompt_version(rulebook)
     try:
         model_ref = model_ref or resolve_extraction_model(rulebook)
     except Exception as exc:
@@ -1475,12 +1543,12 @@ def extract_for_cell(
         if not doc_id:
             continue
 
-        cached = load_cached_extraction(
+        cached = prof.load_cached(
             con, doc_id, model_ref, prompt_version, iso3=iso3, hazard=hazard, ym=ym
         )
         if cached is not None:
             result.docs_cached += 1
-            result.figures.extend(_figures_from_cache(cached, model_ref, document))
+            result.figures.extend(prof.figures_from_cache(cached, model_ref, document))
             budget.cached_hits += 1
             continue
 
@@ -1500,12 +1568,13 @@ def extract_for_cell(
                 )
             continue
 
-        prompt = build_prompt(document, iso3, hazard, country_name, ym=ym)
+        prompt = prof.build_prompt(document, iso3, hazard, country_name, ym=ym)
         text, usage, error = call(model_ref, prompt, rulebook)
         if using_default_call:
             _log_llm_call(
                 model_ref=model_ref, prompt=prompt, response=text,
                 usage=usage, error=error, iso3=iso3, hazard=hazard, ym=ym,
+                **prof.log_kwargs,
             )
         cost, attempted = _account_call(budget, result, model_ref, usage, error)
 
@@ -1537,6 +1606,7 @@ def extract_for_cell(
                 _log_llm_call(
                     model_ref=model_ref, prompt=prompt, response=text,
                     usage=usage, error=error, iso3=iso3, hazard=hazard, ym=ym,
+                    **prof.log_kwargs,
                 )
             retry_cost, _retry_attempted = _account_call(
                 budget, result, model_ref, usage, error
@@ -1554,7 +1624,7 @@ def extract_for_cell(
                 "[extract] %s %s %s doc %s: call failed (%s)",
                 iso3, hazard, ym, doc_id, detail,
             )
-            write_extraction(
+            prof.write(
                 con, document=document, iso3=iso3, ym=ym, hazard=hazard,
                 model=model_ref, prompt_version=prompt_version, status="error",
                 figures=[], rejected=[], usage=usage, cost_usd=cost, error=detail,
@@ -1562,7 +1632,7 @@ def extract_for_cell(
             )
             continue
 
-        figures, rejected = parse_response(text, document, model_ref)
+        figures, rejected = prof.parse(text, document, model_ref)
         result.docs_read += 1
         result.figures.extend(figures)
         result.rejected.extend(
@@ -1574,7 +1644,7 @@ def extract_for_cell(
                 iso3, hazard, ym, doc_id, len(figures), len(rejected),
                 ",".join(sorted({str(r.get("reason")) for r in rejected})),
             )
-        write_extraction(
+        prof.write(
             con, document=document, iso3=iso3, ym=ym, hazard=hazard,
             model=model_ref, prompt_version=prompt_version, status="ok",
             figures=figures, rejected=rejected, usage=usage, cost_usd=cost,
