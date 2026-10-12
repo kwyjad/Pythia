@@ -123,7 +123,7 @@ _IDENTIFIERS = """\
 - `run_id` — the forecaster run whose SPDs were scored (joins prompts, raw
   responses, forecasts).
 - `horizon_m` — 1..6; horizon 1 is the `window_start_date` month.
-- `model_name` — a specific model id (e.g. `gemini-3.5-flash`) for ensemble
+- `model_name` — a specific model id (e.g. `gemini-3.6-flash`) for ensemble
   members; stable aggregate names `ensemble_mean_v2`, `ensemble_bayesmc_v2`,
   `track2_flash`, `sibyl` for aggregations. (Runs before July 2026 used
   generic family labels like "Gemini Flash".)

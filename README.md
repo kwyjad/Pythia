@@ -40,7 +40,7 @@ Resolver facts/base rates → Horizon Scanner per-hazard pipeline:
 ## Core components
 - **Resolver (facts + base rates)**: Resolver tables in DuckDB (`facts_resolved`, `facts_deltas`, `snapshots`) provide historical context. Schema is defined in [`pythia/db/schema.py`](pythia/db/schema.py).
 - **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`/`hs_triage`, seeds `questions`/`question_research`, and generates country evidence packs. HS runs a fully per-hazard pipeline: each hazard (ACE, DR, FL, HW, TC) gets its own RC grounding call, RC assessment, triage grounding call, and triage assessment. RC and triage each run a single Gemini Flash pass by default (a 2-pass merge is available via `PYTHIA_HS_RC_PASSES`/`PYTHIA_HS_TRIAGE_PASSES=2`, useful only with a distinct pass-2 model). RC grounding uses TRIGGER/DAMPENER/BASELINE signal categories; triage grounding uses SITUATION/RESPONSE/FORECAST/VULNERABILITY categories with longer recency windows. An ACLED low-activity filter skips ACE triage for countries with minimal recent conflict (0 fatalities in 2 months AND <25 in 12 months).
-- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3.5-flash` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
+- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3.6-flash` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
 - **Structured data connectors**: Authoritative humanitarian, climate, and conflict-forecast data pulled from specialist APIs and stored in DuckDB for direct prompt injection. Replaced the former Research LLM stage. See [`pythia/acaps.py`](pythia/acaps.py), [`pythia/fewsnet_food_security.py`](pythia/fewsnet_food_security.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py), [`horizon_scanner/enso/`](horizon_scanner/enso/), [`horizon_scanner/seasonal_tc/`](horizon_scanner/seasonal_tc/), [`horizon_scanner/hdx_signals.py`](horizon_scanner/hdx_signals.py), [`resolver/connectors/acled_cast.py`](resolver/connectors/acled_cast.py).
 - **Adversarial evidence checks**: Counter-evidence searches for RC Level 1+ cases, stored in `hs_adversarial_checks`. See [`pythia/adversarial_check.py`](pythia/adversarial_check.py).
 - **Hazard-specific reasoning**: Per-hazard forecasting instructions injected into SPD prompts. See [`forecaster/hazard_prompts.py`](forecaster/hazard_prompts.py).
@@ -219,7 +219,7 @@ llm:
     gpt_mini:     openai:gpt-6-luna
     claude:       anthropic:claude-opus-5-5
     gemini_pro:   google:gemini-3.1-pro-preview
-    gemini_flash: google:gemini-3.5-flash
+    gemini_flash: google:gemini-3.6-flash
     gemini_lite:  google:gemini-2.5-flash
 
   profile: "prod"        # override with PYTHIA_LLM_PROFILE
@@ -453,7 +453,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
   - `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH`, `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO`
   - `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC`, `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`
   - `PYTHIA_GOOGLE_SPD_RETRIES`
-- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-6-sol,google:gemini-3.5-flash`).
+- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-6-sol,google:gemini-3.6-flash`).
 - **HS triage resilience**:
   - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-6-sol`; keeps HS triage running when Gemini fails).
   - `PYTHIA_HS_ONLY_COUNTRIES` (comma-separated ISO3s/names to rerun HS triage for a subset).

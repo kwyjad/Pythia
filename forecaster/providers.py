@@ -318,7 +318,7 @@ _forecaster_cfg = _cfg.get("forecaster", {}) if isinstance(_cfg, dict) else {}
 def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | None = None) -> str:
     """Return the display name stored as ``model_name`` in forecasts_raw / scores / llm_calls.
 
-    Uses the specific model id (e.g. ``gemini-3.5-flash``, ``gpt-6-sol``) so
+    Uses the specific model id (e.g. ``gemini-3.6-flash``, ``gpt-6-sol``) so
     dashboards, downloads, and calibration weights always reference a clear,
     unambiguous model — never a generic family label like "Gemini" or
     "Gemini Flash". An explicit ``display_name`` in config still wins.
@@ -979,7 +979,7 @@ def _google_model_family(model_id: str) -> Optional[str]:
 
     Used for the per-family SPD timeout / thinking-level env fallbacks.
     Substring-based so version bumps (gemini-3-flash-preview ->
-    gemini-3.5-flash) don't silently disable the env overrides.
+    gemini-3.5-flash -> gemini-3.6-flash) don't silently disable the env overrides.
     """
 
     mid = (model_id or "").lower()
@@ -1423,7 +1423,7 @@ def build_google_body(
     api_model = model.split("/", 1)[-1] if "/" in model else model
     generation_config: Dict[str, Any] = {"temperature": float(temperature)}
     # thinkingLevel is supported by the Gemini 3.x families (gemini-3-*,
-    # gemini-3.1-*, gemini-3.5-*); older 2.5 models use a different knob
+    # gemini-3.1-*, gemini-3.5-*, gemini-3.6-*); older 2.5 models use a different knob
     # (thinkingBudget) and would reject this config.
     if thinking_level and _is_gemini_3_family(api_model):
         generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
