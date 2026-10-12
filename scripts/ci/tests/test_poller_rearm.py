@@ -148,3 +148,61 @@ def test_a_held_poll_shares_no_group_with_the_stages_or_the_diagnostics():
         assert name in head
     assert re.search(r"concurrency:\s*\n\s*group: pythia-resolver-db", stage)
     assert "pythia-resolver-db" not in poll.split("\njobs:", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# Ignition from a submit stage, and the narrowed cron (2026-10-12)
+# ---------------------------------------------------------------------------
+
+def test_ignite_retries_a_refused_dispatch_at_depth_zero():
+    fc = FakeClock()
+    dispatch, calls = _dispatcher([False, False, True])
+    rc = pr.ignite(dispatch, sleep=fc.sleep, clock=fc.clock, budget_s=600, log=lambda m: None)
+    assert rc == 0 and calls == [0, 0, 0]
+    assert fc.sleeps == [30.0, 60.0]
+
+
+def test_ignite_never_fails_the_stage_and_names_the_recovery():
+    fc = FakeClock()
+    dispatch, _ = _dispatcher([])
+    msgs: list[str] = []
+    rc = pr.ignite(dispatch, sleep=fc.sleep, clock=fc.clock, budget_s=600, log=msgs.append)
+    assert rc == 0
+    assert fc.t <= 600
+    assert any("Poller not ignited" in m and "gh workflow run poll_llm_batches.yml" in m for m in msgs)
+
+
+def test_main_requires_a_depth_unless_igniting():
+    import pytest
+    with pytest.raises(SystemExit):
+        pr.main([])
+
+
+def _poller_crons() -> list[str]:
+    wf = (REPO / ".github/workflows/poll_llm_batches.yml").read_text()
+    head = wf[:wf.index("\njobs:")]
+    return re.findall(r'^\s*-\s*cron:\s*"([^"]+)"', head, re.M)
+
+
+def test_poller_cron_fires_only_in_the_production_window():
+    """It ran four to six times a day all month to find nothing in flight. The
+    production pipeline starts on the 13th (pythia_pipeline_stage.yml) and
+    its three batch waits of at most 24h end it by the 17th."""
+    crons = _poller_crons()
+    assert crons, "keep a backstop cron: it recovers a failed ignition"
+    stage = (REPO / ".github/workflows/pythia_pipeline_stage.yml").read_text()
+    stage_dom = re.search(r'cron:\s*"\S+\s+\S+\s+(\d+)\s', stage)
+    assert stage_dom, "pipeline stage cron not found"
+    start = int(stage_dom.group(1))
+    for cron in crons:
+        dom = cron.split()[2]
+        m = re.fullmatch(r"(\d+)-(\d+)", dom)
+        assert m, f"poller cron {cron!r} must name a day-of-month range, not run all month"
+        lo, hi = int(m.group(1)), int(m.group(2))
+        assert lo <= start and hi - start >= 4 and hi - lo <= 6
+
+
+def test_every_submit_stage_ignites_the_poller_with_retries():
+    stage = (REPO / ".github/workflows/pythia_pipeline_stage.yml").read_text()
+    n_ignite = stage.count("python3 -m scripts.ci.poller_rearm --ignite")
+    assert n_ignite == stage.count("- name: Ignite batch poller") == 4

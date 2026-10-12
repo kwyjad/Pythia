@@ -401,27 +401,21 @@ jobs:
           retention-days: 14
 
       # Ignite the poller chain now instead of waiting for its cron.
-      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
-      # workflows hard: on 2026-08-01 this stage emitted batch state at
-      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
-      # ticks, 51 min of it dead pipeline time. Once ignited the poller
-      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
-      # is the only fragile part. workflow_dispatch also bypasses the
-      # poller's activity gate. Never fatal — the cron stays the backstop,
-      # and a duplicate tick is harmless (collects are idempotent).
+      # Starts the poller chain. Since 2026-10-12 the poller's cron fires only
+      # in the production window (13th-17th), so outside it this dispatch is
+      # the only thing that starts a poll; inside it the cron is a backstop.
+      # The helper retries a refused dispatch for up to ten minutes with
+      # backoff and always exits 0, naming the manual recovery if GitHub
+      # never accepts it. workflow_dispatch also bypasses the poller's
+      # activity gate, and a duplicate poll is harmless (collects are
+      # idempotent).
       - name: Ignite batch poller
         if: steps.signature_after.outputs.signature_ok == 'true'
         continue-on-error: true
+        timeout-minutes: 15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +e
-          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
-            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
-          else
-            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
-          fi
-          exit 0
+        run: python3 -m scripts.ci.poller_rearm --ignite --retry-budget-min 10
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
@@ -624,27 +618,21 @@ jobs:
           retention-days: 14
 
       # Ignite the poller chain now instead of waiting for its cron.
-      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
-      # workflows hard: on 2026-08-01 this stage emitted batch state at
-      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
-      # ticks, 51 min of it dead pipeline time. Once ignited the poller
-      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
-      # is the only fragile part. workflow_dispatch also bypasses the
-      # poller's activity gate. Never fatal — the cron stays the backstop,
-      # and a duplicate tick is harmless (collects are idempotent).
+      # Starts the poller chain. Since 2026-10-12 the poller's cron fires only
+      # in the production window (13th-17th), so outside it this dispatch is
+      # the only thing that starts a poll; inside it the cron is a backstop.
+      # The helper retries a refused dispatch for up to ten minutes with
+      # backoff and always exits 0, naming the manual recovery if GitHub
+      # never accepts it. workflow_dispatch also bypasses the poller's
+      # activity gate, and a duplicate poll is harmless (collects are
+      # idempotent).
       - name: Ignite batch poller
         if: steps.signature_after.outputs.signature_ok == 'true'
         continue-on-error: true
+        timeout-minutes: 15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +e
-          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
-            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
-          else
-            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
-          fi
-          exit 0
+        run: python3 -m scripts.ci.poller_rearm --ignite --retry-budget-min 10
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
@@ -886,27 +874,21 @@ jobs:
           retention-days: 14
 
       # Ignite the poller chain now instead of waiting for its cron.
-      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
-      # workflows hard: on 2026-08-01 this stage emitted batch state at
-      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
-      # ticks, 51 min of it dead pipeline time. Once ignited the poller
-      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
-      # is the only fragile part. workflow_dispatch also bypasses the
-      # poller's activity gate. Never fatal — the cron stays the backstop,
-      # and a duplicate tick is harmless (collects are idempotent).
+      # Starts the poller chain. Since 2026-10-12 the poller's cron fires only
+      # in the production window (13th-17th), so outside it this dispatch is
+      # the only thing that starts a poll; inside it the cron is a backstop.
+      # The helper retries a refused dispatch for up to ten minutes with
+      # backoff and always exits 0, naming the manual recovery if GitHub
+      # never accepts it. workflow_dispatch also bypasses the poller's
+      # activity gate, and a duplicate poll is harmless (collects are
+      # idempotent).
       - name: Ignite batch poller
         if: steps.signature_after.outputs.signature_ok == 'true'
         continue-on-error: true
+        timeout-minutes: 15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +e
-          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
-            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
-          else
-            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
-          fi
-          exit 0
+        run: python3 -m scripts.ci.poller_rearm --ignite --retry-budget-min 10
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
@@ -1168,27 +1150,21 @@ jobs:
           retention-days: 14
 
       # Ignite the poller chain now instead of waiting for its cron.
-      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
-      # workflows hard: on 2026-08-01 this stage emitted batch state at
-      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
-      # ticks, 51 min of it dead pipeline time. Once ignited the poller
-      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
-      # is the only fragile part. workflow_dispatch also bypasses the
-      # poller's activity gate. Never fatal — the cron stays the backstop,
-      # and a duplicate tick is harmless (collects are idempotent).
+      # Starts the poller chain. Since 2026-10-12 the poller's cron fires only
+      # in the production window (13th-17th), so outside it this dispatch is
+      # the only thing that starts a poll; inside it the cron is a backstop.
+      # The helper retries a refused dispatch for up to ten minutes with
+      # backoff and always exits 0, naming the manual recovery if GitHub
+      # never accepts it. workflow_dispatch also bypasses the poller's
+      # activity gate, and a duplicate poll is harmless (collects are
+      # idempotent).
       - name: Ignite batch poller
         if: steps.signature_after.outputs.signature_ok == 'true'
         continue-on-error: true
+        timeout-minutes: 15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +e
-          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
-            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
-          else
-            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
-          fi
-          exit 0
+        run: python3 -m scripts.ci.poller_rearm --ignite --retry-budget-min 10
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug

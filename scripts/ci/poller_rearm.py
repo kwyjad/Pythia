@@ -5,8 +5,9 @@ a refused dispatch.
 The poller keeps itself alive by dispatching its own next run. At 15:12 UTC
 on 7 October 2026 GitHub answered HTTP 500 to all four re-arm attempts the
 step made over ninety seconds, the chain ended, and nothing polled until a
-person restarted it at 15:39. The hourly cron is the designed backstop, and
-in this repository a scheduled tick can arrive hours late. On a production
+person restarted it at 15:39. The cron is only a backstop (and since
+2026-10-12 fires only from the 13th to the 17th), and in this repository a
+scheduled tick can arrive hours late. On a production
 run with a 24-hour batch window that delay can matter.
 
 Two layers:
@@ -33,6 +34,13 @@ cover a very rare outage costs a runner for no evidence. In the 30 days to
 
 Exits 0 when the chain re-armed or legitimately ended, 1 when it could not
 re-arm before the job limit (a red run is the signal a person should see).
+
+``--ignite`` is the other entry point: a submit stage starting the chain at
+depth 0. Since 2026-10-12 the poller's cron fires only in the production
+window (the 13th to the 17th), so outside it this dispatch is the only thing
+that starts a poll. It retries with the same backoff for ``--retry-budget-min``
+and always exits 0: a stage that has done its work must not go red because
+GitHub refused one dispatch, and the warning names the manual recovery.
 """
 from __future__ import annotations
 
@@ -125,7 +133,7 @@ def run_rearm(
             log(f"::notice title=Poller chain re-armed::after {n_polls} in-job poll(s)")
             return 0
     log(f"::error title=Poller chain broken::the re-arm dispatch was refused until the job "
-        f"limit ({n_polls} in-job poll(s)); the hourly cron is the backstop")
+        f"limit ({n_polls} in-job poll(s)); dispatch poll_llm_batches.yml by hand (the cron backstop fires only 13th-17th)")
     return 1
 
 
@@ -186,9 +194,23 @@ def _subprocess_poll(depth: int) -> tuple[bool, int]:
     return outputs["rearm"] == "true", nxt
 
 
+def ignite(dispatch: Dispatch, *, sleep: Sleep, clock: Clock, budget_s: float,
+           log: Callable[[str], None] = print) -> int:
+    """Start the poller chain at depth 0. Always returns 0; says so when refused."""
+    if dispatch_with_backoff(dispatch, 0, sleep=sleep, clock=clock, budget_s=budget_s, log=log):
+        log("Ignited poll_llm_batches.yml")
+        return 0
+    log("::warning title=Poller not ignited::GitHub refused the dispatch for "
+        f"{int(budget_s)} s. Outside the 13th-17th no cron will start it: run "
+        "`gh workflow run poll_llm_batches.yml --ref main` by hand.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Re-arm the poller chain; hold it in-job if refused.")
-    ap.add_argument("--next-depth", type=int, required=True)
+    ap.add_argument("--ignite", action="store_true",
+                    help="start the chain at depth 0 from a submit stage, with retries; never fails")
+    ap.add_argument("--next-depth", type=int, default=None)
     ap.add_argument("--job-started-at", type=float, default=None,
                     help="epoch seconds the job started (default: now)")
     ap.add_argument("--job-limit-min", type=float, default=225.0)
@@ -196,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--retry-budget-min", type=float, default=10.0)
     ap.add_argument("--poll-interval-sec", type=float, default=330.0)
     args = ap.parse_args(argv)
+    if args.ignite:
+        return ignite(_gh_dispatch, sleep=time.sleep, clock=time.time,
+                      budget_s=args.retry_budget_min * 60.0)
+    if args.next_depth is None:
+        ap.error("--next-depth is required unless --ignite is given")
     started = args.job_started_at if args.job_started_at else time.time()
     return run_rearm(
         next_depth=args.next_depth,

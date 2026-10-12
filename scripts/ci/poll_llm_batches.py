@@ -5,9 +5,11 @@
 
 """Poller for provider Batch-API jobs in the staged pipeline.
 
-Runs from poll_llm_batches.yml every 15 minutes. Convergent by design: each
-tick re-derives all state from Actions artifacts, so a missed cron tick or a
-crashed poller run only delays a pipeline, never loses it.
+Runs from poll_llm_batches.yml, started by each submit stage and then
+re-armed every ~5.5 minutes while a pipeline is in flight (a backstop cron
+fires only from the 13th to the 17th). Convergent by design: each tick
+re-derives all state from Actions artifacts, so a missed tick or a crashed
+poller run only delays a pipeline, never loses it.
 
 Per tick:
 1. List recent successful runs of the submit-capable workflows and download
@@ -292,10 +294,10 @@ def _max_chain() -> int:
 def _should_rearm(decisions: list[dict]) -> tuple[bool, str]:
     """(rearm?, why) — should the poller dispatch another tick of itself?
 
-    Exists because the */15 cron is not honoured: GitHub throttles frequent
-    schedules to roughly hourly, which left staged pipelines parked for hours
-    between stages. The chain makes the cron an ignition source rather than the
-    mechanism of progress.
+    Exists because a cron is not a mechanism of progress here: GitHub
+    throttled the old */15 schedule to roughly hourly, which left staged
+    pipelines parked for hours between stages. The chain is the mechanism; the
+    submit stages start it and the cron (13th-17th only) is a backstop.
     """
     live = [d for d in decisions if d.get("action") in REARM_ACTIONS]
     if not live:

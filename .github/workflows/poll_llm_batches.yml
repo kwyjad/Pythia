@@ -6,11 +6,12 @@
 ---
 # Poll provider Batch-API jobs and advance the staged pipeline.
 #
-# Every 15 minutes: read the tiny pythia-batch-state artifacts uploaded by
+# Started by each submit stage (and, in the production window only, by a
+# backstop cron): read the tiny pythia-batch-state artifacts uploaded by
 # submit stages (never the DB), poll the pending provider batches, and when
 # a pipeline's batches are all terminal (or past PYTHIA_BATCH_MAX_WAIT_H)
 # dispatch its next Pythia Pipeline Stage. Convergent by design: a missed
-# cron tick or crashed poller run only delays a pipeline, never loses it,
+# tick or crashed poller run only delays a pipeline, never loses it,
 # and the collect stages are idempotent so a rare double-dispatch is
 # harmless.
 #
@@ -22,12 +23,19 @@ name: Poll LLM Batches
 
 on:
   schedule:
-    # Ignition only. GitHub throttles frequent schedules hard — in practice
-    # this fires roughly hourly, not every 15 minutes, which parked staged
-    # pipelines between stages for hours. Progress comes from the
-    # self-rescheduling chain at the end of this job; the cron just starts it
-    # (and backstops a chain that was broken by an infra failure).
-    - cron: "*/15 * * * *"
+    # Backstop only, and only in the production window. Every submit stage
+    # of pythia_pipeline_stage.yml dispatches this workflow itself (with
+    # retries), and once running the chain re-arms every ~5.5 minutes, so
+    # the cron starts nothing in normal operation. It covers one case: a
+    # production pipeline whose ignition dispatch GitHub refused, or whose
+    # chain broke past the in-job hold. That pipeline starts on the 13th
+    # (00:00 cron, often hours late) and its three batch waits are each
+    # bounded by PYTHIA_BATCH_MAX_WAIT_H (24h), so it ends by the 17th.
+    # Until 2026-10-12 this was `*/15 * * * *` year-round: GitHub delivered
+    # it four to six times a day, every day, to find nothing in flight on
+    # about 26 days of the month. A test run outside the window relies on
+    # its own ignition; if that fails, dispatch this workflow by hand.
+    - cron: "17 */2 13-17 * *"
   workflow_dispatch:
     inputs:
       chain_depth:
@@ -91,7 +99,7 @@ jobs:
         run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       # Cheap activity gate: the pipeline is active only a few days per
-      # month, but this cron fires year-round. scripts/ci/check_pipeline_active.py
+      # month, and even inside the cron window most ticks find nothing. scripts/ci/check_pipeline_active.py
       # answers "is a staged pipeline in flight?" with TWO conditions — a recent
       # pythia-batch-state artifact AND no newer successful fc_collect_finalize.
       #
@@ -121,7 +129,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Minimal deps on purpose: this runs every 15 minutes. The poller only
+      # Minimal deps on purpose: a live chain runs this every ~5.5 minutes. The poller only
       # needs requests (provider batch polling) — pythia.llm_batch's other
       # imports are stdlib or lazy.
       - name: Install minimal dependencies
