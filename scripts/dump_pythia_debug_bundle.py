@@ -3224,6 +3224,8 @@ class BundleData:
     interpretation: dict[str, Any] | None = None
     # pythia/tools/ace_pa_eligibility.py: which ACE countries were asked ACE/PA.
     ace_pa_eligibility: dict[str, Any] | None = None
+    # pythia/tools/phase3_eligibility.py: which DR Phase 3+ questions were dropped.
+    phase3_eligibility: dict[str, Any] | None = None
 
     # Run summary stats (for executive summary bottom sections)
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
@@ -3529,6 +3531,14 @@ def _load_bundle_data(
         ) or {"absent": True}
     except Exception as exc:  # noqa: BLE001 - a collector never fails the bundle
         data.ace_pa_eligibility = {"error": str(exc)}
+    try:
+        from pythia.tools.phase3_eligibility import latest_decision as _p3_latest  # noqa: PLC0415
+
+        data.phase3_eligibility = (
+            _p3_latest(con, data.hs_run_id) if data.hs_run_id else None
+        ) or {"absent": True}
+    except Exception as exc:  # noqa: BLE001 - a collector never fails the bundle
+        data.phase3_eligibility = {"error": str(exc)}
 
     return data
 
@@ -3709,6 +3719,26 @@ def _ace_pa_eligibility_check(elig: dict[str, Any]) -> dict[str, Any]:
     return {"subsystem": "ACE/PA Eligibility", "status": "OK", "detail": detail}
 
 
+def _phase3_eligibility_check(elig: dict[str, Any]) -> dict[str, Any]:
+    """The health line for the DR Phase 3+ eligibility decision of this HS run."""
+    name = "Phase 3+ Eligibility"
+    if elig.get("error"):
+        return {"subsystem": name, "status": "WARN", "detail": f"decision unreadable: {elig['error']}"}
+    if elig.get("absent"):
+        return {"subsystem": name, "status": "WARN",
+                "detail": "no DR Phase 3+ eligibility decision stored for this HS run"}
+    asked = elig.get("asked") or []
+    dropped = elig.get("dropped") or {}
+    detail = (
+        f"source={elig.get('source')}; bound {elig.get('max_staleness_months')} months; "
+        f"asked for {len(asked)}, dropped {len(dropped)} whose source stopped publishing"
+        + (": " + "; ".join(f"{k} ({v})" for k, v in sorted(dropped.items())) if dropped else "")
+    )
+    if elig.get("source") != "rule":
+        return {"subsystem": name, "status": "WARN", "detail": f"guard: {elig.get('reason')}; {detail}"}
+    return {"subsystem": name, "status": "OK", "detail": detail}
+
+
 def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     """Return list of {subsystem, status, detail} dicts for the executive summary."""
     checks: list[dict[str, Any]] = []
@@ -3744,6 +3774,9 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     elig = data.ace_pa_eligibility
     if elig is not None:
         checks.append(_ace_pa_eligibility_check(elig))
+    p3 = data.phase3_eligibility
+    if p3 is not None:
+        checks.append(_phase3_eligibility_check(p3))
 
     # The interpreter report, and why it needed a correction pass if it did.
     interp = data.interpretation

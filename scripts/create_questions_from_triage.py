@@ -19,7 +19,7 @@ import duckdb
 from pythia.db.schema import ensure_schema
 from pythia.run_questions import backfill_run_questions, record_run_question
 from pythia.test_mode import is_test_mode
-from pythia.tools import ace_pa_eligibility
+from pythia.tools import ace_pa_eligibility, phase3_eligibility
 from pythia.tools.question_repairs import repair_questions_pointing_at_test_scans  # noqa: F401  re-exported
 
 
@@ -533,6 +533,14 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
         ace_pa_asked: List[str] = []
         ace_pa_not_asked: List[str] = []
 
+        # DR Phase 3+ only where the source still publishes (12 Oct 2026;
+        # pythia/tools/phase3_eligibility.py): the country's newest Current
+        # Situation row must be no more than PHASE3_MAX_STALENESS_MONTHS
+        # before the window's first month. DR/EVENT_OCCURRENCE is unaffected.
+        phase3 = phase3_eligibility.decide(con, window_start=epoch_label)
+        phase3_asked: List[str] = []
+        phase3_dropped: List[str] = []
+
         for th in triaged:
             metrics = _metrics_for_hazard(th.hazard_code)
             if th.hazard_code == "ACE":
@@ -601,6 +609,15 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                             th.iso3,
                         )
                         continue
+                    if not phase3.admits(th.iso3):
+                        phase3_dropped.append(th.iso3)
+                        LOG.info(
+                            "Skipping DR/PHASE3PLUS_IN_NEED for %s: %s. Binary "
+                            "DR/EVENT_OCCURRENCE still generated.",
+                            th.iso3, phase3.why_not(th.iso3),
+                        )
+                        continue
+                    phase3_asked.append(th.iso3)
                     # Use IPC Phase 3+ metric for resolution
                     actual_metric = "PHASE3PLUS_IN_NEED"
                     wording = _build_dr_phase3_question_wording(
@@ -651,6 +668,14 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
             )
         except Exception as exc:  # noqa: BLE001 - the record must never stop question creation
             print(f"::warning::ACE/PA eligibility could not be recorded: {exc}")
+
+        try:
+            phase3_eligibility.record(
+                con, phase3, hs_run_id=run_id, asked=phase3_asked,
+                dropped=phase3_dropped, is_test=_is_test,
+            )
+        except Exception as exc:  # noqa: BLE001 - the record must never stop question creation
+            print(f"::warning::DR Phase 3+ eligibility could not be recorded: {exc}")
 
         total = inserted + updated
         print(

@@ -1,0 +1,52 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: does the IPC API, or the HDX Cadre Harmonisé dataset, carry a
+# current Phase 3+ figure for the Sahel and West African countries FEWS NET
+# stopped publishing for? Downloads no canonical DB and writes nothing back,
+# so it is not in the pythia-resolver-db concurrency group.
+name: Probe Cadre Harmonise
+
+on:
+  workflow_dispatch:
+    inputs:
+      countries:
+        description: "Comma-separated ISO3 codes"
+        required: false
+        default: "MRT,NER,MLI,BFA,TCD,NGA"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Probe Cadre Harmonise
+        env:
+          IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
+          COUNTRIES: ${{ inputs.countries || 'MRT,NER,MLI,BFA,TCD,NGA' }}
+        run: python -m tools.probe_cadre_harmonise --out-dir diagnostics/cadre_harmonise --countries "${COUNTRIES}"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-cadre-harmonise
+          path: diagnostics/cadre_harmonise/
+          retention-days: 14
