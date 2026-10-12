@@ -651,6 +651,134 @@ def _resolve_value(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Flood and cyclone people affected: the resolution machine (Oct 2026)
+# ---------------------------------------------------------------------------
+
+#: PA questions on these hazards resolve from the people-affected resolution
+#: machine (``haz_resolutions``), not from the IFRC GO rows in
+#: ``facts_resolved``. Owner decision 2026-10-12, ending shadow mode: on the
+#: release of 12 Oct 2026 the IFRC path resolved 9 of 66 due FL/PA horizon
+#: months and 1 of 33 TC/PA, while the machine already held an answer for 35
+#: of 49 and 17 of 26 of the country-months those questions needed. The
+#: machine's ladder includes IFRC GO as one of its rungs, so where the machine
+#: is silent there is no IFRC answer to fall back to: its silence is the
+#: verdict. DR/PA is not here (drought resolves Phase 3+ questions).
+MACHINE_PA_HAZARDS: frozenset[str] = frozenset({"FL", "TC"})
+HAZ_RESOLUTIONS_TABLE = "haz_resolutions"
+#: Prefix of every ``resolutions.source_desc`` drawn from the machine:
+#: ``haz_resolutions:<answering rung>:<value type>``.
+HAZ_SOURCE_PREFIX = HAZ_RESOLUTIONS_TABLE
+#: The rung name a machine zero carries in ``source_desc``: a zero rests on
+#: evidence of absence (no qualifying detection and a silent ReliefWeb
+#: sweep), not on a ladder rung.
+HAZ_ZERO_RUNG = "detection_absence"
+#: Freeze window of the machine (``rulebook.yaml``'s ``freeze_days``); read
+#: from the rulebook when it loads, this is only the fallback.
+_HAZ_FREEZE_DAYS_FALLBACK = 60
+
+# Machine verdicts as compute_resolutions reads them.
+HAZ_VERDICT_VALUE = "value"
+HAZ_VERDICT_ZERO = "zero"
+HAZ_VERDICT_NO_DATA = "no_data"
+HAZ_VERDICT_NO_ROW = "no_row"
+
+
+def _haz_freeze_days() -> int:
+    try:
+        from resolver.hazard_resolution.rulebook import load_rulebook
+
+        return int(load_rulebook().get("freeze_days"))
+    except Exception:  # noqa: BLE001 - the fallback is the shipped value
+        return _HAZ_FREEZE_DAYS_FALLBACK
+
+
+def haz_rung_and_value_type(
+    provenance_json: Optional[str], rule_fired: Optional[str], status: str,
+) -> tuple[str, str]:
+    """The answering rung and value type of a machine resolution.
+
+    Read from the provenance the reconciler writes (``winning_rung``,
+    ``value_is_lower_bound``), with ``rule_fired`` (``ladder:<rung>`` or
+    ``ladder:<rung>:lower_bound``) as the second witness for a row whose
+    provenance lacks the key. A zero names no rung: it rests on absence.
+    """
+    if status == "RESOLVED_ZERO":
+        return HAZ_ZERO_RUNG, "zero"
+    rung = ""
+    lower = None
+    try:
+        import json as _json
+
+        prov = _json.loads(provenance_json) if provenance_json else {}
+    except (TypeError, ValueError):
+        prov = {}
+    if isinstance(prov, dict):
+        rung = str(prov.get("winning_rung") or "")
+        if prov.get("value_is_lower_bound") is not None:
+            lower = bool(prov.get("value_is_lower_bound"))
+    rule = str(rule_fired or "")
+    if rule.startswith("ladder:"):
+        parts = rule.split(":")
+        if not rung and len(parts) > 1:
+            rung = parts[1]
+        if lower is None:
+            lower = len(parts) > 2 and parts[2] == "lower_bound"
+    value_type = "displaced_lower_bound" if lower else "affected"
+    return (rung or "unknown"), value_type
+
+
+def _try_haz_resolution(
+    conn, iso3: str, hazard_code: str, calendar_month: str,
+) -> tuple[str, Optional[float], Optional[str], str, str, bool]:
+    """Read the machine's answer for one cell.
+
+    Returns ``(verdict, value, source_ts, source_desc, rung, frozen)``.
+    ``RESOLVED_VALUE`` and ``RESOLVED_ZERO`` resolve, provisional or frozen:
+    a provisional row is re-read every run and a revision before the freeze
+    deadline replaces the resolution. ``NO_DATA`` and no row at all (PENDING
+    before the freeze deadline, INCONCLUSIVE, or never assessed) do not.
+    """
+    try:
+        y, m = int(calendar_month[:4]), int(calendar_month[5:7])
+    except (TypeError, ValueError):
+        return HAZ_VERDICT_NO_ROW, None, None, "", "", False
+    row = conn.execute(
+        f"""
+        SELECT status, value, provenance_json, rule_fired,
+               COALESCE(provisional, FALSE), created_at
+        FROM {HAZ_RESOLUTIONS_TABLE}
+        WHERE upper(iso3) = ? AND upper(hazard) = ? AND year = ? AND month = ?
+        LIMIT 1
+        """,
+        [iso3.upper(), hazard_code.upper(), y, m],
+    ).fetchone()
+    if row is None:
+        return HAZ_VERDICT_NO_ROW, None, None, "", "", False
+    status, value, prov_json, rule_fired, provisional, created_at = row
+    frozen = not bool(provisional)
+    status = str(status or "")
+    if status not in ("RESOLVED_VALUE", "RESOLVED_ZERO"):
+        return HAZ_VERDICT_NO_DATA, None, None, "", "", frozen
+    rung, value_type = haz_rung_and_value_type(prov_json, rule_fired, status)
+    source_desc = f"{HAZ_SOURCE_PREFIX}:{rung}:{value_type}"
+    source_ts = None
+    try:
+        import json as _json
+
+        prov = _json.loads(prov_json) if prov_json else {}
+        source_ts = (prov.get("retrieved_at") or None) if isinstance(prov, dict) else None
+    except (TypeError, ValueError):
+        source_ts = None
+    if not source_ts and created_at is not None:
+        source_ts = str(created_at)
+    if status == "RESOLVED_ZERO":
+        return HAZ_VERDICT_ZERO, 0.0, source_ts, source_desc, rung, frozen
+    if value is None:
+        return HAZ_VERDICT_NO_DATA, None, None, "", "", frozen
+    return HAZ_VERDICT_VALUE, float(value), source_ts, source_desc, rung, frozen
+
+
 def _should_default_to_zero(metric_norm: str, hazard_norm: str) -> bool:
     """Return True if absence of source data means zero impact for this
     metric/hazard combination."""
@@ -720,6 +848,14 @@ VINTAGE_METRICS = frozenset({"FATALITIES"})
 VINTAGE_MILESTONES_BY_GROUP: dict[tuple[str, str], tuple[tuple[str, int], ...]] = {
     ("*", "FATALITIES"): VINTAGE_MILESTONES,
     ("ACE", "PA"): (("d180", 180), ("d270", 270)),
+    # Flood and cyclone PA (Oct 2026, from the resolution machine): the
+    # machine's answer is provisional until month end + freeze_days (60) and
+    # immutable after, so the readings kept are the first and the first one
+    # taken once the cell has frozen. ``at_freeze`` is written from the
+    # machine row's own provisional flag, not from this day count; the count
+    # only lets ``reading_label`` name the reading for a scored bundle.
+    ("FL", "PA"): (("at_freeze", 60),),
+    ("TC", "PA"): (("at_freeze", 60),),
 }
 
 
@@ -794,20 +930,27 @@ def record_vintages(
     today: date,
     is_test: bool,
     milestones: Optional[tuple[tuple[str, int], ...]] = None,
+    extra_labels: tuple[str, ...] = (),
 ) -> list[str]:
     """Insert the vintages this resolution completes; returns their labels.
 
     ``first`` is written the first time the horizon resolves; ``d60``/``d90``
     once the month is old enough. Existing vintages are never touched
-    (``INSERT OR IGNORE``), which is the whole point.
+    (``INSERT OR IGNORE``), which is the whole point. ``extra_labels`` are
+    written whatever the day count (the machine's ``at_freeze``, decided by
+    the source row's own freeze state); an empty ``milestones`` tuple means
+    no day-count milestone at all.
     """
     days = _days_after_month_end(observed_month, today)
     labels = ["first"]
     if days is not None:
         labels += [
-            label for label, milestone in (milestones or VINTAGE_MILESTONES)
+            label for label, milestone in (
+                VINTAGE_MILESTONES if milestones is None else milestones
+            )
             if days >= milestone - VINTAGE_TOLERANCE_DAYS
         ]
+    labels += [label for label in extra_labels if label not in labels]
     written: list[str] = []
     for label in labels:
         before = conn.execute(
@@ -993,6 +1136,18 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
         # months per country), read once per run on the first ACE/PA horizon.
         conflict_series = None
         conflict_status_counts: Counter = Counter()
+        # FL/TC PA read the resolution machine whenever its table exists; an
+        # older DB (or a test fixture without it) keeps the IFRC cascade.
+        machine_available = _table_exists(conn, HAZ_RESOLUTIONS_TABLE)
+        haz_freeze_days = _haz_freeze_days() if machine_available else _HAZ_FREEZE_DAYS_FALLBACK
+        machine_rung_counts: Counter = Counter()
+        machine_retracted = 0
+        LOGGER.info(
+            "FL/TC PA resolution path: %s",
+            "haz_resolutions (people-affected resolution machine)"
+            if machine_available else
+            "IFRC/IDMC/EM-DAT facts cascade (no haz_resolutions table in this DB)",
+        )
         scoring_counts: Counter = Counter()
         # Per (hazard, metric): how many horizon-months resolved from a
         # source, defaulted to zero, or stayed unresolved and why. A group
@@ -1105,8 +1260,57 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
                 group = (hazard_norm, metric_norm)
                 scoring = None
+                machine_pa = (
+                    machine_available and metric_norm == "PA"
+                    and hazard_norm in MACHINE_PA_HAZARDS
+                )
+                machine_frozen = False
 
-                if hazard_norm == "ACE" and metric_norm == "PA":
+                if machine_pa:
+                    # Flood and cyclone people affected resolve from the
+                    # machine alone (see MACHINE_PA_HAZARDS). A value or a
+                    # zero resolves, provisional or frozen; anything else is
+                    # unresolved, and a row an earlier path wrote for the
+                    # horizon is deleted, because the machine's ladder
+                    # already read IFRC GO and found nothing it could use.
+                    if cal_month > cal_cutoff:
+                        skipped_no_data_coverage += 1
+                        outcome_counts[group]["unresolved_future"] += 1
+                        continue
+                    verdict, value_m, ts_m, desc_m, rung_m, machine_frozen = (
+                        _try_haz_resolution(conn, iso3_norm, hazard_norm, cal_month)
+                    )
+                    if verdict not in (HAZ_VERDICT_VALUE, HAZ_VERDICT_ZERO):
+                        skipped_null_resolution += 1
+                        if verdict == HAZ_VERDICT_NO_DATA:
+                            reason = "unresolved_machine_no_data"
+                        else:
+                            days = _days_after_month_end(cal_month, today)
+                            reason = (
+                                "unresolved_for_lag"
+                                if days is not None and days <= haz_freeze_days
+                                else "unresolved_machine_no_row"
+                            )
+                        outcome_counts[group][reason] += 1
+                        deleted = conn.execute(
+                            "SELECT COUNT(*) FROM resolutions "
+                            "WHERE question_id = ? AND horizon_m = ?",
+                            [question_id, horizon_m],
+                        ).fetchone()[0]
+                        if deleted:
+                            machine_retracted += int(deleted)
+                            conn.execute(
+                                "DELETE FROM resolutions WHERE question_id = ? AND horizon_m = ?",
+                                [question_id, horizon_m],
+                            )
+                        continue
+                    resolved_from_source += 1
+                    outcome_counts[group]["sourced"] += 1
+                    outcome_counts[group][f"rung:{rung_m}"] += 1
+                    machine_rung_counts[(hazard_norm, rung_m)] += 1
+                    resolved = (float(value_m), ts_m, desc_m)
+
+                elif hazard_norm == "ACE" and metric_norm == "PA":
                     # ACE/PA resolves from the IDMC conflict displacement
                     # series alone, under the one rule the prompt, the anchor
                     # and the references read (base_rate_spd.
@@ -1206,7 +1410,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                         skipped_null_resolution += 1
                         outcome_counts[group]["unresolved_no_data"] += 1
                         continue
-                elif hazard_norm == "ACE" and metric_norm == "PA":
+                elif machine_pa or (hazard_norm == "ACE" and metric_norm == "PA"):
+                    # Counted inside their own branch above.
                     value, source_ts, source_desc = resolved
                 else:
                     value, source_ts, source_desc = resolved
@@ -1247,7 +1452,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                 )
                 written += 1
                 milestones = vintage_milestones(hazard_norm, metric_norm)
-                if milestones:
+                extra_labels: tuple[str, ...] = ()
+                if machine_pa:
+                    # The machine says when its answer froze; the day count
+                    # does not get a vote.
+                    milestones = ()
+                    extra_labels = ("at_freeze",) if machine_frozen else ()
+                if milestones is not None and (milestones or extra_labels or machine_pa):
                     try:
                         vintages_written += len(record_vintages(
                             conn,
@@ -1260,6 +1471,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                             today=today,
                             is_test=bool(is_test_val),
                             milestones=milestones,
+                            extra_labels=extra_labels,
                         ))
                     except Exception as exc:  # noqa: BLE001 - a vintage never blocks a resolution
                         LOGGER.warning("resolution vintage for %s h%d failed: %r",
@@ -1306,7 +1518,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
             "%d ACE/PA horizon-months unresolved (unsettled, trailing, held "
             "out, or an irregular reporter's missing month), "
             "%d questions skipped (unresolvable hazard); "
-            "%d new FATALITIES resolution vintage(s) recorded.",
+            "%d new resolution vintage(s) recorded.",
             len(rows),
             written,
             resolved_from_source,
@@ -1329,6 +1541,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
         if conflict_status_counts:
             LOGGER.info("ACE/PA horizon-months by conflict displacement status: %s",
                         dict(conflict_status_counts))
+        if machine_available:
+            LOGGER.info(
+                "FL/TC PA resolved from haz_resolutions by rung: %s; %d earlier "
+                "resolution row(s) retracted where the machine holds no answer.",
+                {f"{hz}/{rung}": n for (hz, rung), n in sorted(machine_rung_counts.items())},
+                machine_retracted,
+            )
         report_outcome_counts(outcome_counts)
         return {f"{hz}/{m}": dict(c) for (hz, m), c in sorted(outcome_counts.items())}
     finally:
@@ -1378,6 +1597,17 @@ def report_outcome_counts(outcome_counts) -> list[str]:
         lines.append(f"| {hz}/{m} | {sourced} | {zeros} | {lag} | {other} |")
         pairs[f"{hz}/{m}"] = (sourced, zeros)
     flagged = mostly_zero_default_groups(pairs)
+    # Where each machine-resolved answer came from (FL/TC PA): the ladder rung
+    # that supplied the figure, or detection_absence for a zero.
+    rung_lines: list[str] = []
+    for (hz, m), counts in sorted(outcome_counts.items()):
+        rungs = {k[5:]: int(v) for k, v in counts.items() if k.startswith("rung:")}
+        if rungs:
+            rung_lines.append(
+                f"| {hz}/{m} | " + ", ".join(f"{r} {n}" for r, n in sorted(rungs.items())) + " |"
+            )
+    if rung_lines:
+        lines += ["", "| hazard/metric | resolved by machine rung |", "|---|---|"] + rung_lines
     LOGGER.info("Resolution outcomes this run:\n%s", "\n".join(lines))
     for group in flagged:
         print(

@@ -449,8 +449,9 @@ def resolver_card(hazard_code: str, metric: str) -> str:
 def _zero_note(question: SibylQuestion) -> str:
     if str(question.hazard_code).upper() in ("FL", "TC") and str(question.metric).upper() == "PA":
         return (
-            " OR has no record at all (a month with no IFRC GO or IDMC record "
-            "does not resolve, so treat 'no record' like zero here)"
+            " (a month with no qualifying event and a silent ReliefWeb sweep "
+            "resolves to ZERO on the resolution machine's evidence of absence; a "
+            "month with an event but no figure from any source does not resolve)"
         )
     return ""
 

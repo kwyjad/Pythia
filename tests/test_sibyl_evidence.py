@@ -448,9 +448,15 @@ def test_pa_wording_names_the_sources_that_resolve_it(hz):
     from scripts.create_questions_from_triage import _build_question_wording
 
     text = _build_question_wording("PHL", hz, "PA", date(2026, 11, 1), date(2027, 4, 30))
+    # EM-DAT is stood down (no credential), so no wording promises it.
     assert "EM-DAT" not in text
     assert "IFRC GO" in text and "IDMC" in text
     assert "not resolved" in text
+    if hz in ("FL", "TC"):
+        # Since 2026-10-12 these resolve on the PA resolution machine, where
+        # a quiet month is a zero and a displacement count a lower bound.
+        assert "resolution machine" in text
+        assert "lower bound" in text and "resolves to zero" in text
 
 
 # --- 11. month-position check ------------------------------------------------------------

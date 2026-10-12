@@ -554,6 +554,8 @@ jobs:
           # test_ace_pa_conflict_displacement pins ACE/PA to IDMC conflict
           # displacement behind both coverage gates (Oct 2026: every IDMC row
           # was all-cause hazard IDU and no ACE/PA question resolved).
+          # test_pa_resolves_from_machine pins FL/PA and TC/PA to the PA
+          # resolution machine (Oct 2026): no IFRC fallback where it is silent.
           # test_acled_partial_month_resolution and test_source_coverage pin
           # that a row written before its month ended neither resolves a
           # horizon nor makes the month "covered" for zero-defaulting.
@@ -568,6 +570,7 @@ jobs:
             pythia/tests/test_ace_pa_conflict_displacement.py \
             pythia/tests/test_conflict_displacement_settle.py \
             pythia/tests/test_compute_resolutions.py \
+            pythia/tests/test_pa_resolves_from_machine.py \
             pythia/tests/test_resolutions_repair_question_provenance.py \
             pythia/tests/test_acled_partial_month_resolution.py \
             pythia/tests/test_source_coverage.py \

@@ -317,6 +317,16 @@ _RESOLUTION_SEMANTICS = """\
   source's observed coverage. These rows carry `source_desc='zero_default'`.
 - `source_desc` (present for resolutions computed after July 2026) names the
   winning source, e.g. `facts_resolved:IFRC:2026-03`. NULL on older rows.
+- FL/PA and TC/PA resolve from the people-affected resolution machine since
+  2026-10-12: `source_desc` reads `haz_resolutions:<rung>:<value type>`, e.g.
+  `haz_resolutions:idmc_idu:displaced_lower_bound` (a displacement count,
+  scored as the answer and a FLOOR on people affected) or
+  `haz_resolutions:detection_absence:zero` (no qualifying event and a silent
+  ReliefWeb sweep: a measured zero, not a zero-default). The answer is
+  provisional until month end + 60 days; `resolution_vintages` keeps `first`
+  and `at_freeze`. Earlier FL/TC PA rows read IFRC GO alone, and a month with
+  no IFRC record was unresolved, so FL/TC scores before and after the switch
+  are drawn from different outcome sets.
 - `observed_month` is the calendar month the horizon resolves against.
 - `acled_snapshot_date` (ACE/FATALITIES) is the date of the ACLED pull the
   figure came from. ACLED revises counts for weeks, and every resolution run

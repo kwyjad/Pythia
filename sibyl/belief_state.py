@@ -37,8 +37,10 @@ class BeliefStateError(ValueError):
 class MonthBelief:
     """One horizon: P(zero) and the 0.05..0.95 quantiles given a positive value.
 
-    For flood and cyclone questions ``p_zero`` is the chance of zero OR no
-    record, since a month the source has no record for does not resolve.
+    For flood and cyclone questions ``p_zero`` is the chance the resolution
+    machine answers zero (no qualifying event and a silent ReliefWeb sweep);
+    until 2026-10-12 it was the chance of zero OR no record, when those
+    questions resolved on IFRC GO records alone.
     """
 
     p_zero: float

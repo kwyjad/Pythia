@@ -355,10 +355,18 @@ def _pa_lines(con: Any, iso3: str, hazard: str,
     from pythia.tools.compute_resolutions import PA_FACTS_RESOLVED_METRICS  # noqa: PLC0415
 
     cols = _cols(con, "facts_resolved")
-    if not cols:
-        return ["No resolving record is held (the facts table is absent)."], {"months_with_record": 0}
     this_month = as_of.strftime("%Y-%m")
     months = [_ym_add(this_month, -k) for k in range(PA_MONTHS_BACK, 0, -1)]
+    if _cols(con, "haz_resolutions"):
+        # Since 2026-10-12 FL/TC PA resolve on the people-affected resolution
+        # machine (compute_resolutions.MACHINE_PA_HAZARDS), so the reading
+        # shows the machine's answers, not the IFRC rows it now outranks.
+        lines, info = _machine_pa_lines(con, iso3, hazard, months)
+        if cols:
+            lines += _gdacs_lines(con, iso3, hazard, months, cols, info)
+        return lines, info
+    if not cols:
+        return ["No resolving record is held (the facts table is absent)."], {"months_with_record": 0}
     publisher = "publisher" if "publisher" in cols else "CAST(NULL AS VARCHAR)"
     marks = ", ".join("?" for _ in PA_FACTS_RESOLVED_METRICS)
     rows = con.execute(
@@ -374,6 +382,50 @@ def _pa_lines(con: Any, iso3: str, hazard: str,
     for ym in months:
         lines.append(f"- {ym}: " + ("; ".join(by_month[ym]) if ym in by_month
                                      else "no record held for this month"))
+    info = {"months_with_record": len(by_month)}
+    lines += _gdacs_lines(con, iso3, hazard, months, cols, info)
+    return lines, info
+
+
+def _machine_pa_lines(con: Any, iso3: str, hazard: str,
+                      months: List[str]) -> Tuple[List[str], Dict[str, Any]]:
+    """The resolution machine's answer for each of the last months."""
+    from pythia.tools.compute_resolutions import haz_rung_and_value_type  # noqa: PLC0415
+
+    rows = con.execute(
+        "SELECT year, month, status, value, provenance_json, rule_fired, "
+        "COALESCE(provisional, FALSE) FROM haz_resolutions "
+        "WHERE upper(iso3) = ? AND upper(hazard) = ? "
+        "AND (year * 100 + month) BETWEEN ? AND ?",
+        [iso3.upper(), hazard.upper(),
+         int(months[0][:4]) * 100 + int(months[0][5:7]),
+         int(months[-1][:4]) * 100 + int(months[-1][5:7])],
+    ).fetchall()
+    by_month: Dict[str, str] = {}
+    answered = 0
+    for year, month, status, value, prov, rule, provisional in rows:
+        ym = f"{int(year):04d}-{int(month):02d}"
+        tag = "provisional" if provisional else "final"
+        if status == "RESOLVED_VALUE" and value is not None:
+            rung, vtype = haz_rung_and_value_type(prov, rule, status)
+            floor = ", a displacement count: a LOWER BOUND" if vtype == "displaced_lower_bound" else ""
+            by_month[ym] = f"{_num(value)} people affected ({rung}{floor}; {tag})"
+            answered += 1
+        elif status == "RESOLVED_ZERO":
+            by_month[ym] = f"zero (no qualifying event, ReliefWeb silent; {tag})"
+            answered += 1
+        else:
+            by_month[ym] = "no figure on any source after the freeze (unresolved)"
+    lines = [f"People affected, as the resolution machine answers them, {months[0]} to {months[-1]}:"]
+    for ym in months:
+        lines.append(f"- {ym}: " + by_month.get(
+            ym, "no answer yet (pending before the freeze, or not assessed)"))
+    return lines, {"months_with_record": answered, "machine": True}
+
+
+def _gdacs_lines(con: Any, iso3: str, hazard: str, months: List[str], cols: set,
+                 info: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
     gd_months = months[-GDACS_MONTHS_BACK:]
     alert = "alertlevel" if "alertlevel" in cols else "CAST(NULL AS VARCHAR)"
     gd = con.execute(
@@ -386,7 +438,8 @@ def _pa_lines(con: Any, iso3: str, hazard: str,
     lines.append(f"GDACS alert levels, {gd_months[0]} to {gd_months[-1]}: "
                  + "; ".join(f"{ym} {gd_by.get(ym, 'no alert listed')}" for ym in gd_months))
     lines.append("GDACS alerts detect an event; they are not the figure this question resolves on.")
-    return lines, {"months_with_record": len(by_month), "gdacs_months_listed": len(gd_by)}
+    info["gdacs_months_listed"] = len(gd_by)
+    return lines
 
 
 # --- entry point -------------------------------------------------------------------
@@ -428,8 +481,9 @@ def build_resolver_reading(
                                    record={"source": "facts_resolved:phase3plus", **info})
         if hazard in ("FL", "TC") and metric == "PA":
             lines, info = _pa_lines(con, iso3, hazard, as_of)
+            source = "haz_resolutions+gdacs" if info.pop("machine", False) else "facts_resolved:pa+gdacs"
             return ResolverReading(text=_render(as_of, lines),
-                                   record={"source": "facts_resolved:pa+gdacs", **info})
+                                   record={"source": source, **info})
     except Exception as exc:  # noqa: BLE001 - the reading never stops a question
         logger.warning("sibyl.resolver_reading: %s failed: %s",
                        getattr(question, "question_id", "?"), exc)

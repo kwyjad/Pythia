@@ -1,5 +1,7 @@
-How this question resolves (checked against pythia/tools/compute_resolutions.py):
-- Source: people-affected figures in the Resolver's facts tables. IFRC GO (field reports, DREF and emergency appeals) ranks above IDMC; a direct "affected" count ranks above a displacement figure. A legacy EM-DAT table is a last fallback, but no connector fills it today.
-- A month with NO such record stays UNRESOLVED. It is never scored as zero. So p_zero for this question means "zero or no record".
-- A record exists when a National Society reports or asks for funds, or IDMC logs displacement. Large floods handled with national means, or reported only in the press, may leave no record at all.
-- Satellite exposure estimates (GDACS "population exposed") are a different quantity and never resolve this question.
+How this question resolves (checked against pythia/tools/compute_resolutions.py, MACHINE_PA_HAZARDS):
+- Source: Pythia's people-affected resolution machine (`haz_resolutions`). In a month with a qualifying flood (a GDACS flood alert at or above the rulebook's trigger level) it takes the first figure on a fixed ladder: EM-DAT (not read today: no credential), then figures stated in ReliefWeb reports (each quote checked against the document), then IFRC GO (field reports, DREF and emergency appeals), then IDMC displacement records.
+- An IDMC displacement count IS the answer when it is the best figure available. It is a LOWER BOUND on people affected: it counts only those displaced.
+- A month with no qualifying flood and a silent ReliefWeb sweep resolves to ZERO. So p_zero for this question means "the machine answers zero".
+- A month with a detected flood but no figure on any rung by the freeze deadline stays UNRESOLVED and is never scored.
+- The answer is provisional until the freeze and may be revised before it; the forecast is scored on the answer held at scoring time.
+- Satellite exposure estimates (GDACS "population exposed") are a detector and a ceiling on plausible figures, never the resolved value.

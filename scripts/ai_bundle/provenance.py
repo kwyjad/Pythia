@@ -62,6 +62,20 @@ RESOLUTION_SERIES: dict[tuple[str, str], str] = {
         "facts_resolved event_occurrence: 1 when GDACS listed an Orange or Red "
         "alert naming the country that month, else 0 for a month GDACS covered"
     ),
+    ("FL", "PA"): (
+        "haz_resolutions (the people-affected resolution machine, since "
+        "2026-10-12): the first figure on its ladder (ReliefWeb-stated, IFRC GO, "
+        "IDMC displacement as a LOWER BOUND); a month with no qualifying flood "
+        "and a silent ReliefWeb sweep resolves 0; NO_DATA or no answer yet is "
+        "unresolved. source_desc = haz_resolutions:<rung>:<value type>"
+    ),
+    ("TC", "PA"): (
+        "haz_resolutions (the people-affected resolution machine, since "
+        "2026-10-12): the first figure on its ladder (ReliefWeb-stated, IFRC GO, "
+        "IDMC displacement as a LOWER BOUND); a month with no qualifying storm "
+        "track and a silent ReliefWeb sweep resolves 0; NO_DATA or no answer yet "
+        "is unresolved. source_desc = haz_resolutions:<rung>:<value type>"
+    ),
     ("*", "PA"): (
         "facts_resolved people affected (affected / people_affected / pa / "
         "displaced), source precedence IFRC > IDMC; unresolved when absent"

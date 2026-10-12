@@ -245,7 +245,26 @@ def _build_question_wording(
             f"between {start_str} and {end_str}, as resolved by ACLED?"
         )
 
-    if hz in {"DR", "FL", "TC"} and m == "PA":
+    if hz in {"FL", "TC"} and m == "PA":
+        # Resolved by the people-affected resolution machine since 2026-10-12
+        # (pythia/tools/compute_resolutions.py, MACHINE_PA_HAZARDS): the first
+        # figure on its ladder, a displacement count counting as a lower
+        # bound, a quiet month resolving to zero. EM-DAT heads the ladder but
+        # is stood down (no credential), so the wording does not promise it.
+        # New questions only; stored
+        # questions keep the text they were asked with.
+        hazard_name = HAZARD_HUMAN_NAMES.get(hz, hz)
+        return (
+            f"How many people will be affected each month by {hazard_name} in {country} "
+            f"between {start_str} and {end_str}? Resolved by Pythia's people-affected "
+            f"resolution machine: the first figure available among figures stated in "
+            f"ReliefWeb reports, IFRC GO and IDMC displacement records (a "
+            f"displacement count is a lower bound on people affected). A month with no "
+            f"qualifying {hazard_name} event and no report of one resolves to zero; a "
+            f"month with an event but no figure from any source is not resolved."
+        )
+
+    if hz == "DR" and m == "PA":
         # Named after what resolves it today (pythia/tools/compute_resolutions.py,
         # docs/montandon_assessment.md): people-affected figures in the Resolver
         # facts, IFRC GO ahead of IDMC and direct affected counts ahead of
