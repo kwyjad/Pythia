@@ -24,6 +24,18 @@ time and promises nothing about what each one downloaded. So before upload a
 producer checks that no canonical artifact newer than the one it downloaded
 was uploaded by another run meanwhile, and stops RED when one was.
 
+``resolve-trigger`` — a chained workflow used to download its TRIGGER's
+artifact whatever had been uploaded since. On 11 October 2026 the weekly
+ingest (a Sunday) queued behind the monthly Resolver Update, took the group
+first when it finished, started from Resolver Update's DB and uploaded at
+10:57; Compute Resolutions then downloaded Resolver Update's older artifact
+and ``upload-guard`` refused it, so no resolutions, scores or calibration
+were written and nothing was published. Because every accepted canonical
+upload passed ``upload-guard``, the canonical line is linear: the newest
+canonical DB descends from the trigger's. So a chained run now starts from
+the newest canonical DB when one is newer than its trigger's, and from the
+trigger's otherwise (including when the API cannot answer).
+
 ``record`` — the staged pipeline downloads the canonical DB at its FIRST
 stage and uploads it at its last, days later, from a staged copy. The first
 stage records which canonical run it forked from in the DB itself
@@ -120,6 +132,25 @@ def newer_canonical(
     return "newer_exists", max(later, key=lambda a: a.get("created_at") or "")
 
 
+def newest_since_trigger(
+    artifacts: Iterable[dict], *, trigger_run_id: str, this_run_id: str, repo_id: Any,
+) -> str:
+    """The run a chained workflow should download from.
+
+    The newest canonical artifact uploaded after the trigger's, when there is
+    one; otherwise the trigger itself. ``newer_canonical`` already applies the
+    repository, branch and expiry filters the upload guard uses, so the run
+    chosen here is one that guard would accept as the base."""
+    verdict, newer = newer_canonical(
+        artifacts, downloaded_run_id=trigger_run_id, this_run_id=this_run_id, repo_id=repo_id,
+    )
+    if verdict == "newer_exists" and newer:
+        rid = str((newer.get("workflow_run") or {}).get("id") or "")
+        if rid:
+            return rid
+    return str(trigger_run_id)
+
+
 LINEAGE_TABLE = "canonical_lineage"
 #: A lineage row older than this cannot belong to the pipeline uploading now.
 LINEAGE_MAX_AGE_DAYS = 6
@@ -166,6 +197,8 @@ def main(argv: list[str] | None = None, *, gh: GhFn = _gh,
     u.add_argument("--downloaded-run-id", default=os.getenv("DOWNLOADED_RUN_ID", ""))
     u.add_argument("--source", default=os.getenv("DOWNLOAD_SOURCE", ""))
     u.add_argument("--db", default="", help="read the downloaded run id from canonical_lineage")
+    rt = sub.add_parser("resolve-trigger")
+    rt.add_argument("--run-id", default=os.getenv("TRIGGER_RUN_ID", ""))
     r = sub.add_parser("record")
     r.add_argument("--db", required=True)
     r.add_argument("--downloaded-run-id", default=os.getenv("DOWNLOADED_RUN_ID", ""))
@@ -216,6 +249,36 @@ def main(argv: list[str] | None = None, *, gh: GhFn = _gh,
                   f"{ARTIFACT} (its gate skipped it, or it stopped before the upload); "
                   "this chained run does nothing")
         emit("did_work", "true" if did else "false")
+        return 0
+
+    if args.cmd == "resolve-trigger":
+        trigger = str(args.run_id or "")
+        if not trigger:
+            emit("run_id", "")
+            return 0
+        try:
+            repo_id = (with_retries(lambda: gh(["api", f"repos/{repo}"]), attempts=min(attempts, 2),
+                                    backoff=backoff, sleep=sleep) or {}).get("id")
+            listing = with_retries(
+                lambda: gh(["api", f"repos/{repo}/actions/artifacts?name={ARTIFACT}&per_page=50"]),
+                attempts=min(attempts, 2), backoff=backoff, sleep=sleep,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"::warning title=Newest canonical unknown::{exc}; using the triggering "
+                  f"run {trigger}")
+            emit("run_id", trigger)
+            return 0
+        chosen = newest_since_trigger(
+            (listing or {}).get("artifacts") or [], trigger_run_id=trigger,
+            this_run_id=os.getenv("GITHUB_RUN_ID", ""), repo_id=repo_id,
+        )
+        if chosen != trigger:
+            print(f"::notice title=Starting from the newest canonical DB::run {chosen} uploaded "
+                  f"{ARTIFACT} after the triggering run {trigger}; it descends from the "
+                  "trigger's DB, so this run starts from it")
+        else:
+            print(f"resolve-trigger: no canonical DB newer than run {trigger}'s")
+        emit("run_id", chosen)
         return 0
 
     # upload-guard

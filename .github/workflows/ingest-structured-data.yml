@@ -87,18 +87,42 @@ jobs:
     name: Skip if a staged pipeline is in flight
     runs-on: ubuntu-latest
     outputs:
-      proceed: ${{ steps.gate.outputs.proceed }}
+      proceed: ${{ steps.window.outputs.skip != 'true' && steps.gate.outputs.proceed || 'false' }}
     steps:
+      # A scheduled run skips the 10th to the 13th. On 11 October 2026 (a
+      # Sunday) this cron and the monthly Resolver Update both fired; the
+      # ingest queued behind it, uploaded first, and the resolutions chain
+      # hanging off Resolver Update was refused at its upload. Resolver
+      # Update refreshes every source this run would, so skipping costs
+      # nothing, and the 12th and 13th keep the group clear of the forecast.
+      # A manual dispatch is never skipped.
+      - name: Skip the monthly ingest window (scheduled runs only)
+        id: window
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          DOM=$(date -u +%-d)
+          if [ "${EVENT_NAME}" = "schedule" ] && [ "${DOM}" -ge 10 ] && [ "${DOM}" -le 13 ]; then
+            echo "::notice title=Weekly ingest skipped::day ${DOM} is in the monthly ingest window (10th to 13th); Resolver Update refreshes these sources"
+            echo "Weekly ingest skipped: day ${DOM} is in the monthly ingest window (10th to 13th)." >> "${GITHUB_STEP_SUMMARY}"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Check out code
+        if: steps.window.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
+        if: steps.window.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Check for in-flight staged pipeline
         id: gate
+        if: steps.window.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_during_pipeline && 'true' || 'false' }}

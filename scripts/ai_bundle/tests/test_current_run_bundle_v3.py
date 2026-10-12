@@ -290,7 +290,21 @@ def _json(path: Path):
 
 class TestV3Pack:
     @pytest.fixture(autouse=True)
-    def _build(self, v3_db: str, tmp_path: Path):
+    def _build(self, v3_db: str, tmp_path: Path, monkeypatch):
+        # The fixture's windows open in 2026-09, so the first resolution is
+        # 2026-10-11 only while the bundle's clock reads earlier than that.
+        # Pin the clock: on 2026-10-12 the date had passed and Part B moved
+        # on to 2026-11-11, which failed this suite on every branch.
+        import datetime as _dt
+
+        from scripts.ai_bundle import build_current_run_bundle as _bundle
+
+        class _FixedClock(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 1, 12, 0, tzinfo=tz or _dt.timezone.utc)
+
+        monkeypatch.setattr(_bundle, "datetime", _FixedClock)
         zip_path = build_bundle(v3_db, tmp_path / "out")
         assert zip_path is not None
         self.root = _root(zip_path, tmp_path)

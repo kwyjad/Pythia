@@ -151,6 +151,58 @@ def test_an_unreadable_listing_uploads_with_a_warning(env, capsys):
 # --- lineage --------------------------------------------------------------------
 
 
+# --- resolve-trigger (11 October 2026) ---------------------------------------
+
+
+def test_a_chain_starts_from_the_newest_canonical_when_its_trigger_was_superseded(env, capsys):
+    """The 11 October shape: Resolver Update 38128096290 uploaded at 10:42,
+    the weekly ingest 38129003283 uploaded at 10:57 from that DB, and Compute
+    Resolutions took the older one and was refused at upload."""
+    listing = [
+        _artifact(38128096290, "2026-10-11T10:42:45Z"),
+        _artifact(38129003283, "2026-10-11T10:57:34Z"),
+    ]
+    assert cg.main(["resolve-trigger", "--run-id", "38128096290"], gh=_listing(*listing),
+                   sleep=_no_sleep) == 0
+    assert _outputs(env)["run_id"] == "38129003283"
+    assert "Starting from the newest canonical DB" in capsys.readouterr().out
+    # And the upload guard then accepts the work built on it.
+    assert cg.main(["upload-guard", "--downloaded-run-id", "38129003283",
+                    "--source", "triggering-run"], gh=_listing(*listing), sleep=_no_sleep) == 0
+
+
+def test_a_chain_keeps_its_trigger_when_nothing_newer_exists(env):
+    listing = [_artifact(10, "2026-10-11T09:00:00Z"), _artifact(11, "2026-10-11T10:00:00Z")]
+    cg.main(["resolve-trigger", "--run-id", "11"], gh=_listing(*listing), sleep=_no_sleep)
+    assert _outputs(env)["run_id"] == "11"
+
+
+def test_a_newer_artifact_from_a_fork_or_another_branch_is_not_taken(env):
+    listing = [
+        _artifact(11, "2026-10-11T10:00:00Z"),
+        _artifact(12, "2026-10-11T11:00:00Z", repo=999),
+        _artifact(13, "2026-10-11T11:30:00Z", branch="feature"),
+        _artifact(14, "2026-10-11T12:00:00Z", expired=True),
+    ]
+    cg.main(["resolve-trigger", "--run-id", "11"], gh=_listing(*listing), sleep=_no_sleep)
+    assert _outputs(env)["run_id"] == "11"
+
+
+def test_an_unreadable_listing_keeps_the_trigger(env, capsys):
+    def gh(args):
+        raise RuntimeError("HTTP 502")
+    assert cg.main(["resolve-trigger", "--run-id", "11"], gh=gh, sleep=_no_sleep) == 0
+    assert _outputs(env)["run_id"] == "11"
+    assert "Newest canonical unknown" in capsys.readouterr().out
+
+
+def test_path_a_of_the_download_action_asks_for_the_newest_canonical():
+    text = Path(".github/actions/download-canonical-db/action.yml").read_text(encoding="utf-8")
+    path_a = text.index("Path A: triggering run")
+    assert text.index("canonical_guard resolve-trigger", path_a) < text.index(
+        'download_with_retries "${RUN_ID_INPUT}"', path_a)
+
+
 def test_the_pipeline_records_the_db_it_forked_from_and_the_final_stage_reads_it(env, tmp_path):
     db = tmp_path / "staged.duckdb"
     assert cg.main(["record", "--db", str(db), "--downloaded-run-id", "100",

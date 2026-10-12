@@ -239,6 +239,8 @@ MULTI_COUNTRY_HEADINGS: dict[str, list[tuple[str, str]]] = {
     "Israel-Palestine": [("Israel", "ISR"), ("Palestine", "PSE")],
     "India-Pakistan (Kashmir)": [("India", "IND"), ("Pakistan", "PAK")],
     "Morocco/Western Sahara": [("Morocco", "MAR"), ("Western Sahara", "ESH")],
+    # First seen in the September 2026 edition (run 38128096290).
+    "China/Japan": [("China", "CHN"), ("Japan", "JPN")],
 }
 
 _MULTI_LOOKUP: dict[str, str] = {k.upper(): k for k in MULTI_COUNTRY_HEADINGS}
@@ -1107,7 +1109,7 @@ def bulk_store_crisiswatch(path: Path | str | None = None) -> int:
 BACKFILL_DIR = _DATA_DIR / "crisiswatch_editions"
 
 
-def missing_editions(months_back: int = 12) -> List[str]:
+def missing_editions(months_back: int = 12, today: Any | None = None) -> List[str]:
     """Return ``YYYY-MM`` months in the window that ``crisiswatch_entries`` has no row for.
 
     The window ends at the PREVIOUS complete month: ICG publishes an
@@ -1117,6 +1119,11 @@ def missing_editions(months_back: int = 12) -> List[str]:
 
     Returns ``[]`` when the table cannot be read — a backfill that cannot
     tell what is missing must ask for nothing, not for everything.
+
+    An edition registered as unrecoverable in ``crisiswatch_known_gaps`` is
+    not asked for while its entry is in force: on 11 October 2026 the
+    backfill spent 40 downloads and 18 minutes of the Resolver Update on
+    2026-05, which that register already said the archive does not hold.
     """
 
     try:
@@ -1125,7 +1132,7 @@ def missing_editions(months_back: int = 12) -> List[str]:
         log.debug("Pythia DB helpers unavailable — cannot list missing editions.")
         return []
 
-    today = datetime.now(timezone.utc).date()
+    today = today or datetime.now(timezone.utc).date()
     # Walk back from the previous complete month.
     year, month = today.year, today.month
     months: List[tuple] = []
@@ -1176,6 +1183,17 @@ def missing_editions(months_back: int = 12) -> List[str]:
                 ", ".join(resting),
             )
         missing = [ym for ym in missing if ym not in gaps]
+    try:
+        from horizon_scanner.crisiswatch_known_gaps import split_missing
+
+        missing, registered = split_missing(missing, today)
+    except Exception:  # noqa: BLE001 - the register is advisory here
+        registered = []
+    if registered:
+        log.info(
+            "CrisisWatch editions not asked for: registered as unrecoverable in "
+            "crisiswatch_known_gaps.py: %s", ", ".join(registered),
+        )
     return missing
 
 

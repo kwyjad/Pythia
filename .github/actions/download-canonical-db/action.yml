@@ -7,7 +7,8 @@ name: Download canonical resolver DB
 description: >
   Locate and download the shared pythia-resolver-db DuckDB artifact.
   Path A: when run-id is provided (a workflow_run trigger id), try that run
-  first and fall back to discovery. Forced mode: when force-run-id is
+  first (or the newest canonical run uploaded after it, which descends from
+  it) and fall back to discovery. Forced mode: when force-run-id is
   provided (manual operator override), use exactly that run or fail.
   Path B: canonical discovery — the most recent successful run across ALL
   workflows that produce the artifact, newest first, each candidate
@@ -215,6 +216,23 @@ runs:
         fi
 
         # ── Path A: triggering run (workflow_run trigger) — fall back on failure ──
+        # A canonical DB uploaded AFTER the trigger's descends from it (every
+        # accepted upload passed the upload guard), so start from that one:
+        # on 11 Oct 2026 the trigger's own artifact was already superseded
+        # and the upload guard refused the chain's work. An unreadable API
+        # keeps the trigger's run.
+        if [ -n "${RUN_ID_INPUT}" ]; then
+          RESOLVE_OUT=$(mktemp)
+          if GITHUB_OUTPUT="${RESOLVE_OUT}" GH_TOKEN="${GITHUB_TOKEN}" PYTHIA_GATE_BACKOFF_SEC=5 \
+              python3 -m scripts.ci.canonical_guard resolve-trigger --run-id "${RUN_ID_INPUT}"; then
+            RESOLVED=$(sed -n 's/^run_id=//p' "${RESOLVE_OUT}" | tail -1)
+            if [ -n "${RESOLVED}" ]; then
+              RUN_ID_INPUT="${RESOLVED}"
+            fi
+          else
+            echo "::warning::resolve-trigger failed; using the triggering run ${RUN_ID_INPUT}"
+          fi
+        fi
         if [ -n "${RUN_ID_INPUT}" ]; then
           echo "Downloading ${ARTIFACT_NAME} from triggering run ${RUN_ID_INPUT}"
           clean_dest
