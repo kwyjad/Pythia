@@ -203,7 +203,7 @@ def _calendar_cutoff(today: date) -> str:
     return f"{prev.year:04d}-{prev.month:02d}"
 
 
-def _purge_stale_resolutions(conn, cutoff: str) -> None:
+def _purge_stale_resolutions(conn, cutoff: str) -> int:
     """Delete resolutions (and orphaned scores) with observed_month beyond *cutoff*.
 
     This prevents stale rows — written by earlier pipeline runs before the
@@ -211,13 +211,13 @@ def _purge_stale_resolutions(conn, cutoff: str) -> None:
     blocking correct ``INSERT OR REPLACE`` when the calendar advances.
     """
     if not _table_exists(conn, "resolutions"):
-        return
+        return 0
 
     stale = conn.execute(
         "SELECT COUNT(*) FROM resolutions WHERE observed_month > ?", [cutoff]
     ).fetchone()[0]
     if stale == 0:
-        return
+        return 0
 
     # Delete orphaned scores first (referential-integrity-safe order).
     if _table_exists(conn, "scores"):
@@ -254,6 +254,7 @@ def _purge_stale_resolutions(conn, cutoff: str) -> None:
     LOGGER.info(
         "Purged %d stale resolution rows (observed_month > %s).", stale, cutoff
     )
+    return int(stale)
 
 
 def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
@@ -1038,7 +1039,9 @@ def _ensure_resolutions_table(conn) -> None:
                 pass
 
 
-def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
+def compute_resolutions(
+    db_url: str, today: Optional[date] = None, report: Optional[dict] = None,
+) -> dict:
     """
     Compute and upsert resolutions for eligible questions.
 
@@ -1059,7 +1062,14 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
           * EVENT_OCCURRENCE: default to 0.0 (no event = no occurrence)
           * All others (PA, PHASE3PLUS_IN_NEED, etc.): skip the horizon
             (no resolution row written — unresolvable, not zero).
+
+    ``report``, when given, is filled with the run-level counts the chain
+    diagnostics record (``scripts/ci/chain_diagnostics.py``): rows written
+    and deleted, purges, repairs, vintages, coverage, the outcome table. The
+    return value is unchanged (the per-group outcome counts).
     """
+    if report is None:
+        report = {}
 
     if today is None:
         today = date.today()
@@ -1085,14 +1095,18 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
 
         # Purge any stale resolutions beyond the cutoff (left over from
         # earlier pipeline runs before the calendar guard was added).
-        _purge_stale_resolutions(conn, cal_cutoff)
+        report["calendar_cutoff"] = cal_cutoff
+        report["resolutions_before"] = (
+            _row_count(conn, "resolutions") if _table_exists(conn, "resolutions") else 0
+        )
+        report["purged_stale_beyond_cutoff"] = _purge_stale_resolutions(conn, cal_cutoff)
 
         # Purge ACE/FATALITIES resolutions read from a facts table: every one
         # of them is a battle-only count (see ACE_FATALITIES_SERIES). This run
         # rewrites each horizon from the all-types series; deleting first
         # means a horizon it can no longer resolve is left unresolved rather
         # than keeping the wrong figure.
-        _purge_non_series_fatalities(conn)
+        report["purged_non_series_fatalities"] = _purge_non_series_fatalities(conn)
 
         # Data-driven guard: don't resolve beyond what sources actually cover.
         _SUPPORTED_METRICS = ("PA", "FATALITIES", "EVENT_OCCURRENCE", "PHASE3PLUS_IN_NEED")
@@ -1167,13 +1181,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
         try:
             from pythia.tools.question_repairs import repair_questions_pointing_at_test_scans
 
-            repair_questions_pointing_at_test_scans(conn)
+            report["question_provenance_repairs"] = repair_questions_pointing_at_test_scans(conn)
         except Exception as exc:  # noqa: BLE001 - a repair must never stop resolution
             LOGGER.warning("question provenance repair skipped: %s", exc)
 
         # Rebuild the source_coverage table from the metric source tables so
         # the gates below (and any dashboard consumer) see current coverage.
-        _refresh_source_coverage(conn)
+        report["source_coverage_rows"] = _refresh_source_coverage(conn)
 
         # Per-month global source coverage for zero-default metrics: a month
         # absent from every source table is an ingestion gap, not "no impact".
@@ -1568,8 +1582,40 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> dict:
                 {f"{hz}/{rung}": n for (hz, rung), n in sorted(machine_rung_counts.items())},
                 machine_retracted,
             )
-        report_outcome_counts(outcome_counts)
-        return {f"{hz}/{m}": dict(c) for (hz, m), c in sorted(outcome_counts.items())}
+        flagged = report_outcome_counts(outcome_counts)
+        outcome = {f"{hz}/{m}": dict(c) for (hz, m), c in sorted(outcome_counts.items())}
+        report.update({
+            "questions_considered": len(rows),
+            "rows_written": written,
+            "resolved_from_source": resolved_from_source,
+            "resolved_as_zero": resolved_as_zero,
+            "skipped_null_resolution": skipped_null_resolution,
+            "skipped_no_data_coverage": skipped_no_data_coverage,
+            "skipped_outside_source_universe": skipped_outside_source_universe,
+            "skipped_partial_month": skipped_partial_month,
+            "skipped_conflict_displacement_gate": skipped_conflict_displacement_gate,
+            "skipped_unresolvable_hazard": skipped_unresolvable_hazard,
+            "vintages_written": vintages_written,
+            "machine_retracted": machine_retracted,
+            "machine_rung_counts": {
+                f"{hz}/{rung}": n for (hz, rung), n in sorted(machine_rung_counts.items())
+            },
+            "scoring_class_counts": dict(scoring_counts),
+            "conflict_status_counts": dict(conflict_status_counts),
+            "outcome_counts": outcome,
+            "mostly_zero_default_groups": flagged,
+            "resolutions_after": _row_count(conn, "resolutions"),
+        })
+        try:
+            report["by_source_desc"] = {
+                str(src): int(n) for src, n in conn.execute(
+                    "SELECT COALESCE(source_desc, '<none>'), COUNT(*) FROM resolutions "
+                    "GROUP BY 1 ORDER BY 2 DESC"
+                ).fetchall()
+            }
+        except Exception:  # noqa: BLE001 - an older table without source_desc
+            report["by_source_desc"] = {}
+        return outcome
     finally:
         _close_db(conn)
 
@@ -1651,12 +1697,32 @@ def main() -> None:
         default=None,
         help="DuckDB URL (default: app.db_url from pythia.config, or resolver default)",
     )
+    parser.add_argument(
+        "--report-json",
+        default=None,
+        help="Write the run's counts here (read by scripts/ci/chain_diagnostics.py)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
     db_url = args.db_url or _get_db_url_from_config()
-    compute_resolutions(db_url=db_url)
+    report: dict = {}
+    compute_resolutions(db_url=db_url, report=report)
+    if args.report_json:
+        write_report_json(args.report_json, report)
+
+
+def write_report_json(path: str, report: dict) -> None:
+    """Write a tool's run report; never raises (a diagnostic never fails a run)."""
+    try:
+        import json as _json
+
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(report, fh, indent=2, sort_keys=True, default=str)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("could not write report %s: %r", path, exc)
 
 
 if __name__ == "__main__":

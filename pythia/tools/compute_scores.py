@@ -632,7 +632,10 @@ def purge_orphan_scores(conn) -> dict:
     return counts
 
 
-def compute_scores(db_url: str) -> None:
+def compute_scores(db_url: str) -> dict:
+    """Score every resolved (question, horizon). Returns the run's counts
+    (orphans purged, score and EIV rows written) for the chain diagnostics."""
+    report: dict = {"orphans_purged": {}, "score_rows_written": 0, "eiv_rows_written": 0}
     conn = _open_db(db_url)
 
     try:
@@ -671,17 +674,17 @@ def compute_scores(db_url: str) -> None:
         # Early exit if resolutions table doesn't exist or is empty
         if not _table_exists(conn, "resolutions"):
             LOGGER.info("compute_scores: resolutions table not found; nothing to do.")
-            return
+            return report
 
         # A score whose resolution was withdrawn (compute_resolutions now
         # deletes an ACE/PA row a later rule no longer supports) is a score
         # against an outcome nobody holds. Remove it before anything reads it.
-        purge_orphan_scores(conn)
+        report["orphans_purged"] = purge_orphan_scores(conn)
 
         r_count = _row_count(conn, "resolutions")
         if r_count == 0:
             LOGGER.info("compute_scores: resolutions table is empty; nothing to do.")
-            return
+            return report
 
         # Each resolution row now has its own horizon_m, so each horizon is
         # scored against its own calendar month's ground truth.
@@ -910,6 +913,7 @@ def compute_scores(db_url: str) -> None:
                     n_written += 3
 
         LOGGER.info("compute_scores: wrote %d score rows.", n_written)
+        report["score_rows_written"] = n_written
 
         # --- EIV scoring (Phase 1) ---
         eiv_rows = []
@@ -950,6 +954,8 @@ def compute_scores(db_url: str) -> None:
                 [(*row, now, _row_is_test(row[0], row[9], row[3])) for row in eiv_rows],
             )
             LOGGER.info("compute_scores: wrote %d EIV score rows.", len(eiv_rows))
+        report["eiv_rows_written"] = len(eiv_rows)
+        return report
     finally:
         _close_db(conn)
 
@@ -961,12 +967,18 @@ def main() -> None:
         default=None,
         help="DuckDB URL (default: app.db_url from pythia.config, or resolver default)",
     )
+    parser.add_argument("--report-json", default=None,
+                        help="Write the run's counts here (scripts/ci/chain_diagnostics.py)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
     db_url = args.db_url or _get_db_url_from_config()
-    compute_scores(db_url=db_url)
+    report = compute_scores(db_url=db_url)
+    if args.report_json:
+        from pythia.tools.compute_resolutions import write_report_json
+
+        write_report_json(args.report_json, report or {})
 
 
 if __name__ == "__main__":

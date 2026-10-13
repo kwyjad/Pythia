@@ -215,8 +215,11 @@ def update_bucket_centroids_ema(
     db_url: str,
     metric: str = "PA",
     as_of: date | None = None,
-) -> None:
+) -> list[dict]:
     """EMA-update bucket centroids from resolution data.
+
+    Returns one dict per centroid moved (old -> new), for the chain
+    diagnostics; an empty list when nothing moved.
 
     For each (hazard_code, metric, bucket_index) with >= MIN_RESOLUTIONS_PER_BUCKET
     resolutions, compute the empirical mean of resolved values in that bucket,
@@ -232,6 +235,7 @@ def update_bucket_centroids_ema(
         as_of = date.today()
     as_of_month = as_of.strftime("%Y-%m")
 
+    updates: list[dict] = []
     conn = _open_db(db_url)
     try:
         # Ensure stamp columns exist (PRAGMA-first — a failed ALTER inside an
@@ -248,7 +252,7 @@ def update_bucket_centroids_ema(
         specs = list(get_bucket_specs(metric))
         if not specs:
             LOGGER.warning("No bucket specs for metric=%s; skipping EMA update.", metric)
-            return
+            return updates
 
         # Build bucket CASE expression
         case_lines = []
@@ -294,7 +298,7 @@ def update_bucket_centroids_ema(
                 "for metric=%s. Phase 2 not yet active.",
                 MIN_RESOLUTIONS_PER_BUCKET, metric,
             )
-            return
+            return updates
 
         n_updated = 0
         for hazard_code, bucket_index, n_res, empirical_mean in rows:
@@ -352,6 +356,12 @@ def update_bucket_centroids_ema(
                 new_centroid, empirical_mean, n_res,
             )
             n_updated += 1
+            updates.append({
+                "hazard_code": hazard_code, "metric": metric,
+                "bucket_index": int(bucket_index), "old": float(current_centroid),
+                "new": float(new_centroid), "empirical": float(empirical_mean),
+                "n_resolutions": int(n_res), "as_of_month": as_of_month,
+            })
 
         LOGGER.info(
             "EMA centroid update: updated %d centroids for metric=%s as_of=%s.",
@@ -359,6 +369,7 @@ def update_bucket_centroids_ema(
         )
     finally:
         _close_db(conn)
+    return updates
 
 
 def main() -> None:
@@ -381,13 +392,19 @@ def main() -> None:
             "Auto-activates per bucket when >= 10 resolutions."
         ),
     )
+    parser.add_argument("--report-json", default=None,
+                        help="With --ema: write the centroids moved here (chain diagnostics)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
     db_url = args.db_url or _get_db_url_from_config()
     if args.ema:
-        update_bucket_centroids_ema(db_url=db_url, metric=args.metric)
+        updates = update_bucket_centroids_ema(db_url=db_url, metric=args.metric)
+        if args.report_json:
+            from pythia.tools.compute_resolutions import write_report_json
+
+            write_report_json(args.report_json, {"metric": args.metric, "updates": updates})
     else:
         compute_bucket_centroids(db_url=db_url, metric=args.metric)
 

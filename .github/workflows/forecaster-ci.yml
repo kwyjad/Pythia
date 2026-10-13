@@ -140,6 +140,12 @@ on:
       # Disk room after a canonical download, growth before every upload.
       - "scripts/ci/db_growth.py"
       - "scripts/ci/tests/test_db_growth.py"
+      # The chain diagnostics and the cycle zip built on the publish run,
+      # and the CrisisWatch refresh they run in (the chain workflows are listed above).
+      - "scripts/ci/chain_diagnostics.py"
+      - "scripts/ci/build_cycle_diagnostics.py"
+      - "scripts/ci/tests/test_cycle_diagnostics.py"
+      - ".github/workflows/refresh-crisiswatch.yml"
       - ".github/actions/download-canonical-db/**"
       # The debug bundle and its collectors. Without these the bundle could
       # be changed with nothing running its tests — which is how it came to
@@ -450,6 +456,7 @@ jobs:
             scripts/ci/tests/test_build_release_db.py \
             scripts/ci/tests/test_db_table_sizes.py \
             scripts/ci/tests/test_db_growth.py \
+            scripts/ci/tests/test_cycle_diagnostics.py \
             pythia/tests/test_secret_scrub.py \
             forecaster/tests/test_gemini_key_header.py
 

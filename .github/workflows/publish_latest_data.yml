@@ -89,6 +89,9 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
+      - name: Record chain start
+        run: echo "CHAIN_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       - name: Resolve source run_id (input → workflow_run → canonical discovery)
         id: resolve_run
         env:
@@ -760,6 +763,7 @@ jobs:
           fi
 
       - name: Upload resolver.duckdb + manifest.json to release (overwrite)
+        id: release_upload
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         run: |
           set -euo pipefail
@@ -895,3 +899,52 @@ jobs:
           PYTHIA_API_BASE_URL: ${{ vars.PYTHIA_API_BASE_URL || secrets.PYTHIA_API_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 -m scripts.ci.check_dashboard_sync --mode publish --wait-min 25
+
+      # The whole cycle's diagnostics in one zip, on this run's page
+      # (CLAUDE.md, "Cycle diagnostics bundle"). Walks the chain that produced
+      # the published DB through each run's lineage.json, adds the ingest and
+      # CrisisWatch runs in its window, and leaves out every DB artifact.
+      # Everything after a release upload is diagnostics: each step is
+      # non-fatal, and runs whether or not this run published.
+      - name: Write this run's chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_TRIGGER_RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
+          CHAIN_RESOLVE_SOURCE: ${{ steps.resolve_run.outputs.source }}
+          CHAIN_REGRESSION_OUTCOME: ${{ steps.regression_guard.outcome }}
+          CHAIN_REGRESSION_SKIP_PUBLISH: ${{ steps.regression_guard.outputs.skip_publish }}
+          CHAIN_RELEASE_UPLOAD_OUTCOME: ${{ steps.release_upload.outcome }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+        run: |
+          python -m pip install --quiet pyyaml duckdb || true
+          ARGS=()
+          if [ -f resolver_inspect.md ]; then
+            ARGS=(--include resolver_inspect.md)
+          fi
+          python -m scripts.ci.chain_diagnostics write --workflow publish_latest_data \
+            --started-at "${CHAIN_STARTED_AT:-}" "${ARGS[@]}"
+
+      - name: Gather the cycle's diagnostics into one zip
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 45
+        env:
+          SOURCE_RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
+        run: |
+          python -m scripts.ci.build_cycle_diagnostics \
+            --source-run-id "${SOURCE_RUN_ID}" \
+            --own-dir diagnostics/publish_latest_data \
+            --out-dir cycle_out
+
+      - name: Upload cycle diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-cycle-diagnostics
+          path: cycle_out/cycle_diagnostics__*.zip
+          retention-days: 14
+          if-no-files-found: warn

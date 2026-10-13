@@ -64,6 +64,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Record chain start
+        run: echo "CHAIN_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -85,13 +88,19 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
 
+      - name: Write before signature (chain diagnostics)
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow compute_resolutions --db data/resolver.duckdb
+
       - name: Compute resolutions from Resolver
         run: |
           echo "=== Computing Pythia resolutions from Resolver ==="
-          python -m pythia.tools.compute_resolutions --db-url "${RESOLVER_DB_URL}"
+          python -m pythia.tools.compute_resolutions --db-url "${RESOLVER_DB_URL}" \
+            --report-json diagnostics/compute_resolutions/reports/compute_resolutions.json
           echo "=== Resolution computation completed ==="
 
       - name: Refuse to upload over a newer canonical DB
+        id: guard
         if: success()
         uses: ./.github/actions/guard-canonical-upload
         with:
@@ -100,6 +109,7 @@ jobs:
           source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
+        id: upload
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -117,3 +127,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run compute_scores.yml --ref main --repo "${GITHUB_REPOSITORY}"
+
+      # What this run did, as an artifact (CLAUDE.md, "Cycle diagnostics
+      # bundle"): Publish gathers it, with the rest of the cycle, into one zip.
+      # Never fails the job; it runs after the canonical upload.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          CHAIN_DID_WORK: ${{ needs.trigger.outputs.did_work }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          CHAIN_DOWNLOAD_SOURCE: ${{ steps.canonical_download.outputs.source }}
+          CHAIN_GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          CHAIN_UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow compute_resolutions \
+            --db data/resolver.duckdb \
+            --started-at "${CHAIN_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-compute_resolutions-${{ github.run_id }}
+          path: diagnostics/compute_resolutions/
+          retention-days: 14
+          if-no-files-found: warn

@@ -161,6 +161,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Record chain start
+        run: echo "CHAIN_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: |
           set -e
@@ -192,6 +195,10 @@ jobs:
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out data/db_signature_before.json
+
+      - name: Write before signature (chain diagnostics)
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow ingest_structured_data --db data/resolver.duckdb
 
       - name: Determine source list for scheduled runs
         id: sources
@@ -313,6 +320,7 @@ jobs:
             >> "${GITHUB_STEP_SUMMARY}" || true
 
       - name: Refuse to upload over a newer canonical DB
+        id: guard
         if: inputs.dry_run != true
         uses: ./.github/actions/guard-canonical-upload
         with:
@@ -321,6 +329,7 @@ jobs:
           source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
+        id: upload
         if: inputs.dry_run != true
         uses: actions/upload-artifact@v4
         with:
@@ -335,4 +344,35 @@ jobs:
           name: ingest-diagnostics
           path: diagnostics/
           retention-days: 30
+          if-no-files-found: warn
+
+      # What this run did, as an artifact (CLAUDE.md, "Cycle diagnostics
+      # bundle"): Publish gathers it, with the rest of the cycle, into one zip.
+      # Never fails the job; it runs after the canonical upload.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          CHAIN_DOWNLOAD_SOURCE: ${{ steps.canonical_download.outputs.source }}
+          CHAIN_GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          CHAIN_UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_GATE_PROCEED: ${{ needs.gate.outputs.proceed }}
+          CHAIN_GATE_EVENT: ${{ github.event_name }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow ingest_structured_data \
+            --db data/resolver.duckdb \
+            --started-at "${CHAIN_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-ingest_structured_data-${{ github.run_id }}
+          path: diagnostics/ingest_structured_data/
+          retention-days: 14
           if-no-files-found: warn

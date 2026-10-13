@@ -61,6 +61,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Record chain start
+        run: echo "CHAIN_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -81,6 +84,10 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Write before signature (chain diagnostics)
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow compute_calibration --db data/resolver.duckdb
 
       - name: Retire blocked-hazard questions (DI / HW / CU / ACO)
         env:
@@ -112,6 +119,7 @@ jobs:
           for METRIC in PA FATALITIES PHASE3PLUS_IN_NEED; do
             echo "--- metric=${METRIC} ---"
             python -m pythia.tools.compute_bucket_centroids --ema --metric "${METRIC}" --db-url "${RESOLVER_DB_URL}" \
+              --report-json "diagnostics/compute_calibration/reports/ema_${METRIC}.json" \
               || echo "WARN: EMA update failed for metric=${METRIC} (non-fatal)"
           done
           echo "=== Centroid update completed ==="
@@ -137,7 +145,7 @@ jobs:
       # (hazard, metric), whether next month's advice arm will. Report only.
       - name: Report whether the advice arm receives text
         continue-on-error: true
-        run: python -m scripts.ci.advice_arm_text --db data/resolver.duckdb
+        run: python -m scripts.ci.advice_arm_text --db data/resolver.duckdb --json-out diagnostics/compute_calibration/reports/advice_arm_text.json
 
       # Sibyl's two ingredients scored on their own (__ext_sibyl_raw, the raw
       # pool of its trials; __ext_sibyl_ref, its reference), the FL/TC
@@ -310,6 +318,7 @@ jobs:
           path: calibration_summary.json
 
       - name: Refuse to upload over a newer canonical DB
+        id: guard
         if: success()
         uses: ./.github/actions/guard-canonical-upload
         with:
@@ -318,6 +327,7 @@ jobs:
           source: ${{ steps.canonical_download.outputs.source }}
 
       - name: Upload canonical resolver DB
+        id: upload
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -333,6 +343,7 @@ jobs:
       # artifact (uploaded in the step above). workflow_dispatch is one of the
       # documented events that GITHUB_TOKEN is allowed to trigger, so no PAT needed.
       - name: Publish post-calibration DB to release
+        id: publish_dispatch
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -342,3 +353,34 @@ jobs:
             --ref main \
             -f run_id=${{ github.run_id }} \
             -f dispatched_by_chain=true
+
+      # What this run did, as an artifact (CLAUDE.md, "Cycle diagnostics
+      # bundle"): Publish gathers it, with the rest of the cycle, into one zip.
+      # Never fails the job; it runs after the canonical upload.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          CHAIN_DID_WORK: ${{ needs.trigger.outputs.did_work }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          CHAIN_DOWNLOAD_SOURCE: ${{ steps.canonical_download.outputs.source }}
+          CHAIN_GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          CHAIN_UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_PUBLISH_DISPATCH_OUTCOME: ${{ steps.publish_dispatch.outcome }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow compute_calibration \
+            --db data/resolver.duckdb \
+            --started-at "${CHAIN_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-compute_calibration-${{ github.run_id }}
+          path: diagnostics/compute_calibration/
+          retention-days: 14
+          if-no-files-found: warn
