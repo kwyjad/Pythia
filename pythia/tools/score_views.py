@@ -145,7 +145,7 @@ def point_to_spd_fatalities(
     return [p / total for p in spd]
 
 
-def _load_views_forecast_pairs(conn) -> List[Dict]:
+def _load_views_forecast_pairs(conn, report: Optional[Dict] = None) -> List[Dict]:
     """Load matched pairs with latest ViEWS forecast per question/horizon.
 
     Returns list of dicts with keys:
@@ -218,6 +218,8 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
         "score_views: %d conflict_forecasts row(s) carry source=%s metric=%s.",
         n_views_rows, VIEWS_SOURCE, VIEWS_FATALITIES_METRIC,
     )
+    if report is not None:
+        report["views_rows_filtered"] = int(n_views_rows)
     if not n_views_rows:
         LOGGER.warning(
             "score_views: no ViEWS fatality rows at all — check the connector's "
@@ -243,14 +245,18 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
     return pairs
 
 
-def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
+def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> dict:
     """Score ViEWS forecasts against Pythia resolutions.
 
     For each matched (question, horizon) pair:
     1. Convert ViEWS point forecast -> synthetic SPD via log-normal
     2. Score the SPD with Brier, log, CRPS (same functions as compute_scores.py)
     3. Write to `scores` table with model_name = '__ext_views'
+
+    Returns the run's counts: ViEWS rows passing the source/metric filter,
+    matched (question, horizon) pairs, and forecasts scored.
     """
+    report: dict = {"views_rows_filtered": None, "matched_pairs": 0, "scored": 0, "sigma": sigma}
     if not duckdb_io.DUCKDB_AVAILABLE:
         raise RuntimeError(duckdb_io.duckdb_unavailable_reason())
 
@@ -301,14 +307,16 @@ def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
                 LOGGER.info(
                     "score_views: table %s not found; nothing to do.", table,
                 )
-                return
+                report["skipped"] = f"table {table} not found"
+                return report
 
-        pairs = _load_views_forecast_pairs(conn)
+        pairs = _load_views_forecast_pairs(conn, report)
         LOGGER.info("Found %d ViEWS<>Pythia matched forecast pairs.", len(pairs))
+        report["matched_pairs"] = len(pairs)
 
         if not pairs:
             LOGGER.info("No ViEWS forecasts matched to resolved questions; nothing to score.")
-            return
+            return report
 
         n_scored = 0
 
@@ -383,6 +391,8 @@ def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
             "score_views: scored %d ViEWS forecasts (sigma=%.2f, model_name='%s').",
             n_scored, sigma, VIEWS_MODEL_NAME,
         )
+        report["scored"] = n_scored
+        return report
 
     finally:
         duckdb_io.close_db(conn)
@@ -470,6 +480,8 @@ def main() -> None:
         default=False,
         help="Find optimal sigma via grid search before scoring.",
     )
+    parser.add_argument("--report-json", default=None,
+                        help="Write the run's counts here (scripts/ci/chain_diagnostics.py)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -484,7 +496,11 @@ def main() -> None:
         sigma = optimize_sigma(db_url)
         LOGGER.info("Using optimized sigma=%.3f", sigma)
 
-    score_views(db_url=db_url, sigma=sigma)
+    report = score_views(db_url=db_url, sigma=sigma)
+    if args.report_json:
+        from pythia.tools.compute_resolutions import write_report_json
+
+        write_report_json(args.report_json, report or {})
 
 
 if __name__ == "__main__":

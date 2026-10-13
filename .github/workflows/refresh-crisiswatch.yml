@@ -66,6 +66,7 @@ concurrency:
 # its consumer through resolver_update's Phase 4, not through a push to main.
 permissions:
   contents: read
+  actions: read   # the chain diagnostics read this job's step timings
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -81,6 +82,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Record chain start
+        run: echo "CHAIN_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -112,13 +116,17 @@ jobs:
           if [ "${IN_FORCE}" = "true" ]; then
             FORCE_FLAG="--force"
           fi
+          set -o pipefail
+          mkdir -p diagnostics
+          # Teed so the chain diagnostics can count the Wayback attempts;
+          # pipefail keeps the refresh's own exit status.
           python -m scripts.refresh_crisiswatch \
             --source wayback \
             --only-if-newer \
             --max-age-days 60 \
             --expect-edition-by-day 9 \
             $FORCE_FLAG \
-            --verbose
+            --verbose 2>&1 | tee diagnostics/crisiswatch_refresh.log
 
       - name: Upload CrisisWatch JSON
         uses: actions/upload-artifact@v4
@@ -130,3 +138,27 @@ jobs:
             horizon_scanner/data/crisiswatch_debug.html
             diagnostics/crisiswatch_publication_days.json
           retention-days: 90
+
+      # What this run did (edition before and after, the edition the forecast
+      # gate expects, parse accounting, Wayback attempts), as an artifact the
+      # publish run gathers into the cycle zip (CLAUDE.md, "Cycle diagnostics
+      # bundle"). No DB here; never fails the job.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow refresh_crisiswatch \
+            --started-at "${CHAIN_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-refresh_crisiswatch-${{ github.run_id }}
+          path: diagnostics/refresh_crisiswatch/
+          retention-days: 14
+          if-no-files-found: warn

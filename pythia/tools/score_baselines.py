@@ -562,12 +562,18 @@ def main() -> None:
         description="Score climatology/uniform reference forecasts against resolutions.",
     )
     parser.add_argument("--db-url", default=None, help="DuckDB URL (default: from config).")
+    parser.add_argument("--report-json", default=None,
+                        help="Write the run's counters here (scripts/ci/chain_diagnostics.py)")
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
-    score_baselines(db_url=args.db_url or _get_db_url_from_config())
+    counters = score_baselines(db_url=args.db_url or _get_db_url_from_config())
+    if args.report_json:
+        from pythia.tools.compute_resolutions import write_report_json
+
+        write_report_json(args.report_json, dict(counters or {}))
 
 
 if __name__ == "__main__":

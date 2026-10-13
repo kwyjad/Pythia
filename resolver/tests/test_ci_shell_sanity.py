@@ -344,3 +344,42 @@ def test_run_discovery_never_accepts_a_pull_request_run():
         "A `gh run list` that selects artifacts must also filter on event "
         "(TRUSTED_EVENTS): " + ", ".join(offenders)
     )
+
+
+#: Every workflow in the post-ingest chain writes its own diagnostics
+#: (scripts/ci/chain_diagnostics.py) and Publish gathers them into one zip.
+#: On 11 October 2026 the chain was refused at upload and no artifact said so.
+_CHAIN_DIAGNOSTIC_WRITERS = {
+    "compute_resolutions.yml": "compute_resolutions",
+    "compute_scores.yml": "compute_scores",
+    "compute_calibration_pythia.yml": "compute_calibration",
+    "ingest-structured-data.yml": "ingest_structured_data",
+    "refresh-crisiswatch.yml": "refresh_crisiswatch",
+    "publish_latest_data.yml": "publish_latest_data",
+}
+
+
+def test_every_chain_workflow_uploads_its_chain_diagnostics():
+    for name, slug in _CHAIN_DIAGNOSTIC_WRITERS.items():
+        text = (WF_DIR / name).read_text(encoding="utf-8")
+        assert f"chain_diagnostics write --workflow {slug}" in text, name
+        if slug != "publish_latest_data":
+            marker = f"name: chain-diagnostics-{slug}-${{{{ github.run_id }}}}"
+            assert marker in text, f"{name} must upload {marker}"
+            block = text[text.index(marker) - 400:text.index(marker) + 200]
+            assert "continue-on-error: true" in block and "retention-days: 14" in block, name
+        # The writer runs whatever happened above it, and never fails the job.
+        i = text.index("- name: Write chain diagnostics" if slug != "publish_latest_data"
+                       else "- name: Write this run's chain diagnostics")
+        head = text[i:i + 200]
+        assert "if: always()" in head and "continue-on-error: true" in head, name
+
+
+def test_publish_gathers_the_cycle_after_the_release_upload():
+    text = (WF_DIR / "publish_latest_data.yml").read_text(encoding="utf-8")
+    upload = text.index("Upload resolver.duckdb + manifest.json to release")
+    gather = text.index("python -m scripts.ci.build_cycle_diagnostics")
+    assert upload < gather
+    assert "name: pythia-cycle-diagnostics" in text
+    block = text[gather - 600:]
+    assert block.count("continue-on-error: true") >= 2
