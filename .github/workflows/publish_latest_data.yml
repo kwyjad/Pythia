@@ -920,12 +920,12 @@ jobs:
           CHAIN_JOB_STATUS: ${{ job.status }}
         run: |
           python -m pip install --quiet pyyaml duckdb || true
-          ARGS=""
+          ARGS=()
           if [ -f resolver_inspect.md ]; then
-            ARGS="--include resolver_inspect.md"
+            ARGS=(--include resolver_inspect.md)
           fi
           python -m scripts.ci.chain_diagnostics write --workflow publish_latest_data \
-            --started-at "${CHAIN_STARTED_AT:-}" ${ARGS}
+            --started-at "${CHAIN_STARTED_AT:-}" "${ARGS[@]}"
 
       - name: Gather the cycle's diagnostics into one zip
         if: always()
