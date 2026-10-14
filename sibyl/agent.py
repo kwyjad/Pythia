@@ -615,7 +615,25 @@ def _call_model(
     usage = dict(result.usage or {})
     if not usage.get("cost_usd"):
         usage["cost_usd"] = estimate_cost_usd(MODEL, usage)
+    if result.error:
+        note_provider_refusal("anthropic", result.error)
     return result.text or "", usage, result.error or ""
+
+
+def note_provider_refusal(provider: str, error_text: str) -> Optional[str]:
+    """Record a usage limit or a refused key so the run stops starting
+    questions (``sibyl.run`` reads ``forecaster.providers.terminal_provider_error``).
+    Returns the kind, or None."""
+    try:
+        from forecaster import providers as _p  # noqa: PLC0415
+
+        kind = _p.classify_provider_error(provider, error_text)
+        if kind in _p.TERMINAL_PROVIDER_ERRORS:
+            _p._TERMINAL_PROVIDERS[provider] = (kind, (error_text or "")[:500])
+            return kind
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _search_terms(question: SibylQuestion, country_name: str) -> List[str]:

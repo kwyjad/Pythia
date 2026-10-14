@@ -60,7 +60,8 @@ FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
 # workflow defaults either way; a smoke run (only_countries=IRN,SOM,
 # disable_brave, a single batch provider) would otherwise quietly revert to
 # full production settings the moment the poller dispatched stage 2.
-CARRIED_INPUTS = ("batch_providers", "only_countries", "grounding_primary", "disable_brave")
+CARRIED_INPUTS = ("batch_providers", "only_countries", "grounding_primary", "disable_brave",
+                  "block_providers")
 
 # Runs our own triggers start. A fork can open a pull request from a branch
 # it named `main`, upload a pythia-batch-state artifact, and so choose what
@@ -81,6 +82,7 @@ _CARRIED_SHAPES = {
     "only_countries": re.compile(r"^[A-Za-z, ]*$"),
     "grounding_primary": re.compile(r"^(brave|openai|gemini)?$"),
     "disable_brave": re.compile(r"^(true|false|True|False|0|1)?$"),
+    "block_providers": re.compile(r"^[a-z, ]*$"),
 }
 
 

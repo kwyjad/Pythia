@@ -95,6 +95,11 @@ on:
         required: false
         default: ""
         type: string
+      block_providers:
+        description: "Comma list for PYTHIA_BLOCK_PROVIDERS (e.g. 'anthropic'). Set by the first stage's provider preflight and carried by the poller; empty = none."
+        required: false
+        default: ""
+        type: string
       disable_brave:
         description: "Withhold BRAVE_SEARCH_API_KEY so Brave is skipped entirely (missing-key fall-through, no breaker trips). Use when Brave is 402ing — a tripped breaker blocks ungrounded hazards from forecasting."
         required: false
@@ -143,6 +148,10 @@ env:
   PYTHIA_BATCH_PROVIDERS: ${{ inputs.batch_providers || 'openai,anthropic,google' }}
   # Empty = full hs_country_list.txt (HS treats blank as unset).
   PYTHIA_HS_ONLY_COUNTRIES: ${{ inputs.only_countries || '' }}
+  # Providers dropped from the ensemble for this pipeline. The first stage's
+  # preflight appends any provider it finds usage-limited or with a refused
+  # key; emit_batch_state carries the list and the poller re-supplies it.
+  PYTHIA_BLOCK_PROVIDERS: ${{ inputs.block_providers || '' }}
   # Grounding-backend override (code default is brave when unset).
   PYTHIA_GROUNDING_PRIMARY_BACKEND: ${{ inputs.grounding_primary || 'brave' }}
   PYTHIA_BATCH_MAX_WAIT_H: "24"
@@ -274,6 +283,23 @@ jobs:
           set -e
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
+
+      # One minimal call per provider before the run spends anything
+      # (Oct 2026). A usage limit or a refused key blocks the provider:
+      # PYTHIA_BLOCK_PROVIDERS gains it, its ensemble member is dropped, and
+      # the batch state carries the list to the later stages. Non-fatal.
+      - name: Provider preflight
+        id: preflight
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p diagnostics
+          python -m scripts.ci.provider_preflight \
+            --out diagnostics/provider_preflight.json --apply-block
 
       - name: Download canonical resolver DB
         id: canonical_download
@@ -470,6 +496,7 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
+            diagnostics/provider_preflight.json
           # error, not warn: hs_stdout.txt is the one file this stage is
           # always expected to produce, and a silently-missing diagnostics
           # upload inside a green run is exactly the blind spot being closed.
@@ -687,6 +714,7 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
+            diagnostics/provider_preflight.json
           # error, not warn: hs_stdout.txt is the one file this stage is
           # always expected to produce, and a silently-missing diagnostics
           # upload inside a green run is exactly the blind spot being closed.
@@ -946,6 +974,7 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
+            diagnostics/provider_preflight.json
           # error, not warn: hs_stdout.txt always exists once the stage ran,
           # so this fires only when the whole diagnostics set went missing.
           if-no-files-found: error
@@ -1001,6 +1030,23 @@ jobs:
           set -e
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
+
+      # One minimal call per provider before the run spends anything
+      # (Oct 2026). A usage limit or a refused key blocks the provider:
+      # PYTHIA_BLOCK_PROVIDERS gains it, its ensemble member is dropped, and
+      # the batch state carries the list to the later stages. Non-fatal.
+      - name: Provider preflight
+        id: preflight
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p diagnostics
+          python -m scripts.ci.provider_preflight \
+            --out diagnostics/provider_preflight.json --apply-block
 
       - name: Download canonical resolver DB
         id: canonical_download
@@ -1222,6 +1268,7 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
+            diagnostics/provider_preflight.json
           # error, not warn: hs_stdout.txt always exists once the stage ran,
           # so this fires only when the whole diagnostics set went missing.
           if-no-files-found: error
@@ -1567,6 +1614,7 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
+            diagnostics/provider_preflight.json
           # error, not warn: see the HS stages' upload.
           if-no-files-found: error
 

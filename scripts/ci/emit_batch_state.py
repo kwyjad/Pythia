@@ -16,7 +16,8 @@ batch ids — so each submit stage also uploads this KB-sized JSON:
       "test_mode": bool, "fc_run_id": ..., "hs_run_id": ...,
       "created_at": iso8601,
       "dispatch_inputs": {"batch_providers", "only_countries",
-                          "grounding_primary", "disable_brave"},
+                          "grounding_primary", "disable_brave",
+                          "block_providers"},
       "pending": [{"batch_id", "provider", "provider_batch_id", "family",
                     "status", "submitted_at"}]
     }
@@ -61,6 +62,9 @@ def dispatch_inputs_from_env(env: dict[str, str]) -> dict[str, str]:
         "only_countries": (env.get("PYTHIA_HS_ONLY_COUNTRIES") or "").strip(),
         "grounding_primary": (env.get("PYTHIA_GROUNDING_PRIMARY_BACKEND") or "").strip(),
         "disable_brave": "true" if not (env.get("BRAVE_SEARCH_API_KEY") or "").strip() else "false",
+        # Providers the first stage's preflight blocked (a usage limit, a
+        # refused key): every later stage must drop the same members.
+        "block_providers": (env.get("PYTHIA_BLOCK_PROVIDERS") or "").strip(),
     }
 
 

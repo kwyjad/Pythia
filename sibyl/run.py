@@ -58,7 +58,6 @@ from sibyl.config import (
     ADVICE_EXPERIMENT_SHARE,
     AGGREGATION,
     BACKTEST_MODE,
-    K,
     MAX_PER_HAZARD,
     MAX_RUNTIME_MIN,
     MAX_STEPS,
@@ -109,6 +108,18 @@ SKIP_REASON_BUDGET = "run budget cap"
 SKIP_REASON_TIME = "run time cap"
 SKIP_REASON_NO_EVIDENCE = "no evidence"
 SKIP_REASON_COST_GATE = "cost_per_question_gate"
+#: Claude refused with a usage limit or a refused key mid-run (2026-10-13).
+SKIP_REASON_PROVIDER = "provider_refused"
+
+
+def _provider_refusal():
+    """(kind, error) when Claude has refused this process for the rest of the run."""
+    try:
+        from forecaster.providers import terminal_provider_error  # noqa: PLC0415
+
+        return terminal_provider_error("anthropic")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def cost_gate_verdict(cost_usd: float, question_equivalents: float, *,
@@ -727,6 +738,7 @@ def run_sibyl(
     cost_gate_status: Optional[str] = None
     cost_gate_ratio: Optional[float] = None
     cost_gate_stopped = False
+    provider_refused: Optional[str] = None
     n_processed = 0
     question_equivalents = 0.0
     n_forecast = 0
@@ -792,6 +804,21 @@ def run_sibyl(
                     con, question,
                     sibyl_run_id=sibyl_run_id, status="skipped",
                     skip_reason=SKIP_REASON_TIME, tracker=tracker,
+                )
+                continue
+            refused = _provider_refusal()
+            if refused:
+                if not provider_refused:
+                    logger.error("sibyl.run: Anthropic refused (%s); no new question starts: %s",
+                                 refused[0], refused[1][:200])
+                    print(f"::error title=Sibyl stopped::Anthropic {refused[0]}; "
+                          "the remaining questions are skipped.")
+                provider_refused = refused[0]
+                n_skipped += 1
+                _persist_non_ok(
+                    con, question,
+                    sibyl_run_id=sibyl_run_id, status="skipped",
+                    skip_reason=SKIP_REASON_PROVIDER, tracker=tracker,
                 )
                 continue
             if cost_gate_stopped:
@@ -968,6 +995,7 @@ def run_sibyl(
             "n_evidence_rows": n_evidence_rows,
             "cost_gate_status": cost_gate_status,
             "cost_gate_ratio": cost_gate_ratio,
+            "provider_refused": provider_refused,
             "stated_cost_per_question_usd": _cfg.STATED_COST_PER_QUESTION_USD,
             "n_single_trial": sum(
                 1 for o in outcomes if o.status == "ok" and o.trial_checks.get("single_trial")),

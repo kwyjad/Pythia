@@ -155,7 +155,23 @@ def test_dispatch_inputs_from_env_reflects_effective_settings():
         # An empty Brave key IS the disable_brave input — re-supplying the
         # secret on the next stage would let a 402ing key trip the breaker.
         "disable_brave": "true",
+        "block_providers": "",
     }
+
+
+def test_a_provider_blocked_by_the_preflight_is_carried_to_the_next_stage():
+    """The first stage's preflight blocks a provider by writing
+    PYTHIA_BLOCK_PROVIDERS; the poller must hand the same list on."""
+    inputs = dispatch_inputs_from_env({"PYTHIA_BLOCK_PROVIDERS": "anthropic",
+                                       "BRAVE_SEARCH_API_KEY": "k"})
+    assert inputs["block_providers"] == "anthropic"
+    args = _dispatch_input_args({"dispatch_inputs": inputs})
+    assert "block_providers=anthropic" in args
+    from scripts.ci.poll_llm_batches import state_problem
+
+    bad = {"next_stage": "hs_rc_collect", "pipeline_id": "pl_x", "db_run_id": "1",
+           "dispatch_inputs": {"block_providers": "anthropic; rm -rf /"}}
+    assert "block_providers" in (state_problem(bad) or "")
 
 
 def test_dispatch_inputs_from_env_production_defaults():

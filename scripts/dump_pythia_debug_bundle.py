@@ -3225,6 +3225,10 @@ class BundleData:
     # The newest Sibyl run for this HS run (2026-10-14): its cost gate and
     # single-trial count.
     sibyl_run: dict[str, Any] | None = None
+    # Provider preflight reports (Oct 2026): this job's, plus the providers
+    # the forecast stage ran without (PYTHIA_BLOCK_PROVIDERS in its context).
+    provider_preflight: list[dict[str, Any]] = field(default_factory=list)
+    stage_block_providers: str | None = None
     # pythia/tools/ace_pa_eligibility.py: which ACE countries were asked ACE/PA.
     ace_pa_eligibility: dict[str, Any] | None = None
     # pythia/tools/phase3_eligibility.py: which DR Phase 3+ questions were dropped.
@@ -3567,6 +3571,64 @@ def _sibyl_run_for_hs(con, hs_run_id: str | None) -> dict[str, Any] | None:
     return dict(zip(want, row)) if row else None
 
 
+#: Where the provider preflight writes its report (comma list; env-overridable).
+PREFLIGHT_PATHS_ENV = "PYTHIA_PROVIDER_PREFLIGHT_PATHS"
+DEFAULT_PREFLIGHT_PATHS = "diagnostics/provider_preflight.json"
+
+
+def load_provider_preflight(paths: str | None = None) -> list[dict[str, Any]]:
+    """Every readable preflight report, with the path it came from."""
+    out: list[dict[str, Any]] = []
+    raw = paths if paths is not None else os.getenv(PREFLIGHT_PATHS_ENV, DEFAULT_PREFLIGHT_PATHS)
+    for part in (raw or "").split(","):
+        p = Path(part.strip())
+        if not part.strip() or not p.is_file():
+            continue
+        try:
+            rep = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(rep, dict):
+            rep["_path"] = str(p)
+            out.append(rep)
+    return out
+
+
+def _provider_preflight_check(reports: list[dict[str, Any]],
+                              stage_block: str | None) -> dict[str, Any] | None:
+    """FAIL when a provider was blocked (a usage limit or a refused key), by
+    this job's preflight or by the forecast stage's; WARN on a provider that
+    answered with any other error; None when there is nothing to report."""
+    blocked: dict[str, str] = {}
+    warned: list[str] = []
+    for rep in reports:
+        for r in rep.get("providers") or []:
+            prov = str(r.get("provider"))
+            if r.get("blocking"):
+                why = str(r.get("status"))
+                if r.get("regain_at"):
+                    why += f" until {r['regain_at']}"
+                blocked[prov] = why
+            elif r.get("status") not in (None, "ok"):
+                warned.append(f"{prov} {r.get('status')}")
+    for prov in (stage_block or "").split(","):
+        prov = prov.strip().lower()
+        if prov and prov not in blocked:
+            blocked[prov] = "dropped from the forecast stage's ensemble"
+    if not reports and not blocked:
+        return None
+    if blocked:
+        detail = "; ".join(f"{p}: {w}" for p, w in sorted(blocked.items()))
+        return {"subsystem": "Provider Preflight", "status": "FAIL",
+                "detail": f"blocked: {detail}. Its ensemble member was dropped; "
+                          "Sibyl and the interpreter do not start when Anthropic is blocked."}
+    if warned:
+        return {"subsystem": "Provider Preflight", "status": "WARN",
+                "detail": "answered with an error: " + ", ".join(warned)}
+    return {"subsystem": "Provider Preflight", "status": "OK",
+            "detail": "every provider answered the preflight call"}
+
+
 def _sibyl_cost_check(run: dict[str, Any]) -> dict[str, Any]:
     """The Sibyl line: FAIL when the cost gate stopped the run, WARN when it
     warned or the budget cap bound, else OK."""
@@ -3823,6 +3885,10 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     p3 = data.phase3_eligibility
     if p3 is not None:
         checks.append(_phase3_eligibility_check(p3))
+
+    pre = _provider_preflight_check(data.provider_preflight, data.stage_block_providers)
+    if pre is not None:
+        checks.append(pre)
 
     if data.sibyl_run:
         checks.append(_sibyl_cost_check(data.sibyl_run))
@@ -8079,6 +8145,16 @@ def main() -> None:
             # handed to both the anomaly list and the summary — three
             # derivations of one verdict will eventually disagree, and the
             # reader cannot tell which is right.
+            try:
+                data.provider_preflight = load_provider_preflight()
+                ctx = _read_stage_context(out_dir) or {}
+                data.stage_block_providers = ctx.get("block_providers")
+                if data.provider_preflight:
+                    (out_dir / f"provider_preflight__{data.out_run_id}.json").write_text(
+                        json.dumps(data.provider_preflight, indent=2, default=str),
+                        encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("provider preflight read failed: %s", exc)
             health_checks: list[dict[str, Any]] = []
             try:
                 health_checks = _evaluate_pipeline_health(data)

@@ -219,3 +219,33 @@ def test_the_current_run_bundle_labels_an_earlier_sibyl_forecast():
     # The same run is not carried forward.
     assert _sibyl_carried_forward(con, "fc_1790831584", [{"question_id": "MEX_FL_PA_2026-11"}],
                                   covered=set()) == []
+
+
+# --- a usage limit mid-run ----------------------------------------------------------
+
+def test_a_usage_limit_stops_new_questions(run_env):  # noqa: F811
+    from forecaster import providers
+    from sibyl.agent import note_provider_refusal
+
+    limit = ("Anthropic HTTP 400: You have reached your specified API usage limits. "
+             "You will regain access on 2026-11-01 at 00:00 UTC.")
+    providers.reset_terminal_providers()
+
+    def refused(prompt):
+        note_provider_refusal("anthropic", limit)
+        return "", {"cost_usd": 0.0}, limit
+
+    try:
+        summary = sibyl_run.run_sibyl(HS_RUN_ID, n_questions=2, model_call=refused)
+    finally:
+        providers.reset_terminal_providers()
+    assert summary["provider_refused"] == "usage_limit"
+    from pythia.db.schema import connect
+
+    con = connect(read_only=False)
+    try:
+        (reason,) = con.execute("SELECT skip_reason FROM sibyl_forecasts WHERE question_id = ?",
+                                [Q2]).fetchone()
+    finally:
+        con.close()
+    assert reason == sibyl_run.SKIP_REASON_PROVIDER
