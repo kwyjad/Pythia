@@ -6,6 +6,7 @@ import CostsClient, {
   RunRuntimesResponse,
 } from "./CostsClient";
 import { apiGet } from "../../lib/api";
+import BillingReconciliation, { BillingResponse } from "./BillingReconciliation";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -32,7 +33,7 @@ const CostsPage = async ({
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/costs" });
   }
-  const [total, monthly, runs, latencies, runRuntimes] = await Promise.all([
+  const [total, monthly, runs, latencies, runRuntimes, billing] = await Promise.all([
     safeGet<CostsResponse>("/costs/total", {
       tables: { summary: [], by_model: [], by_phase: [] },
     }, testParam),
@@ -44,6 +45,7 @@ const CostsPage = async ({
     }, testParam),
     safeGet<LatenciesResponse>("/costs/latencies", { rows: [] }, testParam),
     safeGet<RunRuntimesResponse>("/costs/run_runtimes", { rows: [] }, testParam),
+    safeGet<BillingResponse>("/costs/billing_reconciliation", { has_table: false, rows: [] }),
   ]);
 
   return (
@@ -55,6 +57,9 @@ const CostsPage = async ({
         latencies={latencies.rows}
         runRuntimes={runRuntimes.rows}
       />
+      <div className="mt-8">
+        <BillingReconciliation data={billing} />
+      </div>
     </Suspense>
   );
 };

@@ -359,3 +359,33 @@ def costs_run_runtimes(track: Optional[int] = Query(None), include_test: bool = 
         return {"rows": rows}
 
     return _cached_costs("run_runtimes", track, include_test, _build)
+
+
+@router.get("/v1/costs/billing_reconciliation")
+def costs_billing_reconciliation(months: int = Query(12, ge=1, le=36)):
+    """What each provider billed beside what the ledger recorded, per month
+    (``scripts/ci/billing_reconciliation.py``, run on the 1st). An older DB
+    with no table answers ``has_table: false``."""
+    con = _con()
+    try:
+        exists = _execute(
+            con,
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'billing_reconciliation'",
+        ).fetchone()[0]
+    except Exception:
+        exists = 0
+    if not exists:
+        return {"has_table": False, "rows": []}
+    try:
+        rows = _rows_from_cursor(_execute(
+            con,
+            "SELECT month, provider, ledger_usd, billed_usd, diff_usd, diff_pct, status, reason, "
+            "CAST(checked_at AS TEXT) AS checked_at FROM billing_reconciliation "
+            "WHERE month IN (SELECT DISTINCT month FROM billing_reconciliation "
+            "ORDER BY month DESC LIMIT ?) ORDER BY month DESC, provider",
+            [months],
+        ))
+    except Exception as exc:
+        logger.exception("Failed to read billing reconciliation")
+        raise HTTPException(status_code=500, detail="Failed to read billing reconciliation") from exc
+    return {"has_table": True, "rows": rows}

@@ -86,7 +86,35 @@ def previous_production_git_sha(con, current_hs_run_id: str | None) -> tuple[str
     return (str(row[0]) if row[0] else None), (str(row[1]) if row[1] else None)
 
 
-def _commits_since(repo_root: Path, previous_sha: str | None, current_sha: str | None) -> str:
+def _compare_via_api(previous_sha: str, current_sha: str | None, *, api=None) -> str | None:
+    """``<sha7> <subject>`` per commit from ``/compare/{base}...{head}``,
+    oldest first, or None when the API cannot be asked."""
+    try:
+        if api is None:
+            import os  # noqa: PLC0415
+
+            from scripts.debug_bundle.workflow_logs import GitHubApi  # noqa: PLC0415
+
+            token = (os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or "").strip()
+            repo = (os.getenv("GITHUB_REPOSITORY") or "").strip()
+            if not token or not repo:
+                return None
+            api = GitHubApi(token, repo)
+        payload = api.get_json(f"/repos/{api.repo}/compare/{previous_sha}...{current_sha or 'HEAD'}")
+    except Exception:  # noqa: BLE001
+        return None
+    lines = []
+    for c in (payload or {}).get("commits") or []:
+        subject = str(((c.get("commit") or {}).get("message") or "")).splitlines()[:1]
+        lines.append(f"{str(c.get('sha') or '')[:7]} {subject[0] if subject else ''}")
+    total = (payload or {}).get("total_commits")
+    if total and total > len(lines):
+        lines.append(f"... {total - len(lines)} more (the compare API lists at most {len(lines)})")
+    return "\n".join(lines)
+
+
+def _commits_since(repo_root: Path, previous_sha: str | None, current_sha: str | None,
+                   *, api=None) -> str:
     header = [
         "# Commits between the previous PRODUCTION run and this one.",
         f"# previous run commit: {previous_sha or '(not recorded in hs_runs.git_sha)'}",
@@ -102,9 +130,17 @@ def _commits_since(repo_root: Path, previous_sha: str | None, current_sha: str |
         return "\n".join(header) + "\n"
     rc, out = _run(["git", "cat-file", "-e", f"{previous_sha}^{{commit}}"], repo_root)
     if rc != 0:
+        # Actions checks out with fetch-depth 1, so the previous commit is
+        # absent; GitHub's compare API answers the same question (Oct 2026).
+        listed = _compare_via_api(previous_sha, current_sha, api=api)
+        if listed is not None:
+            header.append("(from the GitHub compare API: this checkout is shallow)")
+            header.append(listed or "(no commits — this run is on the same commit as the previous one)")
+            return "\n".join(header) + "\n"
         header.append(
             f"Commit {previous_sha} is not in this checkout — Actions checks out with "
-            "fetch-depth 1, so history before the current commit is absent. Run "
+            "fetch-depth 1, so history before the current commit is absent, and the "
+            "compare API was not reachable (no GITHUB_TOKEN / GITHUB_REPOSITORY). Run "
             f"`git log --oneline {previous_sha}..{current_sha or 'HEAD'}` against a full clone."
         )
         return "\n".join(header) + "\n"

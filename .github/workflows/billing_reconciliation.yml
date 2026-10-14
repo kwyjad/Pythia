@@ -1,0 +1,131 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+# What each LLM provider billed for last month, beside what llm_calls
+# recorded (Oct 2026). Every cost view reads the ledger, priced from
+# pythia/model_costs.json; a wrong price or a missed call path shows up
+# nowhere until the invoice. This compares the two once a month and writes
+# billing_reconciliation into the canonical DB, which the next publish
+# carries to the Costs page. A provider more than 15% off gets a ::warning.
+#
+# Anthropic and OpenAI need ADMIN keys (ANTHROPIC_ADMIN_API_KEY,
+# OPENAI_ADMIN_API_KEY); without them the row says "unavailable" and why.
+# Google has no cost API for an API key and always reads "not available".
+#
+# It writes the canonical DB, so it is a canonical producer: gated on the
+# staged pipeline, the pythia-resolver-db group on the writing job, the
+# upload guard before the upload, and named in the three discovery lists.
+---
+name: Billing Reconciliation
+
+"on":
+  schedule:
+    # The 1st, 05:47 UTC: clear of the backcast (20:30), the compaction
+    # (the 4th and 20th) and the cycle (the 8th to the 13th).
+    - cron: "47 5 1 * *"
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Month to reconcile (YYYY-MM). Empty = the previous calendar month."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    name: Skip if a staged pipeline is in flight
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: "false"
+        run: python3 -m scripts.ci.check_pipeline_active
+
+  reconcile:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    concurrency:
+      group: pythia-resolver-db
+      cancel-in-progress: false
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      IN_MONTH: ${{ inputs.month }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install duckdb requests pyyaml
+
+      - name: Download canonical resolver DB
+        id: canonical_download
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-workflows: Billing Reconciliation
+
+      - name: Reconcile billed against recorded
+        env:
+          ANTHROPIC_ADMIN_API_KEY: ${{ secrets.ANTHROPIC_ADMIN_API_KEY }}
+          OPENAI_ADMIN_API_KEY: ${{ secrets.OPENAI_ADMIN_API_KEY }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${IN_MONTH}" =~ ^([0-9]{4}-[0-9]{2})?$ ]]; then
+            echo "::error::month must be YYYY-MM."
+            exit 1
+          fi
+          mkdir -p diagnostics
+          python -m scripts.ci.billing_reconciliation --db "${RESOLVER_DB_URL}" \
+            --month "${IN_MONTH}" --out diagnostics/billing_reconciliation.json
+
+      - name: Upload reconciliation
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: billing-reconciliation
+          retention-days: 14
+          path: diagnostics/billing_reconciliation.json
+          if-no-files-found: warn
+
+      - name: Refuse to upload over a newer canonical DB
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
+
+      - name: Upload canonical resolver DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          retention-days: 90
+          path: data/resolver.duckdb

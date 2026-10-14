@@ -142,7 +142,8 @@ jobs:
             "Interpreter Backfill" \
             "Compact Resolver DB" \
             "Purge HS Run" \
-            "Mark runs as test"
+            "Mark runs as test" \
+            "Billing Reconciliation"
           do
             gh run list \
               --workflow "${WF}" \

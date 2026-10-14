@@ -161,9 +161,10 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           mkdir -p diagnostics
+          mkdir -p diagnostics/job_logs
           python -m scripts.ci.provider_preflight \
             --providers anthropic,openai \
-            --out diagnostics/provider_preflight.json
+            --out diagnostics/provider_preflight.json 2>&1 | tee diagnostics/job_logs/provider_preflight.log
 
       - name: Gate on eligible questions with volatility scores
         id: gate
@@ -253,10 +254,17 @@ jobs:
           SIBYL_BUDGET_USD_PER_QUESTION: ${{ vars.SIBYL_BUDGET_USD_PER_QUESTION || '' }}
         run: |
           set -euo pipefail
+          # stdout stays in sibyl_stdout.txt (a later step reads the run id
+          # from it); the log (stderr) is teed into diagnostics/job_logs/,
+          # which the debug bundle copies: this job's own log is not in the
+          # Actions archive while the job is still running (Oct 2026).
+          mkdir -p diagnostics/job_logs
           if [ -n "${IN_HS_RUN_ID}" ]; then
-            python -m sibyl.run --hs-run-id "${IN_HS_RUN_ID}" | tee sibyl_stdout.txt
+            python -m sibyl.run --hs-run-id "${IN_HS_RUN_ID}" \
+              2> >(tee diagnostics/job_logs/sibyl_run.log >&2) | tee sibyl_stdout.txt
           else
-            python -m sibyl.run | tee sibyl_stdout.txt
+            python -m sibyl.run \
+              2> >(tee diagnostics/job_logs/sibyl_run.log >&2) | tee sibyl_stdout.txt
           fi
 
       # Runs BEFORE the deviation step and the current-run bundle (Oct 2026):
@@ -413,11 +421,12 @@ jobs:
             echo "::warning::No current-run bundle found — skipping interpreter."
             exit 0
           fi
+          mkdir -p diagnostics/job_logs
           python -m interpreter.run \
             --db "${RESOLVER_DB_URL}" \
             --kind combined \
             --pack "${PACK}" \
-            --out-dir interpreter_out
+            --out-dir interpreter_out 2>&1 | tee diagnostics/job_logs/interpreter_combined.log
           exit 0
 
       # WeasyPrint renders the stored report to PDF (CI-side, never in the
@@ -442,11 +451,12 @@ jobs:
             echo "::warning::No forecaster run id resolved; not rendering a report PDF."
             exit 0
           fi
+          mkdir -p diagnostics/job_logs
           python -m interpreter.pdf \
             --db "${RESOLVER_DB_URL}" \
             --kind combined \
             --run-id "${FORECASTER_RUN_ID}" \
-            --out-dir interpreter_out
+            --out-dir interpreter_out 2>&1 | tee diagnostics/job_logs/interpreter_pdf.log
           exit 0
 
       # publish_latest_data.yml fetches this artifact (best-effort) from the
@@ -724,6 +734,7 @@ jobs:
           path: |
             diagnostics/stage_health__sibyl.json
             diagnostics/provider_preflight.json
+            diagnostics/job_logs/
             sibyl_stdout.txt
           if-no-files-found: warn
           retention-days: 90

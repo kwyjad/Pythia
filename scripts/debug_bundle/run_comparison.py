@@ -32,9 +32,12 @@ METRICS = (
     "total_tokens",
     "cost_forecast_usd",
     "cost_hs_usd",
+    "cost_sibyl_usd",
     "n_batches",
     "batch_fallback_pct",
     "batch_tier_cost_pct",
+    "batchable_cost_usd",
+    "non_batchable_cost_usd",
     "cache_hit_rate_pct",
     "forecasts_raw_rows",
     "forecasts_ensemble_rows",
@@ -89,6 +92,60 @@ def recent_production_hs_runs(con, *, current_hs_run_id: str | None, limit: int 
     return out
 
 
+def sibyl_run_for(con, hs_run_id: str | None) -> str | None:
+    """The newest Sibyl run of the HS run, or None."""
+    if not hs_run_id or "sibyl_run_id" not in _columns(con, "sibyl_runs"):
+        return None
+    order = "created_at" if "created_at" in _columns(con, "sibyl_runs") else "sibyl_run_id"
+    try:
+        row = con.execute(
+            f"SELECT sibyl_run_id FROM sibyl_runs WHERE hs_run_id = ? ORDER BY {order} DESC LIMIT 1",
+            [hs_run_id],
+        ).fetchone()
+    except Exception:
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
+def run_llm_where(hs_run_id: str | None, fc_run_id: str | None,
+                  sibyl_run_id: str | None = None) -> tuple[str, list[Any]]:
+    """The one definition of "this run's LLM calls" (Oct 2026).
+
+    The HS run, the forecaster run and the Sibyl run, by ``run_id``, and
+    every row stamped with the HS run (Sibyl's steps carry it). The debug
+    bundle's call tables and its cost total use the same clause, so the
+    summary total and this table's ``total_cost_usd`` agree by construction.
+    """
+    run_ids = [i for i in (fc_run_id, sibyl_run_id, hs_run_id) if i]
+    if not run_ids:
+        return "FALSE", []
+    clause = f"run_id IN ({','.join('?' for _ in run_ids)})"
+    params: list[Any] = list(run_ids)
+    if hs_run_id:
+        clause = f"({clause} OR hs_run_id = ?)"
+        params.append(hs_run_id)
+    return clause, params
+
+
+def batchable_sql(con) -> str:
+    """Rows a batch family could have carried (scripts/ci/batch_economics.py)."""
+    try:
+        from scripts.ci.batch_economics import _batchable_sql  # noqa: PLC0415
+
+        return _batchable_sql(con)
+    except Exception:
+        return "(phase IN ('spd_v2', 'binary_v2'))"
+
+
+def _phase_bucket(phase: Any) -> str:
+    try:
+        from resolver.query.costs import phase_group  # noqa: PLC0415
+
+        return phase_group(phase)
+    except Exception:
+        return str(phase or "other")
+
+
 def _forecaster_run_for(con, hs_run_id: str) -> str | None:
     if not _columns(con, "forecasts_ensemble") or not _columns(con, "questions"):
         return None
@@ -119,14 +176,14 @@ def _forecaster_run_for(con, hs_run_id: str) -> str | None:
 
 def _metrics_for_run(con, hs_run_id: str) -> dict[str, Any]:
     fc_run_id = _forecaster_run_for(con, hs_run_id)
+    sibyl_run_id = sibyl_run_for(con, hs_run_id)
     ids = [i for i in (hs_run_id, fc_run_id) if i]
-    ph = ",".join("?" for _ in ids)
-    llm_where = f"(run_id IN ({ph}) OR hs_run_id IN ({ph}))"
-    llm_params = ids + ids
+    llm_where, llm_params = run_llm_where(hs_run_id, fc_run_id, sibyl_run_id)
 
     out: dict[str, Any] = {
         "hs_run_id": hs_run_id,
         "forecaster_run_id": fc_run_id or "",
+        "sibyl_run_id": sibyl_run_id or "",
     }
     from pythia.run_questions import in_run_clause  # noqa: PLC0415
 
@@ -162,6 +219,7 @@ def _metrics_for_run(con, hs_run_id: str) -> dict[str, Any]:
     for label, phases in (
         ("cost_forecast_usd", ("spd_v2", "binary_v2", "scenario_v2")),
         ("cost_hs_usd", ("hs_triage",)),
+        ("cost_sibyl_usd", ("sibyl",)),
     ):
         p_ph = ",".join("?" for _ in phases)
         out[label] = round(
@@ -216,8 +274,34 @@ def _metrics_for_run(con, hs_run_id: str) -> dict[str, Any]:
             0.0,
         )
     )
-    total = float(out["total_cost_usd"] or 0.0)
-    out["batch_tier_cost_pct"] = round(100.0 * batch_cost / total, 1) if total else 0.0
+    # Over the work a batch family could have carried only: grounding,
+    # scenarios, adversarial synthesis and Sibyl are never batched, and
+    # counting them made a fully batched run read as one third full price.
+    bsql = batchable_sql(con)
+    batchable = float(_scalar(
+        con, f"SELECT SUM(COALESCE(cost_usd,0)) FROM llm_calls WHERE {llm_where} AND {bsql}",
+        llm_params, 0.0))
+    out["batchable_cost_usd"] = round(batchable, 4)
+    out["non_batchable_cost_usd"] = round(float(out["total_cost_usd"] or 0.0) - batchable, 4)
+    out["batch_tier_cost_pct"] = round(100.0 * batch_cost / batchable, 1) if batchable else 0.0
+
+    # Per phase (the Costs page's buckets) and per model, as their own rows.
+    by_phase: dict[str, float] = {}
+    by_model: dict[str, float] = {}
+    try:
+        rows = con.execute(
+            f"SELECT phase, COALESCE(model_id, model_name, 'unknown'), SUM(COALESCE(cost_usd,0)) "
+            f"FROM llm_calls WHERE {llm_where} GROUP BY 1, 2",
+            llm_params,
+        ).fetchall()
+    except Exception:
+        rows = []
+    for phase, model, cost in rows:
+        key = _phase_bucket(phase)
+        by_phase[key] = by_phase.get(key, 0.0) + float(cost or 0.0)
+        by_model[str(model)] = by_model.get(str(model), 0.0) + float(cost or 0.0)
+    out["_cost_by_phase"] = {k: round(v, 4) for k, v in by_phase.items()}
+    out["_cost_by_model"] = {k: round(v, 4) for k, v in by_model.items()}
 
     prompt_tokens = float(
         _scalar(
@@ -288,9 +372,20 @@ def collect(con, *, current_hs_run_id: str | None, n_runs: int = 3) -> list[dict
     for idx, run in enumerate(per_run):
         header[f"run_{idx}__{run['hs_run_id']}"] = run.get("forecaster_run_id", "")
     rows.append(header)
+    sib = {"metric": "sibyl_run_id"}
+    for idx, run in enumerate(per_run):
+        sib[f"run_{idx}__{run['hs_run_id']}"] = run.get("sibyl_run_id", "")
+    rows.append(sib)
     for metric in METRICS:
         row: dict[str, Any] = {"metric": metric}
         for idx, run in enumerate(per_run):
             row[f"run_{idx}__{run['hs_run_id']}"] = run.get(metric, "")
         rows.append(row)
+    for prefix, key in (("cost_phase:", "_cost_by_phase"), ("cost_model:", "_cost_by_model")):
+        names = sorted({n for run in per_run for n in (run.get(key) or {})})
+        for name in names:
+            row = {"metric": prefix + name}
+            for idx, run in enumerate(per_run):
+                row[f"run_{idx}__{run['hs_run_id']}"] = (run.get(key) or {}).get(name, 0.0)
+            rows.append(row)
     return rows

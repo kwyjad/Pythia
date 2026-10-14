@@ -93,7 +93,34 @@ def _git(repo_root: Path) -> dict[str, Any]:
         "branch": branch or None,
         "commit_subject": _run(["git", "log", "-1", "--pretty=%s"], cwd=repo_root),
         "commit_date": _run(["git", "log", "-1", "--pretty=%cI"], cwd=repo_root),
-        "dirty": bool(_run(["git", "status", "--porcelain"], cwd=repo_root)),
+        **_dirty(repo_root),
+    }
+
+
+def _dirty(repo_root: Path) -> dict[str, Any]:
+    """Tracked changes only (Oct 2026).
+
+    ``dirty`` was ``bool(git status --porcelain)``, so it read true on every
+    CI run: a run writes its own outputs (diagnostics/, debug/, ai_bundle/,
+    interpreter_out/, data/resolver.duckdb), and every one of them is an
+    untracked file. Only a modified or staged TRACKED file makes a checkout
+    dirty; untracked outputs are counted apart. The lines are read with the
+    trailing newline stripped only, because porcelain's status column can
+    start with a space.
+    """
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_root),
+                             capture_output=True, text=True, timeout=60)
+    except Exception:
+        return {"dirty": None, "tracked_changes": [], "n_untracked": None}
+    if out.returncode != 0:
+        return {"dirty": None, "tracked_changes": [], "n_untracked": None}
+    lines = [ln for ln in out.stdout.rstrip("\n").split("\n") if ln]
+    tracked = [ln for ln in lines if not ln.startswith("??")]
+    return {
+        "dirty": bool(tracked),
+        "tracked_changes": tracked[:50],
+        "n_untracked": len(lines) - len(tracked),
     }
 
 

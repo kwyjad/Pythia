@@ -1092,3 +1092,40 @@ def test_the_interpreter_correction_reason_is_read_back():
     assert got["status"] == "ok"
     assert got["correction"]["failed_checks"] == ["style"]
     assert dump._interpretation_for_run(con, "fc_2") == {"present": False}
+
+
+def test_idmc_conflict_rows_with_an_empty_as_of_date_are_dated_by_as_of(tmp_path: Path):
+    # The IDMC conflict reader fills as_of and leaves as_of_date empty; on
+    # 13 Oct 2026 the freshness row read "unknown" for that reason.
+    con = duckdb.connect(str(tmp_path / "d.duckdb"))
+    con.execute("CREATE TABLE facts_deltas (ym TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, "
+                "as_of VARCHAR, as_of_date VARCHAR)")
+    con.execute("INSERT INTO facts_deltas VALUES ('2026-09','SOM','ACE','new_displacements','2026-09-30',NULL)")
+    rows, _ = connector_freshness.collect(con, run_start=datetime(2026, 10, 13).date())
+    row = next(r for r in rows if r["source"] == "IDMC displacement")
+    assert row["max_data_timestamp"] == "2026-09-30" and row["status"] == "fresh"
+
+
+def test_acaps_month_labels_are_dated_as_months_not_strings(tmp_path: Path):
+    # "Oct2026" sorts before "Sep2026" as text, so MAX() read September.
+    con = duckdb.connect(str(tmp_path / "a.duckdb"))
+    con.execute("CREATE TABLE acaps_inform_severity (iso3 TEXT, snapshot_date TEXT)")
+    con.execute("INSERT INTO acaps_inform_severity VALUES ('SOM','Aug2026'),('SOM','Sep2026'),('SOM','Oct2026')")
+    rows, _ = connector_freshness.collect(con, run_start=datetime(2026, 10, 13).date())
+    row = next(r for r in rows if r["source"] == "ACAPS INFORM Severity")
+    assert row["max_data_timestamp"] == "2026-10-01" and row["age_days_at_run_start"] == 12
+
+
+def test_mixed_editions_are_info_when_every_gap_is_registered():
+    cw = {"available": True, "n_editions": 12, "edition_span": "2025-09 .. 2026-09",
+          "editions_missing_last_12": [], "editions_known_gaps": ["2026-05"],
+          "ace_countries_older_than_expected": ["PSE (2026-08)"], "expected_edition": "2026-09"}
+    out = anomalies_mod.build(crisiswatch=cw)
+    mixed = [a for a in out if "mix of editions" in a["description"]]
+    assert mixed and mixed[0]["severity"] == anomalies_mod.INFO
+    assert "2026-05" in mixed[0]["description"]
+    older = [a for a in out if "older than the 2026-09" in a["description"]]
+    assert older and older[0]["severity"] == anomalies_mod.WARN
+    cw["editions_missing_last_12"] = ["2026-03"]
+    out = anomalies_mod.build(crisiswatch=cw)
+    assert next(a for a in out if "mix of editions" in a["description"])["severity"] == anomalies_mod.WARN
