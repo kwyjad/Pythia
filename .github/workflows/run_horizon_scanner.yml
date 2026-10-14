@@ -348,6 +348,14 @@ jobs:
               --status success \
               --json databaseId,createdAt,event \
               --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Compact Resolver DB"' >>"${CANDIDATES_FILE}" || true
+            # Monthly billing reconciliation (the 1st) — writes
+            # billing_reconciliation and re-uploads canonical.
+            gh run list \
+              --workflow "Billing Reconciliation" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Billing Reconciliation"' >>"${CANDIDATES_FILE}" || true
             # Manual interpreter backfill/recovery — also re-uploads canonical.
             gh run list \
               --workflow "Interpreter Backfill" \

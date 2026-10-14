@@ -73,3 +73,17 @@ def test_parallel_requests_build_one_at_a_time() -> None:
     for t in threads:
         t.join()
     assert max(peak) == 1
+
+
+def test_billing_reconciliation_route(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect(str(tmp_path / "b.duckdb"))
+    monkeypatch.setattr(costs, "_con", lambda: con)
+    assert costs.costs_billing_reconciliation(months=12) == {"has_table": False, "rows": []}
+    from scripts.ci.billing_reconciliation import DDL
+
+    con.execute(DDL)
+    con.execute("INSERT INTO billing_reconciliation VALUES ('2026-09', 'openai', 10, 13, -3, -23.1, "
+                "'mismatch', 'off', TIMESTAMP '2026-10-01 05:47:00')")
+    out = costs.costs_billing_reconciliation(months=12)
+    assert out["has_table"] and out["rows"][0]["status"] == "mismatch"

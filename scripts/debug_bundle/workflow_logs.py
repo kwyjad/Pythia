@@ -251,6 +251,45 @@ def _discover_runs(
     return runs
 
 
+#: Files the current job tees its own steps' output into. The current run's
+#: own job log is not in the Actions archive while the job is running, so
+#: the Sibyl job's output reached no bundle until it was teed (Oct 2026).
+LOCAL_LOGS_ENV = "PYTHIA_BUNDLE_LOCAL_LOGS"
+DEFAULT_LOCAL_LOGS = "sibyl_stdout.txt,gate_out.txt,diagnostics/job_logs"
+
+
+def collect_local_logs(logs_dir: Path, index: dict[str, Any], paths: str | None = None) -> None:
+    """Copy this job's teed logs (files, or every *.txt/*.log in a directory)
+    into ``workflow_logs/current_job/``, redacted and cut like any log."""
+    raw = paths if paths is not None else os.getenv(LOCAL_LOGS_ENV, DEFAULT_LOCAL_LOGS)
+    files: list[Path] = []
+    for part in (raw or "").split(","):
+        p = Path(part.strip())
+        if not part.strip():
+            continue
+        if p.is_dir():
+            files += sorted(x for x in p.iterdir() if x.suffix in (".txt", ".log") and x.is_file())
+        elif p.is_file():
+            files.append(p)
+    if not files:
+        return
+    target = logs_dir / "current_job"
+    target.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+            original = len(text.encode("utf-8", errors="replace"))
+            text = truncate_middle(redact_text(text))
+            name = _slug(str(f).replace("/", "_")) + ".txt"
+            (target / name).write_text(text, encoding="utf-8")
+            index.setdefault("local_logs", []).append({
+                "source": str(f), "file": f"workflow_logs/current_job/{name}",
+                "bytes": (target / name).stat().st_size, "truncated": original > MAX_LOG_BYTES,
+            })
+        except Exception as exc:  # noqa: BLE001
+            index["problems"].append(f"local log {f} unreadable: {redact_text(str(exc))}")
+
+
 def collect(
     out_dir: Path,
     *,
@@ -269,6 +308,10 @@ def collect(
         "runs": [],
         "problems": [],
     }
+    try:
+        collect_local_logs(logs_dir, index)
+    except Exception as exc:  # noqa: BLE001
+        index["problems"].append(f"local log capture failed: {redact_text(str(exc))}")
     if not enabled:
         index["problems"].append("workflow log capture disabled (PYTHIA_BUNDLE_WORKFLOW_LOGS=0)")
         _write_index(logs_dir, index)

@@ -2755,37 +2755,23 @@ def _resolve_hs_run_id_for_forecast(
 
 
 def _aggregate_usage_by_phase(
-    con: duckdb.DuckDBPyConnection, run_id: str, hs_run_id: str | None
+    con: duckdb.DuckDBPyConnection, run_id: str, hs_run_id: str | None,
+    sibyl_run_id: str | None = None,
 ) -> dict[str, dict[str, float]]:
     """
     Aggregate token and cost usage by phase for a given forecast run.
 
-    We:
-      - Include all llm_calls rows where run_id = <run_id>
-      - Optionally include HS triage calls (phase='hs_triage'), even if their run_id is NULL
-        or not equal to <run_id>, by matching on phase alone.
+    Since Oct 2026 the rows are ``run_comparison.run_llm_where``: the
+    forecaster, HS and Sibyl runs by run_id and every row stamped with the
+    HS run. The cost of a row is its ``cost_usd`` column (NULL counts 0), the
+    figure run_comparison sums, so the summary total equals that table's
+    ``total_cost_usd``. Only a DB with no ``cost_usd`` column at all falls
+    back to the usage JSON and then to an estimate.
 
     We DO NOT join to questions here to avoid schema assumptions such as q.run_id.
     """
-    # Load all calls for this run (research_v2, spd_v2, scenario_v2, etc.)
-    params: list[Any] = [run_id]
-    if hs_run_id:
-        query = """
-            SELECT *
-            FROM llm_calls
-            WHERE run_id = ?
-               OR (phase = 'hs_triage' AND hs_run_id = ?)
-        """
-        params.append(hs_run_id)
-    else:
-        query = """
-            SELECT *
-            FROM llm_calls
-            WHERE run_id = ?
-               OR (phase = 'hs_triage')
-        """
-
-    rows = _fetch_llm_rows(con, query, params)
+    where, params = run_comparison.run_llm_where(hs_run_id, run_id, sibyl_run_id)
+    rows = _fetch_llm_rows(con, f"SELECT * FROM llm_calls WHERE {where}", params)
 
     out: dict[str, dict[str, float]] = {}
     for row in rows:
@@ -2815,10 +2801,11 @@ def _aggregate_usage_by_phase(
         phase_acc["prompt_tokens"] += prompt_tokens
         phase_acc["completion_tokens"] += completion_tokens
         phase_acc["total_tokens"] += total_tokens
-        # For backwards compatibility, accept either total_cost_usd or cost_usd
-        cost_val = float(usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0)
-        if cost_val == 0.0:
-            if total_tokens > 0:
+        if "cost_usd" in row:
+            cost_val = float(row.get("cost_usd") or 0.0)
+        else:
+            cost_val = float(usage.get("total_cost_usd") or usage.get("cost_usd") or 0.0)
+            if cost_val == 0.0 and total_tokens > 0:
                 model_id = row.get("model_id") or row.get("model") or ""
                 if model_id:
                     cost_val = estimate_cost_usd(str(model_id), usage)
@@ -3418,7 +3405,17 @@ def _load_bundle_data(
 
     # LLM call counts and latency
     llm_columns = _llm_calls_columns(con)
-    if forecaster_run_id:
+    data.sibyl_run = _sibyl_run_for_hs(con, data.hs_run_id)
+    sibyl_run_id = (data.sibyl_run or {}).get("sibyl_run_id")
+    if {"run_id", "hs_run_id"} <= set(llm_columns) and (forecaster_run_id or hs_run_id):
+        # One definition of "this run's calls", shared with run_comparison
+        # (Oct 2026): the forecaster, HS and Sibyl runs by run_id, and every
+        # row stamped with the HS run. Sibyl's 881 calls of 13 October were
+        # outside the old filter, so the summary total left out $60.
+        data.predicate, data.predicate_params = run_comparison.run_llm_where(
+            data.hs_run_id or hs_run_id, forecaster_run_id, sibyl_run_id)
+        data.predicate_strategy = "run_llm_where"
+    elif forecaster_run_id:
         data.predicate, data.predicate_params, data.predicate_strategy = _combined_llm_filter(
             llm_columns, forecaster_run_id, manifest_hs_run_id, data.question_ids,
             data.resolved_countries_sorted,
@@ -3454,7 +3451,9 @@ def _load_bundle_data(
     # Forecaster-specific data
     if forecaster_run_id:
         try:
-            data.usage_by_phase = _aggregate_usage_by_phase(con, forecaster_run_id, hs_run_id_for_costs)
+            data.usage_by_phase = _aggregate_usage_by_phase(
+                con, forecaster_run_id, hs_run_id_for_costs,
+                (data.sibyl_run or {}).get("sibyl_run_id"))
         except Exception as exc:
             data.usage_by_phase_warning = f"Error aggregating llm_calls usage: {exc}"
 
@@ -3530,7 +3529,6 @@ def _load_bundle_data(
     data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
     data.unparseable_forecast_calls = _unparseable_forecast_calls(con, data.forecaster_run_id)
     data.interpretation = _interpretation_for_run(con, data.forecaster_run_id)
-    data.sibyl_run = _sibyl_run_for_hs(con, data.hs_run_id)
     try:
         from pythia.tools.ace_pa_eligibility import latest_decision  # noqa: PLC0415
 
@@ -3947,7 +3945,15 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         n_alerts = sum(1 for e in data.crisiswatch_entries if e.get("alert_type"))
         months = sorted({(e.get("year"), e.get("month")) for e in data.crisiswatch_entries})
         latest = months[-1] if months else (None, None)
-        parts = [f"{n_entries} countries"]
+        # The table holds one row per country per EDITION, so its row count
+        # is not a country count ("933 countries" on 13 October 2026 was 933
+        # rows over twelve editions). The newest edition's countries are.
+        n_latest = len({
+            e.get("iso3") for e in data.crisiswatch_entries
+            if (e.get("year"), e.get("month")) == latest
+        }) if latest[0] else 0
+        parts = [f"{n_entries} rows over {len(months)} edition(s); "
+                 f"{n_latest} countries in the newest"]
         if n_with_arrow:
             parts.append(f"{n_deteriorated} deteriorated, {n_improved} improved")
         else:
@@ -3992,7 +3998,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
                 "python -m scripts.refresh_crisiswatch --source wayback locally and "
                 "store the JSON."
             )
-        elif n_entries < 10:
+        elif n_latest < 10:
             cw_status = "WARN"
             cw_detail = f"low coverage — {'; '.join(parts)}"
         elif n_with_arrow == 0:
@@ -4174,6 +4180,17 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         else:
             llm_status = "FAIL"
             llm_detail = f"{total_calls} calls, {total_errors} errors ({error_rate:.1%})"
+        if total_errors:
+            # Which phases and models the errors came from, so a Sibyl search
+            # that found nothing reads differently from a forecast that failed.
+            by_where: dict[str, int] = {}
+            for r in data.llm_call_counts:
+                n = int(r.get("n_errors") or 0)
+                if n:
+                    key = f"{r.get('phase') or '?'}/{r.get('model_id') or '?'}"
+                    by_where[key] = by_where.get(key, 0) + n
+            llm_detail += " [" + ", ".join(
+                f"{k}: {v}" for k, v in sorted(by_where.items(), key=lambda kv: -kv[1])) + "]"
     unparseable = data.unparseable_forecast_calls or []
     if unparseable:
         llm_detail += (
@@ -6911,6 +6928,7 @@ def emit_operational_files(
                 "batch_lifecycle": f"batch_lifecycle__{run}.json",
                 "prompt_cache_report": f"prompt_cache_report__{run}.csv",
                 "connector_freshness": f"connector_freshness__{run}.csv",
+                "crisiswatch_inject": f"crisiswatch_inject__{run}.json",
                 "model_completeness": f"model_completeness__{run}.csv",
                 "retry_report": f"retry_report__{run}.csv",
             },

@@ -133,6 +133,9 @@ on:
       - "scripts/ci/tests/test_stage_health.py"
       - "scripts/ci/provider_preflight.py"
       - "scripts/ci/tests/test_provider_preflight.py"
+      - "scripts/ci/billing_reconciliation.py"
+      - "scripts/ci/tests/test_billing_reconciliation.py"
+      - ".github/workflows/billing_reconciliation.yml"
       - "scripts/ci/tests/test_advice_arm_text.py"
       - "scripts/ci/advice_arm_text.py"
       - "scripts/ci/build_release_db.py"
@@ -455,6 +458,7 @@ jobs:
             scripts/ci/tests/test_batch_canary.py \
             scripts/ci/tests/test_stage_health.py \
             scripts/ci/tests/test_provider_preflight.py \
+            scripts/ci/tests/test_billing_reconciliation.py \
             scripts/ci/tests/test_advice_arm_text.py \
             scripts/ci/tests/test_build_release_db.py \
             scripts/ci/tests/test_db_table_sizes.py \
@@ -659,6 +663,7 @@ jobs:
             forecaster/tests/test_debug_bundle_recalibration.py \
             forecaster/tests/test_debug_bundle_defects.py \
             forecaster/tests/test_debug_bundle_operational.py \
+            forecaster/tests/test_debug_bundle_costs.py \
             scripts/ci/tests/test_stage_context.py
 
       - name: Run resolver/tests suites that guard forecaster + pythia code

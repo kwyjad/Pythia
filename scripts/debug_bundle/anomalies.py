@@ -177,12 +177,22 @@ def build(
     cw = crisiswatch or {}
     if cw.get("available"):
         if int(cw.get("n_editions") or 0) > 1 and cw.get("edition_span"):
+            # Several editions in one table is the normal state (a country
+            # absent from the newest is described from its last entry). It
+            # is worth a WARN only when a month is missing that no
+            # registered known gap explains; with every gap registered it
+            # is INFO (Oct 2026: twelve editions, May 2026 the one gap).
+            unexplained = list(cw.get("editions_missing_last_12") or [])
+            known = list(cw.get("editions_known_gaps") or [])
+            note = (f"; the only gaps are registered: {', '.join(known)}" if known and not unexplained
+                    else "")
             out.append(
                 _entry(
-                    WARN,
+                    WARN if unexplained else INFO,
                     "crisiswatch",
-                    f"the table holds {cw['n_editions']} editions spanning {cw['edition_span']} — "
-                    "per-country rows are a mix of editions, and the months between never landed",
+                    f"the table holds {cw['n_editions']} editions spanning {cw['edition_span']}; "
+                    "per-country rows are a mix of editions"
+                    + (", and the months between never landed" if unexplained else note),
                     f("connector_freshness", "connector_freshness.csv"),
                 )
             )
@@ -210,6 +220,18 @@ def build(
                     "described from an older entry, so a gap changes what the prompt says",
                     f("connector_freshness", "connector_freshness.csv"),
                     editions_missing=gaps,
+                )
+            )
+        older = list(cw.get("ace_countries_older_than_expected") or [])
+        if older:
+            out.append(
+                _entry(
+                    WARN,
+                    "crisiswatch",
+                    f"{len(older)} ACE question countries read a CrisisWatch entry older than the "
+                    f"{cw.get('expected_edition')} edition: {', '.join(older[:12])}"
+                    + (" ..." if len(older) > 12 else ""),
+                    f("crisiswatch_inject", "crisiswatch_inject.json"),
                 )
             )
         missing = int(cw.get("ace_countries_without_crisiswatch_row") or 0)

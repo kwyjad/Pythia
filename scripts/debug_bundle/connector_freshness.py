@@ -37,8 +37,10 @@ from typing import Any
 SOURCES: tuple[tuple[str, str, str, str, str, int, int, str], ...] = (
     ("ACLED fatalities", "acled_monthly_fatalities", "month", "", "iso3", 45, 75,
      "none"),
-    ("IDMC displacement", "facts_deltas", "as_of_date",
-     "WHERE metric = 'new_displacements'", "iso3", 60, 120, "none"),
+    # IDMC conflict rows fill `as_of` and leave `as_of_date` empty, so the
+    # newest observation is read from either (a "|" list is COALESCEd).
+    ("IDMC displacement", "facts_deltas", "as_of_date|as_of",
+     "WHERE metric = 'new_displacements' AND hazard_code = 'ACE'", "iso3", 60, 120, "none"),
     ("IFRC PA", "facts_resolved", "as_of_date",
      "WHERE UPPER(publisher) = 'IFRC'", "iso3", 60, 120, "none"),
     ("GDACS", "facts_resolved", "as_of_date",
@@ -56,6 +58,12 @@ SOURCES: tuple[tuple[str, str, str, str, str, int, int, str], ...] = (
     ("ACAPS Risk Radar", "acaps_risk_radar", "fetched_at", "", "iso3", 60, 120, "none"),
     ("ACAPS Daily Monitoring", "acaps_daily_monitoring", "entry_date", "", "iso3", 30, 60, "none"),
     ("ACAPS Humanitarian Access", "acaps_humanitarian_access", "snapshot_date", "", "iso3", 90, 180, "none"),
+    # The ACE/PA ladder's rungs 2 and 3 (Oct 2026): an extracted OCHA/UN
+    # figure per country-month, and the DTM stock-increase lower bound.
+    ("Conflict displacement, extracted (ladder rung 2)", "conflict_displacement_candidates", "ym",
+     "WHERE preference_rank = 0", "iso3", 60, 120, "none"),
+    ("DTM conflict lower bound (ladder rung 3)", "dtm_conflict_lower_bounds", "ym", "", "iso3",
+     90, 180, "none"),
     ("ACLED political events", "acled_political_events", "event_date", "", "iso3", 30, 60, "none"),
     ("GDELT", "gdelt_conflict_indicators", "event_date", "", "iso3", 14, 30, "none"),
     ("HDX Signals", "hdx_signals", "signal_date", "", "iso3", 60, 120, "none"),
@@ -104,6 +112,13 @@ def _to_date(value: Any) -> date | None:
     # under-states the age rather than over-stating it.
     if len(text) == 7 and text[4] == "-":
         text = text + "-01"
+    # ACAPS writes its snapshot month as "Sep2026"; read as an ISO date it
+    # was unparseable and INFORM Severity read "unknown" (Oct 2026).
+    for fmt in ("%b%Y", "%B%Y", "%b %Y", "%B %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
     # Several of these columns are VARCHAR carrying an ISO timestamp with a
     # zone (reliefweb_reports.published_date, the ACAPS fetched_at fields),
     # so try the full parse first and fall back to the leading date.
@@ -126,6 +141,12 @@ def _pick_observation_column(con, table: str, preferred: str) -> str | None:
     """
 
     cols = _columns(con, table)
+    if preferred and "|" in preferred:
+        present = [c for c in preferred.split("|") if c in cols]
+        if len(present) > 1:
+            return "COALESCE(" + ", ".join(present) + ")"
+        if present:
+            return present[0]
     if preferred and preferred in cols:
         return preferred
     # `as_of` is here because resolver/db/schema.sql creates facts_deltas
@@ -151,6 +172,23 @@ def _pick_observation_column(con, table: str, preferred: str) -> str | None:
 
 
 _FETCH_COLUMNS = {"created_at", "fetched_at", "retrieved_at", "updated_at", "timestamp"}
+_MAX_DISTINCT = 20000
+
+
+def _max_observation(con, table: str, column: str, where: str) -> date | None:
+    """The newest observation, parsed value by value.
+
+    A SQL MAX over a text column compares strings: "Oct2026" sorts before
+    "Sep2026". So the distinct values are parsed and the newest DATE wins;
+    a column with more distinct values than ``_MAX_DISTINCT`` falls back to
+    MAX (an ISO column, where string order is date order).
+    """
+    n = con.execute(f"SELECT COUNT(DISTINCT {column}) FROM {table} {where}").fetchone()[0]
+    if n and n <= _MAX_DISTINCT:
+        values = con.execute(f"SELECT DISTINCT {column} FROM {table} {where}").fetchall()
+        parsed = [d for d in (_to_date(v[0]) for v in values) if d is not None]
+        return max(parsed) if parsed else None
+    return _to_date(con.execute(f"SELECT MAX({column}) FROM {table} {where}").fetchone()[0])
 
 
 def collect(
@@ -210,8 +248,7 @@ def collect(
                     (row["note"] + "; ") if row["note"] else ""
                 ) + f"age measured from {column} (a fetch column — no observation date on this table)"
             try:
-                value = con.execute(f"SELECT MAX({column}) FROM {table} {where}").fetchone()[0]
-                observed = _to_date(value)
+                observed = _max_observation(con, table, column, where)
                 if observed is not None:
                     row["max_data_timestamp"] = observed.isoformat()
                     row["age_days_at_run_start"] = (today - observed).days
@@ -413,6 +450,26 @@ def crisiswatch_detail(
     out["ace_countries_forecast"] = len(ace_countries)
     out["ace_countries_without_crisiswatch_row"] = len(missing)
     out["ace_countries_missing_iso3s"] = missing
+    # The edition each ACE country's prompt actually read (its newest row),
+    # and which of them are older than the edition this run expects: the
+    # prompt then describes the country from an older entry (Oct 2026).
+    newest_by_iso: dict[str, tuple[int, int]] = {}
+    for r in rows:
+        if r.get("iso3") and r.get("year") and r.get("month"):
+            key = (int(r["year"]), int(r["month"]))
+            if key > newest_by_iso.get(r["iso3"], (0, 0)):
+                newest_by_iso[r["iso3"]] = key
+    per_country = []
+    older = []
+    for iso in ace_countries:
+        ed = newest_by_iso.get(iso)
+        label = f"{ed[0]}-{ed[1]:02d}" if ed else None
+        is_older = bool(ed) and ed < expected
+        per_country.append({"iso3": iso, "edition": label, "older_than_expected": is_older})
+        if is_older:
+            older.append(f"{iso} ({label})")
+    out["ace_country_editions"] = per_country
+    out["ace_countries_older_than_expected"] = older
     out["n_ace_questions_without_crisiswatch"] = sum(
         1
         for q in (questions or [])
