@@ -174,12 +174,32 @@ jobs:
       # class (from 8 notes) lessons the next run shows in the track-record
       # arm. One model at medium effort, capped at SIBYL_POSTMORTEM_CAP_USD
       # ($5). Uses the existing ANTHROPIC_API_KEY secret. Non-fatal.
+      # Anthropic preflight (Oct 2026): the post-mortems and the scored
+      # interpreter report are written by Claude. When the account is
+      # usage-limited or the key is refused, neither starts. Non-fatal.
+      - name: Provider preflight
+        id: preflight
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p diagnostics
+          python -m scripts.ci.provider_preflight --providers anthropic \
+            --out diagnostics/provider_preflight.json
+
       - name: Sibyl post-mortems
         continue-on-error: true
         env:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_OK: ${{ steps.preflight.outputs.anthropic_ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
         run: |
+          if [ "${ANTHROPIC_OK:-}" = "false" ]; then
+            echo "::error title=Post-mortems not started::Provider preflight: ${PREFLIGHT_REASON}."
+            exit 0
+          fi
           python -m sibyl.postmortem --db-url "${RESOLVER_DB_URL}"
 
       # Per-family recalibration factors, read by the forecaster when
@@ -234,8 +254,16 @@ jobs:
         continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_OK: ${{ steps.preflight.outputs.anthropic_ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
         run: |
           set +e
+          if [ "${ANTHROPIC_OK:-}" = "false" ]; then
+            echo "::error title=Interpreter not started::Provider preflight: ${PREFLIGHT_REASON}. No scored report this round."
+            echo "### Interpreter (scored) not started" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Provider preflight: ${PREFLIGHT_REASON}." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           PACK=$(find ai_bundle -maxdepth 1 -name 'scored_forecast_analysis__*.zip' 2>/dev/null | sort | tail -n 1)
           if [ -z "${PACK}" ]; then
             echo "::warning::No scored bundle found — skipping interpreter (scored)."

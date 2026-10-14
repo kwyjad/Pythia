@@ -146,6 +146,25 @@ jobs:
       # anyway (for testing Sibyl itself).
       # stage_health already reports available: false when no Sibyl run
       # persisted, so nothing downstream needs changing.
+      # One minimal call per provider (Oct 2026). On 13 October 2026
+      # Anthropic answered every call "You have reached your specified API
+      # usage limits" and Sibyl and the interpreter ran anyway, failing call
+      # by call. When Anthropic is usage-limited or its key is refused,
+      # neither starts, and the step summary says why. Non-fatal.
+      - name: Provider preflight
+        id: preflight
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p diagnostics
+          python -m scripts.ci.provider_preflight \
+            --providers anthropic,openai \
+            --out diagnostics/provider_preflight.json
+
       - name: Gate on eligible questions with volatility scores
         id: gate
         continue-on-error: true
@@ -154,8 +173,17 @@ jobs:
           SKIP_SIBYL: ${{ inputs.skip_sibyl }}
           SIBYL_ON_TEST_RUNS: ${{ vars.PYTHIA_SIBYL_ON_TEST_RUNS }}
           SIBYL_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
+          ANTHROPIC_OK: ${{ steps.preflight.outputs.anthropic_ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
         run: |
           set -euo pipefail
+          if [ "${ANTHROPIC_OK:-}" = "false" ]; then
+            echo "::error title=Sibyl not started::Provider preflight: ${PREFLIGHT_REASON}. Sibyl runs on Claude and would fail on every call. Bundles, canonical upload and publish dispatch still run."
+            echo "### Sibyl not started" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Provider preflight: ${PREFLIGHT_REASON}." >> "${GITHUB_STEP_SUMMARY}"
+            echo "eligible=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # A boolean workflow_dispatch input arrives as the STRING "false"
           # over the REST API, so compare against the literal rather than
           # testing truthiness (the pythia_pipeline_stage.yml lesson).
@@ -370,8 +398,16 @@ jobs:
         continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_OK: ${{ steps.preflight.outputs.anthropic_ok }}
+          PREFLIGHT_REASON: ${{ steps.preflight.outputs.reason }}
         run: |
           set +e
+          if [ "${ANTHROPIC_OK:-}" = "false" ]; then
+            echo "::error title=Interpreter not started::Provider preflight: ${PREFLIGHT_REASON}. The report is written by Claude; no report this run."
+            echo "### Interpreter not started" >> "${GITHUB_STEP_SUMMARY}"
+            echo "Provider preflight: ${PREFLIGHT_REASON}." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
           PACK=$(find ai_bundle -maxdepth 1 -name 'current_run_analysis__*.zip' 2>/dev/null | sort | tail -n 1)
           if [ -z "${PACK}" ]; then
             echo "::warning::No current-run bundle found — skipping interpreter."
@@ -687,6 +723,7 @@ jobs:
           name: pythia-stage-diagnostics-sibyl
           path: |
             diagnostics/stage_health__sibyl.json
+            diagnostics/provider_preflight.json
             sibyl_stdout.txt
           if-no-files-found: warn
           retention-days: 90

@@ -77,6 +77,9 @@ def build_context(
         "hs_run_id": hs_run_id or None,
         "forecaster_run_id": forecaster_run_id or None,
         "stage_conclusion": conclusion or None,
+        # Providers this stage ran without (the first stage's preflight
+        # blocks a usage-limited provider; the poller carries the list).
+        "block_providers": (env.get("PYTHIA_BLOCK_PROVIDERS") or "").strip() or None,
         "db_signature_before": _load_json(signature_before),
         "db_signature_after": _load_json(signature_after),
     }

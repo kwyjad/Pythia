@@ -108,6 +108,69 @@ def _is_billing_error(provider: str, error_text: str, status_code: int | None = 
     return False
 
 
+#: Error kinds classify_provider_error returns.
+PROVIDER_ERROR_USAGE_LIMIT = "usage_limit"
+PROVIDER_ERROR_INVALID_KEY = "invalid_key"
+PROVIDER_ERROR_BILLING = "billing"
+#: Kinds no amount of waiting inside a run will clear.
+TERMINAL_PROVIDER_ERRORS = frozenset({PROVIDER_ERROR_USAGE_LIMIT, PROVIDER_ERROR_INVALID_KEY})
+
+_USAGE_LIMIT_PHRASES = (
+    "api usage limit",       # Anthropic: "You have reached your specified API usage limits."
+    "usage limits",
+    "regain access on",
+    "spend limit",
+    "spending limit",
+    "spending cap",
+)
+_INVALID_KEY_PHRASES = (
+    "invalid x-api-key",
+    "invalid api key",
+    "incorrect api key",
+    "api key not valid",
+    "api_key_invalid",
+    "invalid_api_key",
+    "authentication_error",
+)
+
+
+def classify_provider_error(provider: str, error_text: str, status_code: int | None = None) -> str | None:
+    """What kind of account-level refusal *error_text* is, or None.
+
+    ``usage_limit`` and ``invalid_key`` are terminal for a run: a pause
+    cannot clear them. ``billing`` (credit or quota exhausted) may clear on
+    an auto-recharge, so the credit-retry pause still applies to it.
+    On 13 October 2026 Anthropic answered "HTTP 400: You have reached your
+    specified API usage limits. You will regain access on 2026-11-01 at
+    00:00 UTC." for the rest of the month.
+    """
+    if not error_text:
+        return None
+    lower = error_text.lower()
+    sc = status_code if status_code is not None else _extract_status_code(error_text)
+    if any(ph in lower for ph in _USAGE_LIMIT_PHRASES) and "rate limit" not in lower:
+        return PROVIDER_ERROR_USAGE_LIMIT
+    if sc == 401 or any(ph in lower for ph in _INVALID_KEY_PHRASES):
+        return PROVIDER_ERROR_INVALID_KEY
+    if _is_billing_error(provider, error_text, sc):
+        return PROVIDER_ERROR_BILLING
+    return None
+
+
+#: provider -> (kind, error text) for a terminal refusal seen in this process.
+#: Every later call to that provider returns at once with the same error.
+_TERMINAL_PROVIDERS: dict[str, tuple[str, str]] = {}
+
+
+def terminal_provider_error(provider: str) -> tuple[str, str] | None:
+    return _TERMINAL_PROVIDERS.get((provider or "").lower())
+
+
+def reset_terminal_providers() -> None:
+    """For tests."""
+    _TERMINAL_PROVIDERS.clear()
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -1893,6 +1956,13 @@ async def call_chat_ms(
                 run_key,
             )
         state["cooldown_until_ts"] = 0.0
+    terminal = terminal_provider_error(ms.provider)
+    if terminal is not None:
+        usage = usage_to_dict(None)
+        usage["terminal_provider_error"] = terminal[0]
+        usage["attempts_used"] = 0
+        usage["backoffs_sec"] = []
+        return "", usage, f"provider {ms.provider} skipped ({terminal[0]} earlier in this run): {terminal[1][:200]}"
     if is_provider_disabled_for_run(ms.provider, run_key):
         LOGGER.info(
             "Provider cooldown active; skipping call: provider=%s run_id=%s",
@@ -1968,6 +2038,7 @@ async def call_chat_ms(
     credit_retries_used = 0
     credit_retry_pauses: list[float] = []
     billing_error_detected = False
+    terminal_error_kind: str | None = None
     # Token spend of attempts discarded by a retry — previously only the
     # FINAL attempt's usage was costed, so N−1 retried calls were billed by
     # the provider but never reached the ledger.
@@ -2063,7 +2134,20 @@ async def call_chat_ms(
         # Check for billing error
         err_text = error or (result.error if result else "") or ""
         err_status = _extract_status_code(err_text)
-        if _is_billing_error(ms.provider, err_text, err_status):
+        err_kind = classify_provider_error(ms.provider, err_text, err_status)
+        if err_kind in TERMINAL_PROVIDER_ERRORS:
+            # A usage limit or a refused key does not clear in minutes: no
+            # credit-retry pause, and every later call to this provider in
+            # this process returns at once (2026-10-13: Anthropic's limit
+            # held until 2026-11-01).
+            _TERMINAL_PROVIDERS[(ms.provider or "").lower()] = (err_kind, err_text[:500])
+            terminal_error_kind = err_kind
+            LOGGER.error(
+                "[PROVIDER] %s refused with %s; no retry, provider skipped for the rest of the run: %s",
+                ms.provider, err_kind, err_text[:200],
+            )
+            break
+        if err_kind == PROVIDER_ERROR_BILLING:
             billing_error_detected = True
             if credit_attempt < credit_max_retries:
                 credit_retries_used += 1
@@ -2104,6 +2188,8 @@ async def call_chat_ms(
             + retried_prompt_tokens
             + retried_completion_tokens
         )
+    if terminal_error_kind:
+        usage["terminal_provider_error"] = terminal_error_kind
     if credit_retries_used > 0 or billing_error_detected:
         usage["credit_retries_used"] = credit_retries_used
         usage["credit_retry_pauses_sec"] = credit_retry_pauses

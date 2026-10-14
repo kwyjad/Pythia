@@ -131,6 +131,8 @@ on:
       - "scripts/ci/stage_health.py"
       - "scripts/ci/tests/test_batch_economics.py"
       - "scripts/ci/tests/test_stage_health.py"
+      - "scripts/ci/provider_preflight.py"
+      - "scripts/ci/tests/test_provider_preflight.py"
       - "scripts/ci/tests/test_advice_arm_text.py"
       - "scripts/ci/advice_arm_text.py"
       - "scripts/ci/build_release_db.py"
@@ -452,6 +454,7 @@ jobs:
             scripts/ci/tests/test_batch_economics.py \
             scripts/ci/tests/test_batch_canary.py \
             scripts/ci/tests/test_stage_health.py \
+            scripts/ci/tests/test_provider_preflight.py \
             scripts/ci/tests/test_advice_arm_text.py \
             scripts/ci/tests/test_build_release_db.py \
             scripts/ci/tests/test_db_table_sizes.py \
