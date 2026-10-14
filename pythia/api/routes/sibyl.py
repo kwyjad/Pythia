@@ -89,6 +89,13 @@ def _evidence_ok_col(con) -> str:
     return "CAST(NULL AS BOOLEAN) AS evidence_ok"
 
 
+def _single_trial_col(con) -> str:
+    """``single_trial`` (2026-10-14) when the column exists, else NULL."""
+    if _table_has_columns(con, "sibyl_forecasts", ["single_trial"]):
+        return "single_trial"
+    return "CAST(NULL AS BOOLEAN) AS single_trial"
+
+
 def _latest_sibyl_run_id(con, include_test: bool) -> Optional[str]:
     # Pre-Sibyl / partial-schema DBs may have sibyl_forecasts without
     # sibyl_runs (or neither); this module's contract is to never 500 there.
@@ -164,7 +171,7 @@ def sibyl_summary(
                        skip_reason, k, cost_usd, opus_cost_usd, brave_cost_usd,
                        volatility_score, js_divergence_vs_standard,
                        js_divergence_inter_trial, {_selection_pass_col(con)},
-                       {_evidence_ok_col(con)}
+                       {_evidence_ok_col(con)}, {_single_trial_col(con)}
                 FROM sibyl_forecasts
                 WHERE sibyl_run_id = ?
                 ORDER BY volatility_score DESC NULLS LAST, question_id
@@ -298,7 +305,7 @@ def sibyl_questions(
                    js_divergence_vs_standard, js_divergence_inter_trial,
                    cost_usd, opus_cost_usd, brave_cost_usd,
                    pooled_quantiles_json, {_selection_pass_col(con)},
-                   {_evidence_ok_col(con)}
+                   {_evidence_ok_col(con)}, {_single_trial_col(con)}
             FROM sibyl_forecasts
             WHERE sibyl_run_id = ?
             ORDER BY js_divergence_vs_standard DESC NULLS LAST, question_id
@@ -405,9 +412,24 @@ def sibyl_question_detail(
         if rec.get("run_id")
         else {"model_name": None, "by_month": {}}
     )
+    # A forecast from an earlier forecaster run than the question's run of
+    # record is labelled as carried forward (2026-10-14).
+    carried = None
+    try:
+        from pythia.tools.forecast_of_record import record_runs  # noqa: PLC0415
+        from sibyl.labels import carried_forward  # noqa: PLC0415
+
+        current = record_runs(con, include_test=include_test).get(question_id)
+        carried = carried_forward(
+            sibyl_run_id=rec.get("sibyl_run_id"), sibyl_forecast_run_id=rec.get("run_id"),
+            current_run_id=current, sibyl_created_at=rec.get("created_at"),
+        )
+    except Exception:  # noqa: BLE001 - a label never fails the page
+        carried = None
     return {
         "record": rec,
         "question": question,
         "bucket_labels": _bucket_labels(con, metric),
         "standard_spd": standard,
+        "carried_forward": carried,
     }

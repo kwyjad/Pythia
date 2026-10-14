@@ -30,7 +30,7 @@ import sibyl.run as sibyl_run
 from sibyl import resolver_reading as rr
 from sibyl.belief_state import empty_plan, initial_belief
 from sibyl.select_questions import SibylQuestion
-from tests.sibyl_test_utils import HS_RUN_ID, Q1, stub_reference
+from tests.sibyl_test_utils import HS_RUN_ID, Q1, as_of_2026_10_14, stub_reference
 from tests.test_sibyl_lanes import LOW, _lane_model, run_env  # noqa: F401
 
 TODAY = date(2026, 10, 9)
@@ -258,7 +258,7 @@ def test_no_reading_leaves_the_prompt_byte_identical():
     old = _old_agent()
     q, ref, start, kw = _prompt_args()
     assert sibyl_agent.build_step_prompt(q, ref, start, **kw) == \
-        old.build_step_prompt(q, ref, start, **kw)
+        as_of_2026_10_14(old.build_step_prompt(q, ref, start, **kw))
 
 
 def test_the_reading_sits_after_the_reference_and_before_the_track_record():

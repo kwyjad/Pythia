@@ -65,15 +65,18 @@ EFFORT = _env_str("SIBYL_EFFORT", "high").strip().lower()
 SIBYL_MODEL_NAME = "sibyl"
 
 # --- Trials ----------------------------------------------------------------
-# Independent agentic trials per question. Reduced from the literature's 5-6
-# sweet spot for budget - the first three trials capture most of the
-# variance-reduction benefit.
-K = _env_int("SIBYL_K", 3)
-# Extra trials (Oct 2026, sibyl/run.py): up to K_MAX - K more trials, on
-# lanes D and E, when the production trials disagree (largest pairwise
-# month-1 JSD above EXTRA_TRIALS_JSD) or their pool departs far from the
-# reference (month-1 JSD above EXTRA_TRIALS_DEPARTURE_JSD).
-K_MAX = _env_int("SIBYL_K_MAX", 5)
+# Independent agentic trials per question. Since 2026-10-14 two: the first
+# (lane A) is shown the structured-data pack and the second (lane B) is not,
+# so the pack is compared within each question (sibyl/pack.py). On 13 October
+# 2026 three trials barely differed (inter-trial month-1 JSD 0.000 to 0.005
+# on every question) while costing $5.04 a question.
+K = _env_int("SIBYL_K", 2)
+# Extra trials (sibyl/run.py): up to K_MAX - K more trials when the production
+# trials disagree (largest pairwise month-1 JSD above EXTRA_TRIALS_JSD) or
+# their pool departs far from the reference (EXTRA_TRIALS_DEPARTURE_JSD). At
+# K_MAX = K there are none, except the reconciler (lane R), which still runs
+# on disagreement. On 13 October's numbers it would never have fired.
+K_MAX = _env_int("SIBYL_K_MAX", 2)
 EXTRA_TRIALS_JSD = _env_float("SIBYL_EXTRA_TRIALS_JSD", 0.10)
 EXTRA_TRIALS_DEPARTURE_JSD = _env_float("SIBYL_EXTRA_TRIALS_DEPARTURE_JSD", 0.25)
 # Trials of one question run on this many worker threads. Only the main
@@ -87,6 +90,8 @@ RECONCILE_BRIEF_MAX_CHARS = _env_int("SIBYL_RECONCILE_BRIEF_MAX_CHARS", 12_000)
 # Outlier guard: a trial whose month-1 median is more than this many orders
 # of magnitude (log10 of 1 + value) from the median of the others' medians
 # is left out of the pool, if two trials remain. It stays in trials_json.
+# It needs three valid trials to act, so at K=2 it is inert (unless the
+# reconciler ran); the code is kept.
 OUTLIER_LOG10 = _env_float("SIBYL_OUTLIER_LOG10", 1.5)
 
 # Agent steps per trial. Since Oct 2026 a step may carry up to
@@ -133,33 +138,56 @@ ADVICE_EXPERIMENT_SHARE = _env_float("SIBYL_ADVICE_EXPERIMENT_SHARE", 0.5)
 # --- Budget ------------------------------------------------------------------
 # Hard run cut-off: stop STARTING new questions/trials once cumulative run
 # cost reaches this. The in-flight unit runs to completion, so realized
-# spend can exceed the cap by roughly one question's cost. At 25 questions a
-# cycle costs ~$14 at the October 2026 rate ($0.55 a question, Opus 5.5) and
-# ~$35 at the August rate (~$1.40 a question, Opus 5), so $60 is a tail
-# backstop that a dear month does not reach.
-RUN_HARD_CAP_USD = _env_float("SIBYL_RUN_HARD_CAP_USD", 60.0)
+# spend can exceed the cap by roughly one question's cost.
+#
+# Measured cost (2026-10-14, sibyl/cost_projection.py over one recorded
+# eight-step trial of the 13 October run, priced from model_costs.json):
+# about $0.60 a trial and $1.30 a picked question at K=2 (a step costs about
+# $0.07, of which ~$0.045 is output: Opus 5.5 thinks ~1,200 tokens and
+# answers ~900 every step). A control runs one trial, about $0.65. So 13
+# picks and 2 controls come to about $18.50 a run. The same steps in the
+# transcript shape used until 2026-10-14 project to $4.11 a question at K=3
+# (13 October measured $5.04 with extra trials). The owner's estimate of
+# $0.85 a question assumed far fewer output tokens than Opus 5.5 spends.
+RUN_HARD_CAP_USD = _env_float("SIBYL_RUN_HARD_CAP_USD", 25.0)
 
-# Optional secondary per-question guard; None/0 = unset.
-_bpq = _env_float("SIBYL_BUDGET_USD_PER_QUESTION", 0.0)
+# Secondary per-question guard (checked before each batch of trials).
+_bpq = _env_float("SIBYL_BUDGET_USD_PER_QUESTION", 2.50)
 BUDGET_USD_PER_QUESTION: float | None = _bpq if _bpq > 0 else None
+
+# The cost per picked question the run is held to (2026-10-14). The CI cost
+# gate (tests/test_sibyl_cost_gate.py) fails when the offline projection
+# exceeds it by more than 50%. At run time, from the third question on, a
+# realised cost per question (a one-trial control counted as 1/K) above
+# COST_GATE_WARN_RATIO x this raises a workflow warning and a bundle
+# anomaly, and above COST_GATE_STOP_RATIO x this no new question starts
+# (skip reason "cost_per_question_gate"). Re-measure with
+# ``python -m sibyl.cost_projection`` whenever the agent or the prompt changes.
+STATED_COST_PER_QUESTION_USD = _env_float("SIBYL_STATED_COST_PER_QUESTION_USD", 1.40)
+COST_GATE_AFTER_QUESTIONS = _env_int("SIBYL_COST_GATE_AFTER_QUESTIONS", 3)
+COST_GATE_WARN_RATIO = _env_float("SIBYL_COST_GATE_WARN_RATIO", 1.5)
+COST_GATE_STOP_RATIO = _env_float("SIBYL_COST_GATE_STOP_RATIO", 2.5)
 
 # Wall-clock limit on the trial loop, in minutes. Same behaviour as the budget
 # cap: past it no new question starts, the question in flight finishes, and
 # the rest are stored as skipped ("run time cap"). The Sibyl job is the forecast
-# chain's ONLY release trigger and times out at 330 minutes; 25 questions at
-# August's pace (~8.4 min a question) take about 210, and the interpreter,
+# chain's ONLY release trigger and times out at 330 minutes; the interpreter,
 # bundles and canonical upload still have to run after the loop. 0 = no limit.
 MAX_RUNTIME_MIN = _env_float("SIBYL_MAX_RUNTIME_MIN", 180.0)
 
 # --- Question selection ------------------------------------------------------
-# Floor-then-fill (sibyl/select_questions.py): each hazard first takes its
-# MIN_PER_HAZARD most volatile questions, then the remaining slots go to the
-# most volatile candidates whose hazard is under MAX_PER_HAZARD.
-# N_QUESTIONS is the whole run: N_QUESTIONS - N_CONTROL questions chosen by
-# floor-then-fill, plus N_CONTROL controls.
-N_QUESTIONS = _env_int("SIBYL_N_QUESTIONS", 25)
-MIN_PER_HAZARD = _env_int("SIBYL_MIN_PER_HAZARD", 3)
-MAX_PER_HAZARD = _env_int("SIBYL_MAX_PER_HAZARD", 10)
+# Since 2026-10-14 (sibyl/select_questions.py::select_on_rc): N_QUESTIONS is
+# the whole run, N_QUESTIONS - N_CONTROL picks plus N_CONTROL controls. A
+# pick must carry a regime-change flag (hs_triage.regime_change_level at
+# least MIN_RC_LEVEL, and at least HAZARD_MIN_RC_LEVEL for a hazard named
+# there). Picks are ranked RC level 2 and 3 first, then level 1, each by
+# falling volatility. Each hazard first takes its FLOOR, then the rest go by
+# rank to hazards under their CAP; slots no hazard could fill go to the
+# hazards in OVERFLOW_ORDER, beyond their cap. Run order: controls, floor
+# picks, fill picks, so a budget cut removes fill picks first and never the
+# controls (owner decision).
+N_QUESTIONS = _env_int("SIBYL_N_QUESTIONS", 15)
+MIN_RC_LEVEL = _env_int("SIBYL_MIN_RC_LEVEL", 1)
 
 
 def _parse_overrides(raw: str) -> dict:
@@ -175,17 +203,31 @@ def _parse_overrides(raw: str) -> dict:
     return out
 
 
-# Per-hazard caps that differ from MAX_PER_HAZARD (owner decision, Oct 2026:
-# flood and cyclone are held at their floor of 3; ACE and DR keep 10).
+FLOOR_PER_HAZARD = _parse_overrides(_env_str("SIBYL_FLOOR_PER_HAZARD", "ACE:4,DR:2,FL:1,TC:0"))
+CAP_PER_HAZARD = _parse_overrides(_env_str("SIBYL_CAP_PER_HAZARD", "ACE:7,DR:3,FL:2,TC:1"))
+HAZARD_MIN_RC_LEVEL = _parse_overrides(_env_str("SIBYL_HAZARD_MIN_RC_LEVEL", "TC:2"))
+OVERFLOW_ORDER = tuple(
+    h.strip().upper() for h in _env_str("SIBYL_OVERFLOW_ORDER", "ACE,DR").split(",") if h.strip()
+)
+# Controls: questions with no RC flag (level 0, or no triage row), drawn by a
+# hash of the run and the question id, from these classes. A control runs
+# one trial on the no-pack lane, needs one valid trial and gets no extras.
+N_CONTROL = _env_int("SIBYL_N_CONTROL", 2)
+CONTROL_CLASSES = tuple(
+    tuple(c.strip().upper().split("/", 1))
+    for c in _env_str("SIBYL_CONTROL_CLASSES", "ACE/FATALITIES").split(",")
+    if "/" in c
+)
+
+# The floor-then-fill rule of 2 to 13 October 2026 (25 questions, a floor of
+# 3 per hazard, FL and TC held at 3). Kept as a pure function for replay and
+# for SIBYL_SELECTION_RULE=floor_then_fill; not the default.
+SELECTION_RULE = _env_str("SIBYL_SELECTION_RULE", "rc_focus").strip().lower()
+MIN_PER_HAZARD = _env_int("SIBYL_MIN_PER_HAZARD", 3)
+MAX_PER_HAZARD = _env_int("SIBYL_MAX_PER_HAZARD", 10)
 MAX_PER_HAZARD_OVERRIDES = _parse_overrides(
     _env_str("SIBYL_MAX_PER_HAZARD_OVERRIDES", "FL:3,TC:3")
 )
-# Controls (Oct 2026): questions with no RC flag (level 0 or null) from
-# ACE/FATALITIES and DR/PHASE3PLUS_IN_NEED, drawn by a hash of the run and the
-# question id, three conflict and two drought at the default. A control runs
-# one trial on lane A, needs one valid trial and gets no extra trials: it is
-# what Sibyl does where the RC signal says nothing is moving.
-N_CONTROL = _env_int("SIBYL_N_CONTROL", 5)
 
 # Numeric affected/fatalities magnitude questions only (spec scope:
 # "ACE fatalities; DR/FL/TC affected"). DR "affected" is represented as
@@ -225,16 +267,27 @@ RESOLVER_READING = _env_bool("SIBYL_RESOLVER_READING", True)
 LIVE_LOOKUPS_ENABLED = _env_bool("SIBYL_LIVE_LOOKUPS_ENABLED", False)
 
 # --- The structured-data starting pack (Oct 2026, review Part 6) ------------
-# A hashed share of questions (salt "sibyl_pack:", controls included) is shown
-# the pipeline's structured feeds as a starting pack (sibyl/pack.py). The
-# conflict forecasts (VIEWS, conflictforecast.org, ACLED CAST) are left out
-# unless PACK_INCLUDE_FORECASTS. Nothing in backtest. The comparison shows
-# immediate measures from 10 questions an arm, the outcome from 20.
-PACK_SHARE = _env_float("SIBYL_PACK_SHARE", 0.5)
+# Since 2026-10-14 the pack is compared WITHIN each question: at K=2 the first
+# trial (lane A) is shown the pipeline's structured feeds (sibyl/pack.py) and
+# the second (lane B) is not. The question-level hashed arm (SIBYL_PACK_SHARE,
+# salt "sibyl_pack:") is retired; its rows stay readable as the earlier
+# design. A control runs one trial, on the no-pack lane. PACK_ENABLED=0 runs
+# every trial without the pack (tests use it: the loaders reach the network).
+# The conflict forecasts (VIEWS, conflictforecast.org, ACLED CAST) are left
+# out unless PACK_INCLUDE_FORECASTS. Nothing in backtest.
+PACK_ENABLED = _env_bool("SIBYL_PACK_ENABLED", True)
+PACK_LANE = _env_str("SIBYL_PACK_LANE", "A").strip().upper()
+NO_PACK_LANE = _env_str("SIBYL_NO_PACK_LANE", "B").strip().upper()
 PACK_INCLUDE_FORECASTS = _env_bool("SIBYL_PACK_INCLUDE_FORECASTS", False)
 PACK_MAX_CHARS = _env_int("SIBYL_PACK_MAX_CHARS", 24000)
+# The earlier (question-level) design's thresholds, kept for its rows.
 PACK_MIN_QUESTIONS_IMMEDIATE = _env_int("SIBYL_PACK_MIN_QUESTIONS_IMMEDIATE", 10)
 PACK_MIN_QUESTIONS_SCORED = _env_int("SIBYL_PACK_MIN_QUESTIONS_SCORED", 20)
+# The paired design compares two trials of ONE question, so question-to-
+# question noise cancels and fewer questions are needed: immediate measures
+# from 5 paired questions, the outcome from 10.
+PACK_PAIRED_MIN_QUESTIONS_IMMEDIATE = _env_int("SIBYL_PACK_PAIRED_MIN_QUESTIONS_IMMEDIATE", 5)
+PACK_PAIRED_MIN_QUESTIONS_SCORED = _env_int("SIBYL_PACK_PAIRED_MIN_QUESTIONS_SCORED", 10)
 
 # --- Search ------------------------------------------------------------------
 BRAVE_MAX_RESULTS = _env_int("SIBYL_BRAVE_MAX_RESULTS", 8)
@@ -289,7 +342,9 @@ ANTHROPIC_MAX_ATTEMPTS = _env_int("SIBYL_ANTHROPIC_MAX_ATTEMPTS", 3)
 # make the agent research in depth.
 MIN_SEARCH_OK = _env_int("SIBYL_MIN_SEARCH_OK", 3)
 MIN_DOCS_READ = _env_int("SIBYL_MIN_DOCS_READ", 2)
-MIN_VALID_TRIALS = _env_int("SIBYL_MIN_VALID_TRIALS", 2)
+# One since 2026-10-14 (K=2): a question with one valid trial is stored with
+# its single_trial flag set, rather than lost.
+MIN_VALID_TRIALS = _env_int("SIBYL_MIN_VALID_TRIALS", 1)
 
 # --- Brave circuit breaker (Oct 2026) -----------------------------------------
 # The shared breaker trips after three consecutive Brave failures and then

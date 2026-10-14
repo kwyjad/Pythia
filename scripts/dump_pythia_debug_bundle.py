@@ -3222,6 +3222,9 @@ class BundleData:
     # The interpreter report stored for this run, and why it needed a
     # correction pass if it did (Oct 2026). None = no interpretations table.
     interpretation: dict[str, Any] | None = None
+    # The newest Sibyl run for this HS run (2026-10-14): its cost gate and
+    # single-trial count.
+    sibyl_run: dict[str, Any] | None = None
     # pythia/tools/ace_pa_eligibility.py: which ACE countries were asked ACE/PA.
     ace_pa_eligibility: dict[str, Any] | None = None
     # pythia/tools/phase3_eligibility.py: which DR Phase 3+ questions were dropped.
@@ -3523,6 +3526,7 @@ def _load_bundle_data(
     data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
     data.unparseable_forecast_calls = _unparseable_forecast_calls(con, data.forecaster_run_id)
     data.interpretation = _interpretation_for_run(con, data.forecaster_run_id)
+    data.sibyl_run = _sibyl_run_for_hs(con, data.hs_run_id)
     try:
         from pythia.tools.ace_pa_eligibility import latest_decision  # noqa: PLC0415
 
@@ -3541,6 +3545,48 @@ def _load_bundle_data(
         data.phase3_eligibility = {"error": str(exc)}
 
     return data
+
+
+def _sibyl_run_for_hs(con, hs_run_id: str | None) -> dict[str, Any] | None:
+    """The newest sibyl_runs row for the HS run, or None. Never raises."""
+    if not hs_run_id:
+        return None
+    try:
+        if not _safe_table_exists(con, "sibyl_runs"):
+            return None
+        cols = {str(r[1]) for r in con.execute("PRAGMA table_info('sibyl_runs')").fetchall()}
+        want = [c for c in ("sibyl_run_id", "run_cost_usd", "n_selected", "n_forecast",
+                            "n_skipped", "budget_capped", "time_capped", "cost_gate_status",
+                            "cost_gate_ratio", "stated_cost_per_question_usd", "n_single_trial")
+                if c in cols]
+        row = con.execute(
+            f"SELECT {', '.join(want)} FROM sibyl_runs WHERE hs_run_id = ? "
+            "ORDER BY created_at DESC LIMIT 1", [hs_run_id]).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(zip(want, row)) if row else None
+
+
+def _sibyl_cost_check(run: dict[str, Any]) -> dict[str, Any]:
+    """The Sibyl line: FAIL when the cost gate stopped the run, WARN when it
+    warned or the budget cap bound, else OK."""
+    gate = run.get("cost_gate_status")
+    ratio = run.get("cost_gate_ratio")
+    stated = run.get("stated_cost_per_question_usd")
+    detail = (
+        f"{run.get('sibyl_run_id')}: {run.get('n_forecast')} of {run.get('n_selected')} "
+        f"forecast, ${float(run.get('run_cost_usd') or 0):.2f}"
+    )
+    if gate:
+        detail += f"; cost gate {gate}"
+        if ratio is not None and stated:
+            detail += f" ({float(ratio):.2f}x the stated ${float(stated):.2f} a question)"
+    if run.get("n_single_trial"):
+        detail += f"; {run['n_single_trial']} single-trial forecast(s)"
+    if run.get("budget_capped"):
+        detail += "; budget cap reached"
+    status = "FAIL" if gate == "stop" else ("WARN" if gate == "warn" or run.get("budget_capped") else "OK")
+    return {"subsystem": "Sibyl", "status": status, "detail": detail}
 
 
 def _interpretation_for_run(con, run_id: str | None) -> dict[str, Any] | None:
@@ -3777,6 +3823,9 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     p3 = data.phase3_eligibility
     if p3 is not None:
         checks.append(_phase3_eligibility_check(p3))
+
+    if data.sibyl_run:
+        checks.append(_sibyl_cost_check(data.sibyl_run))
 
     # The interpreter report, and why it needed a correction pass if it did.
     interp = data.interpretation

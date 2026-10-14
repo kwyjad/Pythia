@@ -142,14 +142,14 @@ def test_end_to_end_single_question(smoke_env):
             [sibyl_run_id, Q1],
         ).fetchone()
         assert rec[0] == "ok"
-        assert rec[1] == 3  # K trials completed
+        assert rec[1] == 2  # K trials completed
         assert rec[2] == "linear_pool_by_month"
 
         pooled = json.loads(rec[3])
         assert set(pooled) == {"0.1", "0.25", "0.5", "0.75", "0.9", "0.95", "0.99"}
 
         trials = json.loads(rec[4])
-        assert len(trials) == 3
+        assert len(trials) == 2
         for trial in trials:
             assert trial["quantiles"] is not None
             steps = trial["belief_trace"]
@@ -169,10 +169,10 @@ def test_end_to_end_single_question(smoke_env):
         assert rec[5] is not None and rec[5] > 0.0
         assert rec[6] is not None and rec[6] == pytest.approx(0.0, abs=1e-9)
 
-        # Costs: 12 Opus calls x $0.10 + 6 Brave queries x $0.005.
-        assert rec[7] == pytest.approx(1.23, abs=1e-6)
-        assert rec[8] == pytest.approx(1.2, abs=1e-6)
-        assert rec[9] == pytest.approx(0.03, abs=1e-6)
+        # Costs: 8 Opus calls x $0.10 + 4 Brave queries x $0.005 (K=2).
+        assert rec[7] == pytest.approx(0.82, abs=1e-6)
+        assert rec[8] == pytest.approx(0.8, abs=1e-6)
+        assert rec[9] == pytest.approx(0.02, abs=1e-6)
         assert rec[10] is not None  # asOf persisted for deferred calibration
 
         # --- reference, raw pool and published vectors (Oct 2026) -----------
@@ -207,7 +207,7 @@ def test_end_to_end_single_question(smoke_env):
             "SELECT median_docs_per_trial, share_trials_under_doc_gate, steps_per_trial, "
             "tool_calls_per_trial, share_docs_wikipedia, n_submit_gate_unmet, n_docs_read "
             "FROM sibyl_runs WHERE sibyl_run_id = ?", [sibyl_run_id]).fetchone()
-        assert depth == (5.0, 0.0, 4.0, 8.0, 0.0, 0, 15)
+        assert depth == (5.0, 0.0, 4.0, 8.0, 0.0, 0, 10)  # two trials x 5 documents
 
         # --- spend itemised in the existing cost ledger ----------------------
         ledger = con.execute(
@@ -220,10 +220,10 @@ def test_end_to_end_single_question(smoke_env):
             [Q1],
         ).fetchall()
         by_provider = {r[0]: (r[1], r[2]) for r in ledger}
-        assert by_provider["anthropic"][0] == 12
-        assert by_provider["brave"][0] == 6
-        assert by_provider["anthropic"][1] == pytest.approx(1.2, abs=1e-6)
-        assert by_provider["brave"][1] == pytest.approx(0.03, abs=1e-6)
+        assert by_provider["anthropic"][0] == 8
+        assert by_provider["brave"][0] == 4
+        assert by_provider["anthropic"][1] == pytest.approx(0.8, abs=1e-6)
+        assert by_provider["brave"][1] == pytest.approx(0.02, abs=1e-6)
     finally:
         con.close()
 

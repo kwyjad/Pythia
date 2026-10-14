@@ -2044,6 +2044,16 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "n_shadow_series": "INTEGER",
                 "n_shadow_skipped": "INTEGER",
                 "shadow_cost_usd": "DOUBLE",
+                # The run-time cost gate (2026-10-14, sibyl/run.py): realised
+                # cost per question (a one-trial control counts as 1/K of a
+                # question) over SIBYL_STATED_COST_PER_QUESTION_USD after the
+                # first three questions; 'ok' | 'warn' (above 1.5x) | 'stop'
+                # (above 2.5x: no new question started) | NULL (not reached).
+                # n_single_trial counts forecasts pooled from one valid trial.
+                "cost_gate_status": "TEXT",
+                "cost_gate_ratio": "DOUBLE",
+                "stated_cost_per_question_usd": "DOUBLE",
+                "n_single_trial": "INTEGER",
             },
         )
 
@@ -2148,11 +2158,16 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # NULL on earlier rows and where nothing was shown.
                 "resolver_reading_json": "TEXT",
                 # The structured-data starting pack (Oct 2026, review Part 6,
-                # sibyl/pack.py): the arm (pack | no_pack | pack_empty; NULL in
-                # backtest and on earlier rows) and the sections shown,
+                # sibyl/pack.py): the arm (pack | no_pack | pack_empty under the
+                # question-level design to 2026-10-13; paired | pack_empty | no_pack
+                # (controls) since 2026-10-14; NULL in backtest and on earlier rows) and the sections shown,
                 # dropped for length, the block's size and any load error.
                 "pack_arm": "TEXT",
                 "pack_json": "TEXT",
+                # 2026-10-14: the forecast was pooled from one valid trial
+                # (SIBYL_MIN_VALID_TRIALS=1 at K=2). Shown on the dashboard
+                # and in the bundles; NULL on earlier rows.
+                "single_trial": "BOOLEAN",
                 # The shadow arm (Oct 2026, Part 7): the shadow series (the
                 # pool with the Claude lane C trial replaced by the shadow
                 # model's), its trial, and its spend. Never in the forecast

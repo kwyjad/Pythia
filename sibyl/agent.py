@@ -181,7 +181,7 @@ Your research plan has six slots. Work through all of them; report each one's st
 - "reversion": the case that the series returns to its 12-month norm.
 - "disconfirm": one search aimed at evidence against your current median.
 
-Your earlier steps are shown in full in the transcript, with every tool result, so nothing you read is lost. Record each new piece of evidence once in "ledger_add"; the code numbers the items ([E1], [E2], ...) and keeps the ledger for the whole trial. List only items not already in the ledger.
+Your earlier steps stay in the transcript: your responses, the ledger items, and one line per tool call. A tool's full result is shown ONCE, at the step after you call it, and is not shown again. So record in "ledger_add" every figure, date and source you may need later, word for word, with its URL: only the ledger keeps it. The code numbers the items ([E1], [E2], ...) and keeps the ledger for the whole trial. List only items not already in the ledger.
 
 Respond with ONLY a JSON object, no prose outside it:
 {{
@@ -220,8 +220,16 @@ Rules for weighing evidence:
 #   1 static     head + task rules + JSON schema                — no breakpoint
 #   2 question   question, resolver card, reference, track rec. — breakpoint
 #   3 trial      research lane + starting belief                — breakpoint
-#   4 transcript every earlier step, stored text reused as-is   — breakpoint
-#   5 tail       this step's number and any feedback            — churns
+#   4 transcript one block per earlier step, stored text reused
+#                as-is; the breakpoint sits on the NEWEST block only
+#   5 tail       the last step's raw tool results (shown once), this
+#                step's number and any feedback                  — churns
+#
+# Since 2026-10-14 each transcript entry is its own content block. Anthropic
+# reads a cache entry only at a block boundary of the new request, looking
+# back at most 20 blocks, so a transcript sent as one growing block never
+# matched the cache (13 October: a step-10 call cost $0.43, step 1 $0.05).
+# Markers: question, trial, newest entry = 3 of the 4 Anthropic allows.
 #
 # The legacy single-segment template was dropped in Oct 2026: Sibyl always
 # sends segments, and cache_control applies when PYTHIA_PROMPT_CACHE_ENABLED
@@ -372,6 +380,9 @@ class TrialResult:
     # dispute points it named in its first step's step_rationale.
     reconcile_brief_chars: Optional[int] = None
     dispute_points: Optional[str] = None
+    # 2026-10-14: whether this trial was shown the structured-data pack. At
+    # K=2 the first trial gets it and the second does not (sibyl/pack.py).
+    with_pack: bool = False
 
     @property
     def ok(self) -> bool:
@@ -422,6 +433,7 @@ class TrialResult:
             "submit_gate_unmet": self.submit_gate_unmet,
             "reconcile_brief_chars": self.reconcile_brief_chars,
             "dispute_points": self.dispute_points,
+            "with_pack": self.with_pack,
         }
 
 
@@ -465,8 +477,8 @@ def build_step_prompt(
     as_of: date,
     perspective: str,
     forecast_months: List[str],
-    transcript_text: str,
-    country_name: str,
+    transcript_text: str = "",
+    country_name: str = "",
     feedback: str = "",
     return_segments: bool = False,
     track_record: str = "",
@@ -474,8 +486,16 @@ def build_step_prompt(
     trial_brief: str = "",
     resolver_reading: str = "",
     pack: str = "",
+    transcript_blocks: Optional[List[str]] = None,
+    pending_results: str = "",
 ):
     """Build a step's prompt as ``(text, is_cache_breakpoint)`` segments.
+
+    *transcript_blocks* is one text per earlier step (``Transcript.blocks``);
+    each becomes its own segment and only the newest carries a breakpoint.
+    *transcript_text* (one block) is kept for callers that have no entries.
+    *pending_results* is the last step's raw tool results, which go in the
+    uncached tail, ahead of the step instruction, and are shown only once.
 
     *trial_brief* (lane R only) follows the lane text inside the trial
     segment, so the static and question segments stay shared and cached; it
@@ -532,12 +552,26 @@ def build_step_prompt(
         (SIBYL_QUESTION.format(**common), True),
         (SIBYL_TRIAL.format(**common), True),
     ]
-    if transcript_text:
-        segments.append((transcript_text, True))
-    segments.append((SIBYL_TAIL.format(**common), False))
+    blocks = [b for b in (transcript_blocks or []) if b]
+    if not blocks and transcript_text:
+        blocks = [transcript_text]
+    for i, block in enumerate(blocks):
+        segments.append((block, i == len(blocks) - 1))
+    segments.append(((pending_results or "") + SIBYL_TAIL.format(**common), False))
     if return_segments:
         return segments
     return "".join(text for text, _ in segments)
+
+
+# Anthropic looks back at most this many content blocks from a breakpoint
+# for a cached prefix written at an earlier request's breakpoint.
+CACHE_LOOKBACK_BLOCKS = 20
+
+
+def newest_breakpoint_block(segments: List[tuple]) -> Optional[int]:
+    """Index of the last breakpoint segment (the newest transcript entry)."""
+    idx = [i for i, (text, bp) in enumerate(segments) if bp and text]
+    return idx[-1] if idx else None
 
 
 def prompt_for_log(prompt: str, logged_prefix: Optional[str]) -> str:
@@ -709,6 +743,7 @@ def run_trial(
     )
     if trial_brief.strip():
         result.reconcile_brief_chars = len(trial_brief.strip())
+    result.with_pack = bool(pack and pack.strip())
 
     # The reference (sibyl/reference.py) seeds the belief; an object without
     # reference vectors (no history) seeds a labelled placeholder.
@@ -726,6 +761,7 @@ def run_trial(
     seen_doc_hashes: set[str] = set()
     resolver_failed_steps = 0
     terms = _search_terms(question, country_name)
+    prev_bp: Optional[int] = None
 
     for step in range(1, MAX_STEPS + 1):
         decision: Optional[StepDecision] = None
@@ -741,7 +777,8 @@ def run_trial(
                 as_of=as_of,
                 perspective=perspective,
                 forecast_months=forecast_months,
-                transcript_text=transcript.text(),
+                transcript_blocks=transcript.blocks(),
+                pending_results=transcript.pending_results(),
                 country_name=country_name,
                 feedback=parse_feedback,
                 return_segments=True,
@@ -752,6 +789,16 @@ def run_trial(
                 pack=pack,
             )
             prompt = "".join(text for text, _ in segments)
+            if attempt == 1:
+                bp = newest_breakpoint_block(segments)
+                if prev_bp is not None and bp is not None and bp - prev_bp > CACHE_LOOKBACK_BLOCKS:
+                    logger.error(
+                        "sibyl.agent: q=%s trial=%d step=%d breakpoint moved %d blocks "
+                        "(cache lookback is %d); the cached prefix will be missed",
+                        question.question_id, trial_index, step, bp - prev_bp,
+                        CACHE_LOOKBACK_BLOCKS,
+                    )
+                prev_bp = bp
             # The injectable test seam takes a plain prompt string; the
             # default path passes the segments so cache_control can apply.
             if model_call is not None:
@@ -936,6 +983,7 @@ def run_trial(
             outputs.append(ToolOutput(
                 action=tcall.action, target=str(tcall.action_input), text=tool_result.text,
                 url=(str(tcall.action_input) if tcall.action == "fetch_url" else ""),
+                ok=bool(call_ok),
             ))
         transcript.append(TranscriptEntry(
             step=step, response=accepted_text, ledger_block=render_added(added),

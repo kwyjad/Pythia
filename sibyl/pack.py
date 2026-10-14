@@ -10,9 +10,16 @@ country, a dozen structured feeds the ensemble's prompt carries: food
 security, INFORM severity, GDACS history, HDX Signals, ENSO, the NMME
 outlook, CrisisWatch, GDELT, ACLED political events, ACAPS. Whether giving
 those to Sibyl as a starting pack helps its forecasts, or only pulls them
-toward the ensemble's, is a question to measure rather than assume. So a
-hashed half of questions (``SIBYL_PACK_SHARE``, salt ``sibyl_pack:``) gets
-the pack, and the other half does not.
+toward the ensemble's, is a question to measure rather than assume.
+
+Since 2026-10-14 the comparison is PAIRED within each question: the first
+trial (lane A, ``SIBYL_PACK_LANE``) is shown the pack and the second (lane B,
+``SIBYL_NO_PACK_LANE``) is not, so the arm is ``paired`` (or ``pack_empty``
+when nothing loaded). From 9 to 13 October 2026 a hashed half of questions
+(``SIBYL_PACK_SHARE``, salt ``sibyl_pack:``) got the pack for every trial;
+those rows (arms ``pack`` / ``no_pack`` / ``pack_empty``) stay readable and
+are reported as the earlier design. A control runs one trial, without the
+pack, and its arm is ``no_pack``.
 
 * The pack is built on the main thread from
   ``forecaster/cli._load_structured_data`` (called with no HS run and no RC
@@ -30,10 +37,10 @@ the pack, and the other half does not.
   end of the priority order, each dropped section named.
 * Nothing in backtest: the tables hold data published after the as-of date.
 
-``pack_comparison`` reports the arms apart for selected questions and for
-controls: immediate measures from 10 questions an arm, and the gain over
-Sibyl's own reference from 20 scored questions an arm, otherwise "not yet".
-Nothing switches the pack on for every question by itself.
+``pack_comparison`` reports the paired difference (pack trial minus no-pack
+trial, per question) from 5 paired questions for the immediate measures and
+10 for the outcome, and the earlier design's arms as before (10 and 20),
+otherwise "not yet". Nothing switches the pack on for every trial by itself.
 """
 
 from __future__ import annotations
@@ -56,7 +63,12 @@ logger = logging.getLogger(__name__)
 ARM_PACK = "pack"
 ARM_NO_PACK = "no_pack"
 ARM_PACK_EMPTY = "pack_empty"
+ARM_PAIRED = "paired"
 PACK_SALT = "sibyl_pack:"
+# The earlier question-level design (9 to 13 October 2026) hashed this share.
+EARLIER_DESIGN_SHARE = 0.5
+DESIGN_PAIRED = "paired_trials_from_2026-10-14"
+DESIGN_EARLIER = "question_arm_2026-10-09_to_2026-10-13"
 
 HEADING = "=== STRUCTURED DATA HELD BY THE PIPELINE (as of {as_of}) ==="
 PREFACE = (
@@ -106,9 +118,10 @@ class Pack:
 
 
 def pack_arm(question_id: Optional[str], share: Optional[float] = None) -> str:
-    """``"pack"`` or ``"no_pack"``; its own salt, so it is independent of the
-    advice arm and of the standard track's arms. Controls are hashed too."""
-    share = float(_cfg.PACK_SHARE if share is None else share)
+    """The EARLIER design's arm (9 to 13 October 2026): ``"pack"`` or
+    ``"no_pack"`` by a salted hash of the question id. Kept so old rows can be
+    explained; nothing in a run calls it since the paired design."""
+    share = float(EARLIER_DESIGN_SHARE if share is None else share)
     if not question_id or share <= 0:
         return ARM_NO_PACK
     if share >= 1:
@@ -187,15 +200,15 @@ def build_pack(
 ) -> Pack:
     """The pack for one question. Never raises.
 
-    The arm is decided first; a ``no_pack`` question loads nothing. A pack
-    question whose sections all came back empty is ``pack_empty``. Backtest
-    renders nothing and records no arm.
+    The text is shown to the pack trial only (sibyl/run.py). A control and a
+    run with ``SIBYL_PACK_ENABLED=0`` load nothing (arm ``no_pack``); a pack
+    whose sections all came back empty is ``pack_empty``. Backtest renders
+    nothing and records no arm.
     """
     if _cfg.BACKTEST_MODE or is_backtest(as_of):
         return Pack()
-    arm = pack_arm(getattr(question, "question_id", None))
-    if arm != ARM_PACK:
-        return Pack(arm=arm)
+    if not _cfg.PACK_ENABLED or getattr(question, "is_control", False):
+        return Pack(arm=ARM_NO_PACK)
     hazard = str(getattr(question, "hazard_code", "") or "").upper()
     metric = str(getattr(question, "metric", "") or "").upper()
     iso3 = str(getattr(question, "iso3", "") or "").upper()
@@ -245,7 +258,7 @@ def build_pack(
         # One section alone over the cap: nothing fits, and nothing is cut short.
         dropped.insert(0, kept[0][1])
         return Pack(arm=ARM_PACK_EMPTY, dropped=dropped)
-    return Pack(arm=ARM_PACK, text=text, sections=[k for k, _l, _t in kept],
+    return Pack(arm=ARM_PAIRED, text=text, sections=[k for k, _l, _t in kept],
                 dropped=dropped, chars=len(text))
 
 
@@ -318,8 +331,12 @@ def pack_comparison(con: Any, *, include_test: bool = False,
     """
     min_i = int(_cfg.PACK_MIN_QUESTIONS_IMMEDIATE if min_immediate is None else min_immediate)
     min_s = int(_cfg.PACK_MIN_QUESTIONS_SCORED if min_scored is None else min_scored)
+    # "groups" and the two thresholds describe the EARLIER design; "paired"
+    # is the design in force since 2026-10-14.
     out: Dict[str, Any] = {"min_questions_immediate": min_i, "min_questions_scored": min_s,
-                           "groups": {}}
+                           "groups": {}, "design": DESIGN_PAIRED,
+                           "earlier_design": DESIGN_EARLIER,
+                           "paired": _empty_paired()}
     try:
         cols = {str(r[1]).lower() for r in con.execute(
             "PRAGMA table_info('sibyl_forecasts')").fetchall()}
@@ -327,10 +344,11 @@ def pack_comparison(con: Any, *, include_test: bool = False,
             return out
         test_f = " AND NOT COALESCE(is_test, FALSE)" if not include_test else ""
         ev = " AND COALESCE(evidence_ok, TRUE)" if "evidence_ok" in cols else ""
-        rows = con.execute(
+        all_rows = con.execute(
             f"""
             SELECT question_id, pack_arm, selection_pass, js_divergence_vs_standard,
-                   js_divergence_inter_trial, trials_json, raw_by_month_json, reference_json
+                   js_divergence_inter_trial, trials_json, raw_by_month_json, reference_json,
+                   metric
             FROM (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY question_id
                     ORDER BY created_at DESC NULLS LAST, sibyl_run_id DESC) AS rn
@@ -339,6 +357,15 @@ def pack_comparison(con: Any, *, include_test: bool = False,
             ) WHERE rn = 1
             """
         ).fetchall()
+        # A row of the paired design carries a with_pack flag on its trials;
+        # an earlier-design row does not.
+        rows, paired_rows = [], []
+        for r in all_rows:
+            trials = json.loads(r[5]) if r[5] else []
+            if any(isinstance(t, dict) and "with_pack" in t for t in trials):
+                paired_rows.append(r)
+            else:
+                rows.append(r[:8])
         has_scores = bool(con.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = 'scores'").fetchone())
         gains: Dict[str, float] = {}
@@ -361,6 +388,7 @@ def pack_comparison(con: Any, *, include_test: bool = False,
                 if v is not None and math.isfinite(float(v)):
                     gains[str(qid)] = float(v)
         by_group: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        out["paired"] = _paired_comparison(con, paired_rows, include_test=include_test)
         for qid, arm, sel, jsd_std, jsd_it, tj, rj, refj in rows:
             group = "control" if sel == "control" else "selected"
             rec = {"question_id": qid, "jsd_vs_standard": jsd_std, "jsd_inter_trial": jsd_it,
@@ -405,4 +433,109 @@ def pack_comparison(con: Any, *, include_test: bool = False,
     except Exception as exc:  # noqa: BLE001
         logger.warning("sibyl.pack: comparison failed: %s", exc)
         out["error"] = str(exc)[:200]
+    return out
+
+
+# --- the paired design (2026-10-14) ---------------------------------------------
+
+PAIRED_MEASURES = ("jsd_month1_from_reference", "docs", "steps")
+
+
+def _empty_paired() -> Dict[str, Any]:
+    return {
+        "n_paired": 0, "n_scored": 0,
+        "min_questions_immediate": int(_cfg.PACK_PAIRED_MIN_QUESTIONS_IMMEDIATE),
+        "min_questions_scored": int(_cfg.PACK_PAIRED_MIN_QUESTIONS_SCORED),
+        "immediate": {"status": "not_yet"},
+        "outcome": {"status": "not_yet"},
+    }
+
+
+def _trial_month1(trial: Dict[str, Any], metric: str) -> Optional[List[float]]:
+    try:
+        from sibyl.aggregate import pool_months  # noqa: PLC0415
+        from sibyl.score_variants import trial_months  # noqa: PLC0415
+
+        return list(pool_months([trial_months(trial)], metric).vectors[1])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pair(trials: Sequence[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """The pack trial and the no-pack production trial, both valid."""
+    def ok(t: Dict[str, Any]) -> bool:
+        return (isinstance(t, dict) and t.get("error") is None and t.get("quantiles")
+                and t.get("evidence_ok", True) and t.get("role", "production") == "production")
+    p = next((t for t in trials if ok(t) and t.get("with_pack")), None)
+    n = next((t for t in trials if ok(t) and not t.get("with_pack")), None)
+    return p, n
+
+
+def _paired_comparison(con: Any, rows: Sequence[Any], *, include_test: bool) -> Dict[str, Any]:
+    """Pack trial minus no-pack trial, per question, with a 90% interval that
+    resamples questions. Rows are the paired-design rows (controls excluded,
+    since a control runs one trial). Never raises."""
+    out = _empty_paired()
+    min_i, min_s = out["min_questions_immediate"], out["min_questions_scored"]
+    pairs = []
+    for r in rows:
+        qid, arm, sel, _js, _jit, tj, _rj, refj, metric = r
+        if sel == "control" or arm != ARM_PAIRED:
+            continue
+        p, n = _pair(json.loads(tj) if tj else [])
+        if p is None or n is None:
+            continue
+        ref = ((json.loads(refj) if refj else {}).get("by_month") or {}).get("1")
+        pairs.append((str(qid), p, n, ref, str(metric or "")))
+    pairs.sort(key=lambda x: x[0])
+    out["n_paired"] = len(pairs)
+    diffs: Dict[str, List[float]] = {m: [] for m in PAIRED_MEASURES}
+    for _qid, p, n, ref, metric in pairs:
+        if ref:
+            jp, jn = _jsd(_trial_month1(p, metric) or [], ref), _jsd(_trial_month1(n, metric) or [], ref)
+            if jp is not None and jn is not None:
+                diffs["jsd_month1_from_reference"].append(jp - jn)
+        diffs["docs"].append(float(p.get("n_docs_read") or 0) - float(n.get("n_docs_read") or 0))
+        diffs["steps"].append(float(p.get("steps_used") or 0) - float(n.get("steps_used") or 0))
+    if len(pairs) >= min_i:
+        imm: Dict[str, Any] = {"status": "ok"}
+        for k, m in enumerate(PAIRED_MEASURES):
+            xs = diffs[m]
+            if xs:
+                mean, lo, hi = _mean_interval(xs, seed=20261014 + k)
+                imm[m] = {"pack_minus_no_pack": mean, "lo": lo, "hi": hi, "n": len(xs)}
+            else:
+                imm[m] = None
+        out["immediate"] = imm
+    # Outcome: each trial's own scores (sibyl_variant_scores, series lane_<X>).
+    try:
+        has = con.execute("SELECT 1 FROM information_schema.tables "
+                          "WHERE table_name = 'sibyl_variant_scores'").fetchone()
+        gains: List[float] = []
+        if has and pairs:
+            t_f = "" if include_test else " AND NOT COALESCE(is_test, FALSE)"
+            for qid, p, n, _ref, _m in pairs:
+                lp, ln = str(p.get("lane") or "").upper(), str(n.get("lane") or "").upper()
+                if not lp or not ln:
+                    continue
+                row = con.execute(
+                    f"""
+                    SELECT AVG(a.value - b.value), COUNT(*)
+                    FROM sibyl_variant_scores a JOIN sibyl_variant_scores b
+                      ON a.question_id = b.question_id AND a.horizon_m = b.horizon_m
+                     AND a.score_type = b.score_type
+                    WHERE a.question_id = ? AND a.score_type = 'brier'
+                      AND a.series = ? AND b.series = ?{t_f.replace('is_test', 'a.is_test')}
+                    """,
+                    [qid, f"lane_{lp}", f"lane_{ln}"],
+                ).fetchone()
+                if row and row[1] and row[0] is not None and math.isfinite(float(row[0])):
+                    gains.append(float(row[0]))
+        out["n_scored"] = len(gains)
+        if len(gains) >= min_s:
+            mean, lo, hi = _mean_interval(gains, seed=20261024)
+            out["outcome"] = {"status": "ok", "brier_pack_minus_no_pack": mean, "lo": lo, "hi": hi}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sibyl.pack: paired outcome failed: %s", exc)
+        out["outcome"] = {"status": "error", "error": str(exc)[:200]}
     return out

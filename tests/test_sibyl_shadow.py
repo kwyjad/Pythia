@@ -69,6 +69,15 @@ def test_the_arm_states_why_it_does_not_run(monkeypatch, env, kwargs, expect):
     assert sh.shadow_setup(**kwargs).status == expect
 
 
+@pytest.fixture(autouse=True)
+def _legacy_trial_settings(monkeypatch):
+    # The shadow arm replaces the Claude lane C trial; it is tested under the
+    # K=3 settings that run a lane C trial (2026-10-14 runs K=2).
+    from tests.sibyl_test_utils import legacy_trials
+
+    legacy_trials(monkeypatch)
+
+
 def test_the_last_month_still_runs_and_the_alias_resolves_to_sol(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     s = sh.shadow_setup(today=date(2027, 4, 30), backtest=False)

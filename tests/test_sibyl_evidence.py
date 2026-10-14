@@ -169,8 +169,8 @@ def test_a_run_whose_searches_all_fail_stores_every_question_failed(tmp_path, mo
     assert summary["n_forecast"] == 0
     assert summary["n_skipped"] == 2
     # Bounded: five resets, then the trips are counted and the run moves on.
-    assert summary["n_search_failed"] == summary["n_search_calls"] == 6
-    assert summary["n_breaker_trips"] >= 6
+    assert summary["n_search_failed"] == summary["n_search_calls"] == 4  # 2 questions x K=2
+    assert summary["n_breaker_trips"] >= 4
 
     from pythia.db.schema import connect
 
@@ -181,7 +181,7 @@ def test_a_run_whose_searches_all_fail_stores_every_question_failed(tmp_path, mo
             "FROM sibyl_forecasts ORDER BY question_id"
         ).fetchall()
         assert [(r[1], r[2], r[3]) for r in rows] == [("failed", "no evidence", False)] * 2
-        assert all(len(json.loads(r[4])) == 3 for r in rows)  # trials kept
+        assert all(len(json.loads(r[4])) == 2 for r in rows)  # trials kept
         for table in ("forecasts_raw", "forecasts_ensemble"):
             n = con.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE model_name = 'sibyl'"
@@ -190,7 +190,7 @@ def test_a_run_whose_searches_all_fail_stores_every_question_failed(tmp_path, mo
         run = con.execute(
             "SELECT n_search_calls, n_search_failed, n_docs_read FROM sibyl_runs"
         ).fetchone()
-        assert run == (6, 6, 0)
+        assert run == (4, 4, 0)
     finally:
         con.close()
 
@@ -216,7 +216,35 @@ def test_a_run_with_evidence_writes_a_floored_forecast(tmp_path, monkeypatch):
         con.close()
 
 
-def test_one_trial_with_evidence_is_not_enough(tmp_path, monkeypatch):
+def test_one_valid_trial_is_stored_and_flagged_single_trial(tmp_path, monkeypatch):
+    # 2026-10-14: K=2 and SIBYL_MIN_VALID_TRIALS=1. Trial 0 searches and
+    # submits; trial 1 submits blind and has no evidence.
+    seed_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
+    monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", _ok_pack)
+    monkeypatch.setattr(sibyl_config, "TRIAL_WORKERS", 1)
+    calls = iter([make_search_response(), make_submit_response(), make_submit_response()])
+    sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1,
+                        model_call=lambda p: (next(calls), _usage(), ""))
+    from pythia.db.schema import connect
+
+    con = connect(read_only=False)
+    try:
+        status, single, checks = con.execute(
+            "SELECT status, single_trial, trial_checks_json FROM sibyl_forecasts "
+            "WHERE question_id = ?", [Q1]
+        ).fetchone()
+        assert status == "ok" and single is True
+        assert json.loads(checks)["single_trial"] is True
+    finally:
+        con.close()
+
+
+def test_one_trial_with_evidence_is_not_enough_when_two_are_required(tmp_path, monkeypatch):
+    from tests.sibyl_test_utils import legacy_trials
+
+    legacy_trials(monkeypatch)
+    monkeypatch.setattr(sibyl_config, "TRIAL_WORKERS", 1)
     seed_db(tmp_path, monkeypatch)
     monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", _ok_pack)

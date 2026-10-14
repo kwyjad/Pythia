@@ -109,9 +109,11 @@ def _six_steps():
 
 
 def _tail_start(prompt: str, step: int) -> int:
+    """Where the uncached tail begins: the shown-once results, else the step line."""
     i = prompt.rfind(f"=== STEP {step} of ")
     assert i > 0
-    return i
+    r = prompt.rfind("=== RESULTS OF YOUR STEP ", 0, i)
+    return r if r > 0 else i
 
 
 # --- the transcript ------------------------------------------------------------
@@ -131,7 +133,11 @@ def test_a_figure_read_at_step_two_is_in_the_prompt_at_step_six(trial_env):
     assert FIGURE not in prompts[1]  # not read yet at step 2's prompt
     for p in prompts[2:]:
         assert FIGURE in p
-    assert "results for first" in prompts[5]
+    # A raw result is shown once, in the next step's tail, then only the
+    # one-line call record stays.
+    assert "results for first" in prompts[1]
+    assert "results for first" not in prompts[5]
+    assert "- brave_search: first (ok)" in prompts[5]
 
 
 def test_the_model_json_is_kept_word_for_word(trial_env):
@@ -259,30 +265,116 @@ def test_the_trial_keeps_its_ledger_and_shows_the_ids(trial_env):
 
 # --- size guard ----------------------------------------------------------------------------
 
-def test_the_guard_stubs_the_oldest_results_and_keeps_the_url():
+def test_the_guard_stubs_the_oldest_responses_and_keeps_the_calls():
     tr = Transcript()
     for step in (1, 2, 3):
-        tr.append(TranscriptEntry(step=step, response="{}", ledger_block="-",
+        tr.append(TranscriptEntry(step=step, response="r" * 1000, ledger_block="-",
                                   outputs=[ToolOutput("fetch_url", f"https://d/{step}", "x" * 1000,
                                                       url=f"https://d/{step}")]))
     assert tr.n_stubbed == 0
     tr._guard(max_chars=2000)
     assert tr.n_stubbed >= 1 and tr.size() <= 2000
     first = tr.entries[0].text
-    assert "https://d/1" in first and "x" * 1000 not in first
-    assert "x" * 1000 in tr.entries[-1].text
+    assert "https://d/1" in first and "r" * 1000 not in first
+    # The newest entry is never stubbed: its results are still to be read.
+    assert "r" * 1000 in tr.entries[-1].text
+
+
+def test_raw_results_never_enter_the_permanent_entry():
+    tr = Transcript()
+    tr.append(TranscriptEntry(step=1, response="{}", ledger_block="-",
+                              outputs=[ToolOutput("fetch_url", "https://d/1", "BODY" * 50,
+                                                  url="https://d/1")]))
+    assert "BODY" not in tr.text()
+    assert "- fetch_url: https://d/1 (ok)" in tr.text()
+    assert "BODY" in tr.pending_results()
 
 
 def test_the_guard_inside_a_trial(monkeypatch, trial_env):
-    monkeypatch.setattr(sibyl_config, "TRANSCRIPT_MAX_CHARS", 3000)
-
-    def big_fetch(url, as_of, **kw):
-        body = "y" * 1500
-        return ToolResult(tool="fetch_url", ok=True, text=body, doc_text=body, url=url)
-
-    monkeypatch.setattr(sibyl_agent, "fetch_url", big_fetch)
-    script = [make_actions_response([("fetch_url", {"url": f"https://big/{i}"})]) for i in range(3)]
+    monkeypatch.setattr(sibyl_config, "TRANSCRIPT_MAX_CHARS", 1500)
+    script = [_search(f"q{i}") for i in range(4)]
     trial, prompts = _run(script + [make_plan_submit_response()])
     assert trial.n_transcript_stubbed >= 1
-    assert "https://big/0" in prompts[-1]
+    assert "- brave_search: q0 (ok)" in prompts[-1]
     assert trial.to_dict()["transcript_stubbed"] == trial.n_transcript_stubbed
+
+
+# --- A1: the transcript is cacheable block by block (2026-10-14) ------------------
+
+def _bodies(monkeypatch, trial_env, n_steps=4):
+    """The Anthropic request bodies the default path would send, steps 1..n."""
+    from forecaster.providers import build_anthropic_body
+
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    script = iter(_six_steps())
+    bodies = []
+
+    def fake_call_model(prompt, *, cache_segments=None):
+        bodies.append(build_anthropic_body(prompt, "claude-opus-5-5", 1.0,
+                                           purpose="sibyl_step", cache_segments=cache_segments))
+        return next(script), {"cost_usd": 0.0}, ""
+
+    monkeypatch.setattr(sibyl_agent, "_call_model", fake_call_model)
+    sibyl_agent.run_trial(
+        _q(), stub_reference(), as_of=TODAY, trial_index=0, run_id="sr",
+        tracker=CostTracker(run_hard_cap_usd=100), forecast_months=MONTHS,
+        country_name="Ethiopia",
+    )
+    return bodies[:n_steps]
+
+
+def test_every_block_before_the_new_entry_is_byte_identical(monkeypatch, trial_env):
+    bodies = _bodies(monkeypatch, trial_env)
+    assert len(bodies) == 4
+    for n in range(1, 4):
+        prev = bodies[n - 1]["messages"][0]["content"]
+        cur = bodies[n]["messages"][0]["content"]
+        # The new request: the previous blocks less the tail, one new entry, a tail.
+        assert len(cur) == len(prev) + 1
+        for a, b in zip(prev[:-1], cur[:-2]):
+            assert a["text"] == b["text"]
+
+
+def test_the_breakpoint_sits_on_the_newest_entry_only(monkeypatch, trial_env):
+    bodies = _bodies(monkeypatch, trial_env)
+    for body in bodies:
+        blocks = body["messages"][0]["content"]
+        marked = [i for i, b in enumerate(blocks) if "cache_control" in b]
+        assert len(marked) <= 4
+        assert "cache_control" not in blocks[0] and "cache_control" not in blocks[-1]
+        if len(blocks) > 4:  # static, question, trial, entries..., tail
+            assert marked[-1] == len(blocks) - 2
+            assert all("cache_control" not in b for b in blocks[3:-2])
+
+
+def test_the_previous_breakpoint_is_within_the_lookback_window():
+    from sibyl.belief_state import initial_belief
+
+    prev = None
+    blocks = []
+    for step in range(1, sibyl_config.MAX_STEPS + 1):
+        segs = sibyl_agent.build_step_prompt(
+            _q(), stub_reference(), initial_belief(None, "FATALITIES"), step=step,
+            as_of=TODAY, perspective="P", forecast_months=MONTHS, country_name="Ethiopia",
+            return_segments=True, transcript_blocks=list(blocks),
+        )
+        bp = sibyl_agent.newest_breakpoint_block(segs)
+        if prev is not None:
+            assert 0 < bp - prev <= sibyl_agent.CACHE_LOOKBACK_BLOCKS
+        prev = bp
+        blocks.append(f"=== STEP {step}: YOUR RESPONSE ===\n{{}}\n\n")
+
+
+def test_a_figure_read_at_step_two_is_visible_at_step_six_only_through_the_ledger(trial_env):
+    script = [
+        make_actions_response([("fetch_url", {"url": "https://doc/2"})]),
+        _with_ledger(_search("second"),
+                     [{"url": "https://doc/2", "date": "2026-08-31", "tier": 2,
+                       "kind": "measurement", "quote": FIGURE, "direction": "higher"}]),
+        _search("third"), _search("fourth"), _search("fifth"), make_plan_submit_response(),
+    ]
+    _, prompts = _run(script)
+    # The document is shown raw once (step 2's tail) ...
+    assert prompts[1].count(FIGURE) == 1
+    # ... and at step 6 the figure is still there, from the ledger line.
+    assert "[E1] tier 2, measurement, 2026-08-31, higher: " + FIGURE in prompts[5]

@@ -284,7 +284,7 @@ def test_a_run_writes_evidence_rows_and_process_measures(tmp_path, monkeypatch):
 
     summary = sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1, model_call=model_call)
     assert summary["n_forecast"] == 1
-    assert summary["n_evidence_rows"] == 3  # one search in each of three trials
+    assert summary["n_evidence_rows"] == 2  # one search in each of two trials
 
     from pythia.db.schema import connect
 
@@ -293,7 +293,7 @@ def test_a_run_writes_evidence_rows_and_process_measures(tmp_path, monkeypatch):
         rows = con.execute(
             "SELECT question_id, trial_index, step, tool, target, lane, http_status, ok, "
             "length(sha256), shown_text FROM sibyl_evidence ORDER BY trial_index").fetchall()
-        assert [r[1] for r in rows] == [0, 1, 2]
+        assert [r[1] for r in rows] == [0, 1]
         assert all(r[0] == Q1 and r[2] == 1 and r[3] == "brave_search" for r in rows)
         assert all(r[4] == "eth clashes" and r[5] == "news" and r[7] for r in rows)
         assert all(r[8] == 64 and "Clashes reported" in r[9] for r in rows)

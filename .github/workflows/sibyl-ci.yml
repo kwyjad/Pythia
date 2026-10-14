@@ -28,6 +28,7 @@ on:
       - "pythia/tools/score_baselines.py"
       - "pythia/tools/compute_scores.py"
       - "tests/fixtures/sibyl/**"
+      - "scripts/dump_pythia_debug_bundle.py"
       - "docs/prompts/2026-10-09-2/sibyl_agent.py"
       - "docs/prompts/2026-10-09-3/sibyl_agent.py"
       - "docs/prompts/2026-10-09-4/sibyl_agent.py"
@@ -59,6 +60,7 @@ on:
       - "pythia/tools/score_baselines.py"
       - "pythia/tools/compute_scores.py"
       - "tests/fixtures/sibyl/**"
+      - "scripts/dump_pythia_debug_bundle.py"
       - "docs/prompts/2026-10-09-2/sibyl_agent.py"
       - "docs/prompts/2026-10-09-3/sibyl_agent.py"
       - "docs/prompts/2026-10-09-4/sibyl_agent.py"
@@ -119,5 +121,7 @@ jobs:
                      tests/test_sibyl_resolver_reading.py \
                      tests/test_sibyl_pack.py \
                      tests/test_sibyl_reference_backtest.py \
+                     tests/test_sibyl_oct14.py \
+                     tests/test_sibyl_cost_gate.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

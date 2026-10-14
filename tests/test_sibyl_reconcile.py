@@ -30,6 +30,7 @@ from sibyl.cost import CostTracker
 from sibyl.select_questions import SELECTION_CONTROL, SibylQuestion
 from sibyl.trials import RULE_DEPARTURE, RULE_DISAGREEMENT
 from tests.sibyl_test_utils import (
+    as_of_2026_10_14,
     HS_RUN_ID,
     Q1,
     Q2,
@@ -61,6 +62,16 @@ def test_disagreement_runs_r_and_e_and_records_the_reconcile_check(run_env):  # 
     assert rec["r_median_inside_production_range"] is True
 
 
+@pytest.fixture(autouse=True)
+def _legacy_trial_settings(monkeypatch):
+    # These tests exercise the extra-trial machinery under the K=3 settings
+    # it was built for; the 2026-10-14 defaults are tested in
+    # tests/test_sibyl_oct14.py.
+    from tests.sibyl_test_utils import legacy_trials
+
+    legacy_trials(monkeypatch)
+
+
 def test_departure_keeps_lanes_d_and_e(run_env):  # noqa: F811
     calls = []
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1, model_call=_lane_model({"*": FAR}, calls))
@@ -71,6 +82,9 @@ def test_departure_keeps_lanes_d_and_e(run_env):  # noqa: F811
 
 def test_a_control_never_gets_a_reconciler(run_env, monkeypatch):  # noqa: F811
     monkeypatch.setattr(sibyl_config, "N_CONTROL", 1)
+    from tests.sibyl_test_utils import set_rc_level
+
+    set_rc_level("SOM", 0)  # Q2 carries no RC flag, so it is the control
     calls = []
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=2,
                         model_call=_lane_model({"C": FAR, "*": LOW}, calls))
@@ -191,7 +205,7 @@ def test_prompts_for_lanes_a_to_e_are_byte_identical(lane):
     new = sibyl_agent.build_step_prompt(q, ref, start, perspective=sibyl_agent.TRIAL_LANES[lane],
                                         **kw)
     before = old.build_step_prompt(q, ref, start, perspective=old.TRIAL_LANES[lane], **kw)
-    assert new == before
+    assert new == as_of_2026_10_14(before)
 
 
 def test_the_reconciler_lane_text():

@@ -98,7 +98,7 @@ def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
     """With a $1 cap and $0.60 per model call: Q1's three trials run as one
     batch (since Oct 2026 a question's trials run in parallel, so the cap is
     checked before the question and before each batch, never between trials
-    already running), overshooting to $1.80; Q1's pooled forecast is
+    already running), overshooting to $1.20 (two trials at K=2); Q1's pooled forecast is
     persisted; Q2 never starts and is marked 'skipped: run budget cap'; the
     run record carries budget_capped=TRUE."""
     seed_db(tmp_path, monkeypatch)
@@ -131,8 +131,8 @@ def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
     assert summary["budget_capped"] is True
     assert summary["n_forecast"] == 1
     assert summary["n_skipped"] == 1
-    assert summary["run_cost_usd"] == pytest.approx(1.8)
-    assert calls["n"] == 3  # Q1's batch of three; Q2 never started
+    assert summary["run_cost_usd"] == pytest.approx(1.2)
+    assert calls["n"] == 2  # Q1's batch of two (K=2); Q2 never started
 
     from pythia.db.schema import connect
 
@@ -144,7 +144,7 @@ def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
         ).fetchall()
         by_qid = {r[0]: r for r in rows}
         assert by_qid[Q1][1] == "ok"
-        assert by_qid[Q1][3] == 3  # pooled from the batch of three
+        assert by_qid[Q1][3] == 2  # pooled from the batch of two
         assert by_qid[Q2][1] == "skipped"
         assert by_qid[Q2][2] == "run budget cap"
 
