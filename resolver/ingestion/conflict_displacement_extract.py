@@ -907,8 +907,10 @@ def extracted_figures(
     ``conflict_displacement_cell_ledger``.
     """
 
+    # No ensure_schema here: a reader writes nothing, and a CREATE on a
+    # read-only connection fails, which the except below turned into an
+    # empty result (2026-10-14). A missing table raises and reads as empty.
     try:
-        ensure_schema(con)
         sql = ("SELECT * FROM conflict_displacement_candidates WHERE preference_rank = 0")
         params: list[Any] = []
         if iso3:

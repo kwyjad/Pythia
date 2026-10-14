@@ -335,8 +335,8 @@ def dtm_lower_bounds(
     rounds it came from. Absent where no two close rounds bracket the month.
     """
 
+    # No ensure_schema here: see conflict_displacement_extract.extracted_figures.
     try:
-        ensure_schema(con)
         sql = "SELECT * FROM dtm_conflict_lower_bounds"
         params: list[Any] = []
         if iso3:

@@ -143,3 +143,39 @@ def test_the_rung_table_renders_and_never_fails(tmp_path):
     assert "Admitted: 2 (1 on IDMC, 1 on extracted figures)." in text
     assert "Revived questions: 3 of 40" in text
     assert rt.main(["--db", str(tmp_path / "missing.duckdb"), "--window", "2026-12"]) == 0
+
+
+def test_the_lower_rungs_read_on_a_read_only_connection(tmp_path):
+    """The two readers ran ensure_schema (a CREATE) first, so on a read-only
+    connection they failed and returned nothing: the ladder read empty for
+    every read-only caller (found 2026-10-14 on the backfill's DB)."""
+    import duckdb
+
+    from pythia.tools.base_rate_spd import conflict_ladder_lower
+    from resolver.ingestion import conflict_displacement_extract as cde
+    from resolver.ingestion import dtm_conflict as dtm
+
+    path = tmp_path / "ro.duckdb"
+    con = duckdb.connect(str(path))
+    cde.ensure_schema(con)
+    dtm.ensure_schema(con)
+    cols = [r[0] for r in con.execute("DESCRIBE conflict_displacement_candidates").fetchall()]
+    row = {c: None for c in cols if c != "created_at"}
+    row.update(iso3="YEM", ym="2026-05", source_ref="d1", preference_rank=0,
+               value_type="new_displacements", value_persons=1200.0, quote="1,200 people")
+    con.execute(
+        f"INSERT INTO conflict_displacement_candidates ({', '.join(row)}) "
+        f"VALUES ({', '.join('?' for _ in row)})", list(row.values()))
+    con.execute(
+        "INSERT INTO dtm_conflict_lower_bounds (iso3, ym, value, value_type, pairs_json, computed_at) "
+        "VALUES ('SDN', '2026-04', 500, 'displaced_lower_bound', '[]', now())")
+    con.close()
+
+    ro = duckdb.connect(str(path), read_only=True)
+    try:
+        assert ("YEM", "2026-05") in cde.extracted_figures(ro)
+        assert ("SDN", "2026-04") in dtm.dtm_lower_bounds(ro)
+        low = conflict_ladder_lower(ro)
+        assert "YEM" in low and "SDN" in low
+    finally:
+        ro.close()
