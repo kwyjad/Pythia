@@ -680,7 +680,11 @@ class _OpenAIBatch:
     def fetch(self, provider_batch_id: str) -> Iterator[Tuple[str, bool, str, Dict[str, Any], str]]:
         """Yield (custom_id, ok, text, usage, error) per result line."""
 
-        from forecaster.providers import _openai_usage_from_payload  # noqa: PLC0415
+        from forecaster.providers import (  # noqa: PLC0415
+            _openai_usage_from_payload,
+            openai_finish_problem,
+            openai_text_and_finish,
+        )
 
         resp = requests.get(
             f"{self.base}/batches/{provider_batch_id}",
@@ -720,13 +724,16 @@ class _OpenAIBatch:
                             message = str(be.get("message") or "")
                     yield cid, False, "", {}, f"OpenAI batch item error: {message or 'unknown'}"
                     continue
-                text = ""
-                choices = body.get("choices") or []
-                if choices and isinstance(choices[0], dict):
-                    msg = choices[0].get("message") or {}
-                    if isinstance(msg, dict):
-                        text = str(msg.get("content", "")).strip()
-                yield cid, True, text, _openai_usage_from_payload(body), ""
+                text, finish = openai_text_and_finish(body)
+                usage = _openai_usage_from_payload(body)
+                if finish:
+                    usage["finish_reason"] = finish
+                problem = openai_finish_problem(finish)
+                if problem:
+                    # Errored item: costed, then one sync retry at collect.
+                    yield cid, False, text, usage, problem
+                    continue
+                yield cid, True, text, usage, ""
 
     def cancel(self, provider_batch_id: str) -> None:
         try:

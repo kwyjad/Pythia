@@ -766,14 +766,88 @@ def _load_model_costs_raw() -> Dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _parse_model_costs(raw: Dict[str, Any]) -> tuple[Dict[str, tuple[float, float]], Dict[str, Dict[str, float]]]:
+#: Where the cacheable prefix of an SPD prompt splits (Oct 2026). Up to the
+#: first marker the text is the same for every question of a (hazard,
+#: metric, track) group: role, task, buckets, hazard guidance. The method
+#: block after it varies with the RC-shift arm, and the calibration section
+#: with the advice arm. On 13 Oct 2026 the one breakpoint sat at the end of
+#: the whole prefix, so each arm variant wrote its own entry: 63 Anthropic
+#: SPD calls wrote 287,410 cache tokens and read 19,468.
+CACHE_PREFIX_SPLIT_MARKERS = (
+    "FORECASTING METHOD: STRUCTURED BAYESIAN UPDATING\n",
+    "CALIBRATION GUIDANCE",
+)
+
+
+def cache_segments_from_prefix(prompt: str, cache_prefix: str | None) -> list[tuple[str, bool]] | None:
+    """``(text, is_breakpoint)`` segments for a prompt with a static prefix.
+
+    One breakpoint at the end of the shared group text, one at the start of
+    each later arm-dependent block found inside the prefix, and one at the
+    end of the prefix; the per-question tail is unmarked. The segments join
+    to ``prompt`` exactly. None when the prompt does not start with the
+    prefix.
+    """
+    if not cache_prefix or not prompt.startswith(cache_prefix):
+        return None
+    cuts = sorted({i for m in CACHE_PREFIX_SPLIT_MARKERS
+                   for i in [cache_prefix.find(m)] if 0 < i < len(cache_prefix)})
+    segments: list[tuple[str, bool]] = []
+    start = 0
+    for cut in cuts:
+        segments.append((cache_prefix[start:cut], True))
+        start = cut
+    segments.append((cache_prefix[start:], True))
+    tail = prompt[len(cache_prefix):]
+    if tail:
+        segments.append((tail, False))
+    return segments
+
+
+def _pricing_date():
+    """The day prices are read for: today, or PYTHIA_PRICING_DATE (YYYY-MM-DD)."""
+    from datetime import date as _date  # noqa: PLC0415
+
+    raw = (os.getenv("PYTHIA_PRICING_DATE") or "").strip()
+    if raw:
+        try:
+            return _date.fromisoformat(raw)
+        except ValueError:
+            LOGGER.warning("PYTHIA_PRICING_DATE=%r is not YYYY-MM-DD; using today", raw)
+    return _date.today()
+
+
+def _effective_cost_entry(value: Any, today) -> Any:
+    """An entry with ``promo_until`` prices at its promotional rates up to and
+    including that day, and at its ``list`` rates after it (Oct 2026: Google
+    runs gemini-3.6-flash at half price through 2026-12-31). A ``list`` field
+    the entry does not restate keeps the promotional value."""
+    if not isinstance(value, dict) or not value.get("promo_until"):
+        return value
+    from datetime import date as _date  # noqa: PLC0415
+
+    try:
+        until = _date.fromisoformat(str(value["promo_until"]))
+    except ValueError:
+        return value
+    listed = value.get("list")
+    if today <= until or not isinstance(listed, dict):
+        return value
+    merged = {k: v for k, v in value.items() if k not in ("promo_until", "list")}
+    merged.update(listed)
+    return merged
+
+
+def _parse_model_costs(raw: Dict[str, Any], today=None) -> tuple[Dict[str, tuple[float, float]], Dict[str, Dict[str, float]]]:
     """Split the raw cost table into (input, output) tuples + full detail records."""
 
+    today = today or _pricing_date()
     pairs: Dict[str, tuple[float, float]] = {}
     details: Dict[str, Dict[str, float]] = {}
     for key, value in raw.items():
         if key.startswith("_"):
             continue
+        value = _effective_cost_entry(value, today)
         try:
             if isinstance(value, (list, tuple)) and len(value) == 2:
                 pairs[key] = (float(value[0]), float(value[1]))
@@ -1062,6 +1136,7 @@ def build_openai_body(
     *,
     reasoning_effort: Optional[str] = None,
     prompt_cache_key: Optional[str] = None,
+    max_completion_tokens: Optional[int] = None,
 ) -> dict:
     """Build the exact /v1/chat/completions request body.
 
@@ -1082,7 +1157,52 @@ def build_openai_body(
     # prefixes); gated so legacy requests stay byte-identical when off.
     if prompt_cache_key and _prompt_cache_enabled():
         body["prompt_cache_key"] = prompt_cache_key
+    if max_completion_tokens and int(max_completion_tokens) > 0:
+        body["max_completion_tokens"] = int(max_completion_tokens)
     return body
+
+
+# Purposes whose answer is a forecast JSON. Reasoning tokens share the
+# completion ceiling, so the forecast members get an explicit, generous one
+# rather than whatever the account default is (Oct 2026: a gpt-6-sol SPD
+# answer was stored cut mid-JSON at 8,549 completion tokens with no finish
+# reason recorded). 0 sends no ceiling at all.
+_OPENAI_FORECAST_PURPOSES = {"spd_v2", "binary_v2", "track2_spd"}
+
+
+def openai_max_output_tokens(purpose: Optional[str]) -> Optional[int]:
+    """The explicit output ceiling for an OpenAI call of this purpose."""
+    if (purpose or "") not in _OPENAI_FORECAST_PURPOSES:
+        return None
+    try:
+        value = int(os.getenv("PYTHIA_OPENAI_SPD_MAX_OUTPUT_TOKENS", "") or 65536)
+    except ValueError:
+        value = 65536
+    return value if value > 0 else None
+
+
+_OPENAI_TERMINAL_FINISH = {"stop", "tool_calls", "function_call", ""}
+
+
+def openai_text_and_finish(payload: Any) -> tuple[str, str]:
+    """(answer text, finish_reason) from a chat-completions payload."""
+    text, finish = "", ""
+    if isinstance(payload, dict):
+        choices = payload.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            finish = str(choices[0].get("finish_reason") or "")
+            message = choices[0].get("message") or {}
+            if isinstance(message, dict):
+                text = str(message.get("content") or "").strip()
+    return text, finish
+
+
+def openai_finish_problem(finish_reason: str) -> Optional[str]:
+    """An error string when the answer did not end of its own accord."""
+    fr = (finish_reason or "").lower()
+    if fr in _OPENAI_TERMINAL_FINISH:
+        return None
+    return f"truncated: OpenAI finish_reason={fr}"
 
 
 def _openai_usage_from_payload(payload: Any) -> Dict[str, Any]:
@@ -1107,6 +1227,7 @@ def call_openai(
     *,
     reasoning_effort: Optional[str] = None,
     prompt_cache_key: Optional[str] = None,
+    max_completion_tokens: Optional[int] = None,
 ) -> ProviderResult:
     if not _OPENAI_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing OPENAI_API_KEY")
@@ -1116,6 +1237,7 @@ def call_openai(
         temperature,
         reasoning_effort=reasoning_effort,
         prompt_cache_key=prompt_cache_key,
+        max_completion_tokens=max_completion_tokens,
     )
     try:
         resp = requests.post(
@@ -1152,14 +1274,14 @@ def call_openai(
             retry_after=retry_after,
         )
 
-    text = ""
-    if isinstance(payload, dict):
-        choices = payload.get("choices") or []
-        if choices and isinstance(choices[0], dict):
-            message = choices[0].get("message") or {}
-            if isinstance(message, dict):
-                text = str(message.get("content", "")).strip()
+    text, finish = openai_text_and_finish(payload)
     usage = _openai_usage_from_payload(payload)
+    if finish:
+        usage["finish_reason"] = finish
+    problem = openai_finish_problem(finish)
+    if problem:
+        # Usage is kept: the cut answer was billed in full.
+        return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model, error=problem)
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
@@ -1711,7 +1833,8 @@ def build_body_for_spec(
     provider = (ms.provider or "").lower()
     if provider == "openai":
         return build_openai_body(
-            prompt, ms.model_id, effective_temperature, reasoning_effort=thinking_level
+            prompt, ms.model_id, effective_temperature, reasoning_effort=thinking_level,
+            max_completion_tokens=openai_max_output_tokens(ms.purpose),
         )
     if provider == "anthropic":
         cache_segments = None
@@ -1720,7 +1843,7 @@ def build_body_for_spec(
             and cache_prefix
             and prompt.startswith(cache_prefix)
         ):
-            cache_segments = [(cache_prefix, True), (prompt[len(cache_prefix):], False)]
+            cache_segments = cache_segments_from_prefix(prompt, cache_prefix)
         return build_anthropic_body(
             prompt, ms.model_id, effective_temperature, purpose=ms.purpose,
             cache_segments=cache_segments,
@@ -1753,6 +1876,7 @@ def _call_provider_sync(
             prompt, model, temperature,
             reasoning_effort=thinking_level,
             prompt_cache_key=prompt_cache_key,
+            max_completion_tokens=openai_max_output_tokens(purpose),
         )
     if p == "anthropic":
         return call_anthropic(
@@ -2216,6 +2340,7 @@ async def call_chat_ms(
             "Anthropic refusal:" in error
             or "truncated at max_tokens" in error
             or error.startswith("truncated: Gemini finishReason=")
+            or error.startswith("truncated: OpenAI finish_reason=")
         ):
             # Content-driven outcomes (safety classifier / output ceiling),
             # not provider health — feeding them to the breaker would let 6

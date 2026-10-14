@@ -65,7 +65,8 @@ def test_batch_body_matches_sync_body(monkeypatch: pytest.MonkeyPatch) -> None:
         ms = dataclasses.replace(ms, purpose="spd_v2")
         batch = providers.build_body_for_spec(ms, "PROMPT", 0.2, prompt_cache_key="k")
         sync = providers.build_openai_body(
-            "PROMPT", ms.model_id, 0.2, reasoning_effort=ms.thinking
+            "PROMPT", ms.model_id, 0.2, reasoning_effort=ms.thinking,
+            max_completion_tokens=providers.openai_max_output_tokens("spd_v2"),
         )
         assert batch == {k: v for k, v in sync.items() if k != "prompt_cache_key"}
         assert batch["reasoning_effort"] == ms.thinking

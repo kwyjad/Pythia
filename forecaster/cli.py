@@ -2016,6 +2016,14 @@ def _write_spd_members_v2_to_db(
             if is_shadow(ms):
                 # Scored like any member, never part of the ensemble.
                 spd_json_payload["shadow"] = True
+            try:
+                _pm = raw_calls[idx].get("parse_mode") if isinstance(raw_calls[idx], dict) else None
+            except Exception:  # noqa: BLE001
+                _pm = None
+            # 'salvaged': the whole answer would not parse and only its spds
+            # block was kept (the trace and explanation are lost). Counted
+            # by the debug bundle's SPD Ensemble line.
+            spd_json_payload["parse_mode"] = _pm or "ok"
             ordered_months = _month_indices(model_spd)
             if len(ordered_months) < 6:
                 next_idx = len(ordered_months) + 1
@@ -3626,12 +3634,9 @@ async def _call_spd_model_for_spec_inner(
     # Segments are derived HERE, against the prompt actually being sent, so
     # tail appends (web/retriever evidence) can never break the invariant
     # that the segments join to the sent prompt.
-    cache_segments = None
-    if cache_prefix and prompt_with_evidence.startswith(cache_prefix):
-        cache_segments = [
-            (cache_prefix, True),
-            (prompt_with_evidence[len(cache_prefix):], False),
-        ]
+    from forecaster.providers import cache_segments_from_prefix
+
+    cache_segments = cache_segments_from_prefix(prompt_with_evidence, cache_prefix)
 
     start = time.time()
     try:
@@ -3920,6 +3925,7 @@ async def _call_spd_members_v2(
                     len(str(text)),
                 )
                 spd_obj = salvaged
+                raw_call_entry["parse_mode"] = "salvaged"
             else:
                 LOG.warning(
                     "SPD member response failed to parse for %s / %s: %s "
@@ -5121,10 +5127,14 @@ async def _run_binary_forecast_for_question(
 
         anchor_month = _anchor_month_for_question(rec)
 
-        # Call models — reuse the same model calling infrastructure.
-        # Binary prompts have no prefix/suffix split (no cache_segments);
-        # the OpenAI routing hint alone is zero-risk and helps automatic
-        # caching group the shared static sections.
+        # Call models — reuse the same model calling infrastructure. The V3
+        # binary prompt's static text (role, task, hazard reasoning, output
+        # instructions) is the same for every country of a hazard, so it is
+        # the Anthropic cache prefix (Oct 2026; before, binary_v2 sent no
+        # breakpoint and read nothing from cache).
+        from forecaster.binary_prompts import binary_cache_prefix
+
+        binary_prefix = binary_cache_prefix(prompt)
         per_model_spds, usage, raw_calls, ensemble_meta = (
             await _call_spd_members_v2_compat(
                 prompt,
@@ -5138,6 +5148,7 @@ async def _run_binary_forecast_for_question(
                 wording=wording,
                 batch_family="binary_v2",
                 prompt_cache_key=f"pythia:binary_v2:{hz}:{metric}:t{track}",
+                cache_prefix=binary_prefix,
             )
         )
         if _batch_submit_active():

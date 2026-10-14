@@ -20,6 +20,19 @@ from typing import Any
 LOG = logging.getLogger(__name__)
 
 
+#: The end of a V3 binary prompt's static text: role, task, hazard
+#: reasoning and output instructions, the same for every country of a hazard
+#: in a run (about 3,050 characters on 13 Oct 2026).
+BINARY_STATIC_END = "The QUESTION DATA follows below.\n\n"
+
+
+def binary_cache_prefix(prompt: str) -> str | None:
+    """The cacheable static prefix of a V3 binary prompt, or None (legacy
+    order, or no marker)."""
+    i = (prompt or "").find(BINARY_STATIC_END)
+    return prompt[: i + len(BINARY_STATIC_END)] if i > 0 else None
+
+
 def build_binary_event_prompt(
     *,
     question: dict,
