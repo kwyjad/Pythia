@@ -392,7 +392,7 @@ class TestBundle:
             assert len(none) == 1 and none[0]["signal_class"] == "no_trace" and none[0]["delta_json"] == ""
             assert (Q_ACE, "ensemble_mean_v2") not in by_model
             assert by_model[(Q_ACE, "sibyl")][0]["signal_class"] == "no_trace"
-            assert by_model[(Q_BIN, "gpt-5.6-sol")][0]["signal_class"] == "no_trace"
+            assert by_model[(Q_BIN, "gpt-5.6-sol")][0]["signal_class"] == "binary_no_trace"
             t2 = by_model[(Q_FL, "track2_flash")]
             assert len(t2) == 1 and t2[0]["is_prior_row"] == "True"
 

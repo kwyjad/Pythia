@@ -994,6 +994,17 @@ never uses a model call, because month-over-month comparison is worthless
 if the classes drift with the classifier. The taxonomy is versioned
 (`taxonomy_version` in the manifest); compare ledgers only within one
 version.
+
+Since taxonomy 2.0 (Oct 2026) each row also carries `signal_class_secondary`,
+the next-highest distinct class that matched (blank when only one did), so
+"counter-evidence: a below-normal rainfall forecast" reads as adversarial
+counter-evidence about a meteorological forecast. `prior_arithmetic_repair`
+marks bookkeeping on the distribution itself (interpolation, renormalising,
+carrying a month over); its rows stay in the ledger with
+`carries_signal_mass = false`, and every mass share leaves them out. A binary
+(EVENT_OCCURRENCE) member returns no trace by design and is recorded as
+`binary_no_trace`, never as `no_trace`, which is kept for a member that
+should have returned a trace and did not.
 """
 
 
