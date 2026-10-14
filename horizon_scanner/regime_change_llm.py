@@ -377,15 +377,20 @@ def _try_brave_grounding(
 ) -> dict[str, Any] | None:
     """Try Brave Search API grounding. Returns pack dict or None."""
     try:
-        from pythia.web_research.backends.brave_search import fetch_via_brave_search
+        from pythia.web_research.backends.brave_search import (
+            fetch_via_brave_search,
+            stage_grounding_limits,
+        )
+        limits = stage_grounding_limits("RC")
         evidence_pack = fetch_via_brave_search(
             query_label,
             recency_days=recency,
             include_structural=True,
             timeout_sec=30,
-            max_results=10,
+            max_results=limits["max_sources"],
             hazard_code=hazard_code,
             country_name=country_name,
+            max_queries=limits["max_queries"],
         )
         pack = evidence_pack.to_dict() if hasattr(evidence_pack, "to_dict") else dict(evidence_pack)
         if pack.get("sources") or pack.get("grounded"):

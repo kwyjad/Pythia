@@ -723,6 +723,11 @@ jobs:
             --sibyl-run-id "${SIBYL_RUN_ID:-}" \
             --since "${STAGE_STARTED_AT:-}" \
             --out diagnostics/stage_health__sibyl.json
+          # Which grounding sources the HS models cited, by stage, over the
+          # last two production runs (Oct 2026). Read-only, always exits 0.
+          python -m scripts.ci.grounding_citation --db "${RESOLVER_DB_URL}" \
+            --runs 2 --out diagnostics/grounding_citation.json \
+            | tee -a "${GITHUB_STEP_SUMMARY}" || true
           exit 0
 
       - name: Upload stage diagnostics
@@ -734,6 +739,7 @@ jobs:
           path: |
             diagnostics/stage_health__sibyl.json
             diagnostics/provider_preflight.json
+            diagnostics/grounding_citation.json
             diagnostics/job_logs/
             sibyl_stdout.txt
           if-no-files-found: warn

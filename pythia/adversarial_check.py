@@ -510,6 +510,14 @@ def run_adversarial_check(
 
     # 1. Build adversarial queries
     queries = _build_adversarial_queries(country_name, iso3_up, hz, rc)
+    try:
+        from pythia.web_research.backends.brave_search import stage_grounding_limits
+
+        _max_q = stage_grounding_limits("ADVERSARIAL")["max_queries"]
+        if _max_q:
+            queries = queries[:_max_q]
+    except Exception:  # noqa: BLE001 — a limit read must never cost the check
+        pass
 
     # 2. Run web searches
     retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
@@ -525,7 +533,10 @@ def run_adversarial_check(
             pack: dict = {}
             # Try Brave Search first (direct, deterministic, no LLM overhead)
             try:
-                from pythia.web_research.backends.brave_search import fetch_via_brave_search
+                from pythia.web_research.backends.brave_search import (
+                    fetch_via_brave_search,
+                    stage_grounding_limits,
+                )
                 brave_api_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
                 if brave_api_key:
                     brave_pack = fetch_via_brave_search(
@@ -533,7 +544,7 @@ def run_adversarial_check(
                         recency_days=30,
                         include_structural=True,
                         timeout_sec=30,
-                        max_results=10,
+                        max_results=stage_grounding_limits("ADVERSARIAL")["max_sources"],
                     )
                     pack = brave_pack.to_dict() if hasattr(brave_pack, "to_dict") else dict(brave_pack)
                     if pack.get("sources") or pack.get("grounded"):

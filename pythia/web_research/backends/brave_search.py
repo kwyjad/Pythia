@@ -123,6 +123,32 @@ def build_brave_queries(
     ]
 
 
+#: Grounding stages whose Brave use is configurable (Oct 2026).
+GROUNDING_STAGES = ("RC", "TRIAGE", "ADVERSARIAL")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+
+
+def stage_grounding_limits(stage: str) -> Dict[str, int]:
+    """Per-stage Brave limits: sources kept and queries sent.
+
+    ``PYTHIA_<STAGE>_GROUNDING_MAX_SOURCES`` (default 10) caps the sources a
+    pack keeps, which sets the prompt's length but not the Brave bill: Brave
+    charges per query. ``PYTHIA_<STAGE>_GROUNDING_MAX_QUERIES`` (default 0,
+    every template) caps the query formulations sent, which is what sets the
+    bill. Stages: RC, TRIAGE, ADVERSARIAL.
+    """
+    stage = (stage or "").upper()
+    sources = _env_int(f"PYTHIA_{stage}_GROUNDING_MAX_SOURCES", 10)
+    queries = _env_int(f"PYTHIA_{stage}_GROUNDING_MAX_QUERIES", 0)
+    return {"max_sources": max(1, sources), "max_queries": max(0, queries)}
+
+
 def _map_freshness(recency_days: int) -> str:
     """Map recency_days to Brave freshness parameter.
 
@@ -223,6 +249,7 @@ def fetch_via_brave_search(
     freshness_override: str | None = None,
     search_lang: str | None = None,
     country: str | None = None,
+    max_queries: int | None = None,
 ) -> EvidencePack:
     """Fetch web research evidence via Brave Search API.
 
@@ -286,21 +313,31 @@ def fetch_via_brave_search(
         queries = build_brave_queries(hazard_code, country_name)
     else:
         queries = [query]
+    if max_queries and max_queries > 0:
+        queries = queries[:max_queries]
 
-    # Run all queries and collect results
+    # Run the queries in order and stop once the pack is full. A pack keeps
+    # the first ``max_results`` unique URLs in query order, so a query sent
+    # after that point is paid for and never reaches the pack: until Oct
+    # 2026 every formulation was sent regardless (998 RC and ~650 triage
+    # queries a run). Stopping early keeps every pack byte-identical.
     all_results: List[Dict[str, Any]] = []
     seen_urls: Set[str] = set()
+    results_per_query: List[int] = []
     total_queries = 0
     last_status_code = 0
 
     for q in queries:
+        if len(all_results) >= max_results:
+            break
         results, status_code = _run_single_query(
             q, api_key, freshness, timeout_sec, count=max_results,
             search_lang=search_lang, country=country,
         )
         total_queries += 1
         last_status_code = status_code
-        for r in results:
+        results_per_query.append(len(results or []))
+        for r in results or []:
             url = r.get("url", "")
             if url and url not in seen_urls:
                 seen_urls.add(url)
@@ -378,7 +415,9 @@ def fetch_via_brave_search(
         "n_sources": len(sources),
         "n_verified_sources": len(sources),
         "total_queries": total_queries,
-        "queries_used": queries,
+        "results_per_query": results_per_query,
+        "queries_skipped_pack_full": len(queries) - total_queries,
+        "queries_used": queries[:total_queries],
         "freshness": freshness,
         "usage": usage,
         "fetched_at": datetime.utcnow().isoformat(),
