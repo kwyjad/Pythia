@@ -23,6 +23,9 @@ on:
       - "scripts/refresh_crisiswatch.py"
       - "pythia/acaps.py"
       - "pythia/adversarial_check.py"
+      - "pythia/web_research/backends/brave_search.py"
+      - "scripts/ci/grounding_citation.py"
+      - "tests/test_brave_query_spend.py"
       # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
       # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
       # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.
@@ -55,6 +58,9 @@ on:
       - "scripts/refresh_crisiswatch.py"
       - "pythia/acaps.py"
       - "pythia/adversarial_check.py"
+      - "pythia/web_research/backends/brave_search.py"
+      - "scripts/ci/grounding_citation.py"
+      - "tests/test_brave_query_spend.py"
       # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
       # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
       # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.
@@ -122,4 +128,5 @@ jobs:
             resolver/tests/test_run_34081262443_fixes.py \
             resolver/tests/test_group_f_small_repairs.py \
             resolver/tests/test_crisiswatch_known_gaps.py \
+            tests/test_brave_query_spend.py \
             -m "not allow_network and not network"
