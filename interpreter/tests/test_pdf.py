@@ -495,3 +495,34 @@ class TestHostileReportText:
         assert out.read_bytes().count(b"/Subtype /Image") == 0
         pdf._render_pdf(f'<html><body><img src="{png}"></body></html>', out)
         assert out.read_bytes().count(b"/Subtype /Image") >= 1
+
+
+class TestUnvalidatedBanner:
+    """The first page says UNVALIDATED and why (Oct 2026)."""
+
+    def test_names_the_failed_checks_and_the_failed_correction(self):
+        import json as _json
+
+        row = {"kind": "combined", "version": 1, "status": "failed_validation",
+               "content_md": "# r\n\n## Section\n\nbody", "created_at": "2026-10-13",
+               "interpretation_id": "int_combined_fc_1791866322_v1",
+               "validation_json": _json.dumps({
+                   "passed": False,
+                   "checks": {"schema": {"passed": True}, "referential": {"passed": False},
+                              "style": {"passed": True}},
+                   "correction": {"attempted": True}})}
+        html = pdf.build_report_html(row)
+        assert "UNVALIDATED" in html and "referential" in html
+        assert "the correction pass did not fix it" in html
+        # On the first page: before the contents and the first section.
+        assert html.index("UNVALIDATED") < html.index("<h2")
+
+    def test_says_when_no_correction_ran(self):
+        text = pdf.unvalidated_banner_text({"status": "failed_validation", "validation_json": "{}"})
+        assert "no correction pass ran" in text
+
+    def test_an_ok_row_has_no_banner(self):
+        html = pdf.build_report_html({"kind": "combined", "version": 1, "status": "ok",
+                                      "content_md": "# r", "created_at": "x",
+                                      "interpretation_id": "i"})
+        assert "UNVALIDATED" not in html

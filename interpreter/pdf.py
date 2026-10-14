@@ -364,11 +364,7 @@ def build_report_html(
     status = str(row.get("status") or "")
     banner = ""
     if status != "ok":
-        banner = (
-            '<div class="banner">This report failed automated validation '
-            f"(status: {_html.escape(status)}) and is included for inspection "
-            "only.</div>"
-        )
+        banner = '<div class="banner">' + _html.escape(unvalidated_banner_text(row)) + "</div>"
     meta_bits = [
         f"kind: {_html.escape(str(row.get('kind') or ''))}",
         f"version: v{row.get('version')}",
@@ -450,7 +446,39 @@ def _render_pdf(html: str, out_path: Path) -> None:
 _ROW_COLUMNS = (
     "interpretation_id", "kind", "run_id", "hs_run_id", "scored_run_id",
     "version", "status", "content_md", "created_at", "is_test",
+    "validation_json",
 )
+
+
+def unvalidated_banner_text(row: dict[str, Any]) -> str:
+    """The first-page warning on a report that did not pass validation.
+
+    It names the checks that failed and says whether the correction pass
+    ran, so a reader of the PDF alone can tell a report that was never
+    corrected from one whose correction also failed (Oct 2026).
+    """
+    status = str(row.get("status") or "")
+    failed: list[str] = []
+    attempted = False
+    try:
+        v = json.loads(row.get("validation_json") or "{}")
+    except (TypeError, ValueError):
+        v = {}
+    if isinstance(v, dict):
+        checks = v.get("checks") if isinstance(v.get("checks"), dict) else {}
+        failed = sorted(k for k, c in checks.items() if isinstance(c, dict) and not c.get("passed", True))
+        corr = v.get("correction") if isinstance(v.get("correction"), dict) else {}
+        attempted = bool(corr.get("attempted"))
+    if status == "failed_validation":
+        text = "UNVALIDATED. This report failed automated validation"
+        if failed:
+            text += " (" + ", ".join(failed) + ")"
+        text += (", and the correction pass did not fix it" if attempted
+                 else "; no correction pass ran")
+        return (text + f". Read it for inspection only; its figures and citations have not been "
+                f"checked (status: {status}).")
+    return (f"UNVALIDATED. This report has status {status or 'unknown'} and is included for "
+            "inspection only.")
 
 
 def select_row(

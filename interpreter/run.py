@@ -437,6 +437,7 @@ def run_interpreter(
             # a hole where the scale of the run should be.
             global_figures.update(packs.run_summary_figures(pack))
         scored_section: str | None = None
+        scored_qids: set[str] = set()
         scored_probe = _scored_run_probe(con) if kind == "combined" else {}
         if kind == "combined":
             latest = store.latest_scored(con)
@@ -455,6 +456,7 @@ def run_interpreter(
                 )
             if latest and latest.get("content"):
                 scored_section = json.dumps(latest["content"], indent=1, default=str)
+                scored_qids = validate.scored_question_ids(latest["content"])
                 scored_run_id = scored_run_id or latest.get("scored_run_id")
                 # The stored map is {"global": {...}, "per_question": {...}} —
                 # merge both so the scored interpretation's placeholders
@@ -596,6 +598,7 @@ def run_interpreter(
                 evidence_text=evidence,
                 require_performance=require_performance,
                 require_attention=require_attention,
+                performance_question_ids=scored_qids,
             )
 
         report = _validate(content)
