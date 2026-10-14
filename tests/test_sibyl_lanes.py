@@ -64,6 +64,16 @@ def test_five_lanes_each_fill_every_slot():
     assert "reference" in sibyl_agent.TRIAL_LANES["E"]
 
 
+@pytest.fixture(autouse=True)
+def _legacy_trial_settings(monkeypatch):
+    # These tests exercise the extra-trial machinery under the K=3 settings
+    # it was built for; the 2026-10-14 defaults are tested in
+    # tests/test_sibyl_oct14.py.
+    from tests.sibyl_test_utils import legacy_trials
+
+    legacy_trials(monkeypatch)
+
+
 def test_lane_follows_the_trial_index():
     assert [sibyl_agent.lane_for_trial(i) for i in range(6)] == ["A", "B", "C", "D", "E", "A"]
 
@@ -366,6 +376,9 @@ def test_overrides_parse_from_the_environment():
 
 def test_a_control_runs_one_trial_on_lane_a_and_no_extras(run_env, monkeypatch):
     monkeypatch.setattr(sibyl_config, "N_CONTROL", 1)
+    from tests.sibyl_test_utils import set_rc_level
+
+    set_rc_level("SOM", 0)  # Q2 carries no RC flag, so it is the control
     calls = []
     # Q1 (floor) and Q2 (control); the control's lane A disagrees with nothing.
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=2, model_call=_lane_model({"C": FAR, "*": LOW}, calls))

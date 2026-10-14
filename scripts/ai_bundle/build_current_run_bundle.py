@@ -1124,8 +1124,11 @@ def build_sibyl_section(
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("sibyl section unavailable: %s", exc)
         return {"available": False, "reason": str(exc)}
+    carried = _sibyl_carried_forward(con, run_id, attention_rows,
+                                     covered={str(f["question_id"]) for f in forecasts})
     if not forecasts:
-        return {"available": False, "reason": f"Sibyl covered nothing in run {run_id}"}
+        return {"available": False, "reason": f"Sibyl covered nothing in run {run_id}",
+                "carried_forward": carried}
 
     ratio = _interp_config.sibyl_disagreement_ratio()
     share = _interp_config.sibyl_unsettled_share()
@@ -1215,7 +1218,53 @@ def build_sibyl_section(
         "caveat": _secondopinion.SIBYL_CAVEAT,
         "summary": _secondopinion.summarise(rows),
         "rows": rows,
+        "carried_forward": carried,
     }
+
+
+def _sibyl_carried_forward(con, run_id: str, attention_rows: list[dict[str, Any]], *,
+                           covered: set) -> list[dict[str, Any]]:
+    """Questions of this run whose only Sibyl forecast is from an earlier run.
+
+    Each carries the label sibyl.labels writes, and the attention row gets it
+    as ``sibyl_carried_forward_label``, so the report never shows an earlier
+    Sibyl forecast as if it were this run's (2026-10-14). Never raises.
+    """
+    from sibyl.labels import carried_forward  # noqa: PLC0415
+
+    qids = [str(r["question_id"]) for r in attention_rows
+            if str(r.get("question_id")) not in covered]
+    if not qids:
+        return []
+    has_ts = column_exists(con, "sibyl_forecasts", "created_at")
+    ts = "created_at" if has_ts else "CAST(NULL AS TIMESTAMP)"
+    order = "created_at DESC NULLS LAST" if has_ts else "sibyl_run_id DESC"
+    try:
+        found = rows_as_dicts(
+            con,
+            f"SELECT question_id, sibyl_run_id, run_id, {ts} AS created_at FROM ("
+            f" SELECT *, ROW_NUMBER() OVER (PARTITION BY question_id ORDER BY {order}) AS rn"
+            " FROM sibyl_forecasts"
+            " WHERE status = 'ok' AND question_id IN (SELECT UNNEST(?::VARCHAR[]))"
+            + _sibyl_evidence_clause(con) + ") WHERE rn = 1",
+            [qids],
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("sibyl carried-forward lookup failed: %s", exc)
+        return []
+    by_qid = {str(r["question_id"]): r for r in attention_rows}
+    out: list[dict[str, Any]] = []
+    for f in found:
+        carry = carried_forward(sibyl_run_id=f.get("sibyl_run_id"),
+                                sibyl_forecast_run_id=f.get("run_id"),
+                                current_run_id=run_id, sibyl_created_at=f.get("created_at"))
+        if not carry:
+            continue
+        qid = str(f["question_id"])
+        out.append({"question_id": qid, **carry})
+        if qid in by_qid:
+            by_qid[qid]["sibyl_carried_forward_label"] = carry["label"]
+    return sorted(out, key=lambda r: r["question_id"])
 
 
 # ---------------------------------------------------------------------------

@@ -108,6 +108,27 @@ logger = logging.getLogger(__name__)
 SKIP_REASON_BUDGET = "run budget cap"
 SKIP_REASON_TIME = "run time cap"
 SKIP_REASON_NO_EVIDENCE = "no evidence"
+SKIP_REASON_COST_GATE = "cost_per_question_gate"
+
+
+def cost_gate_verdict(cost_usd: float, question_equivalents: float, *,
+                      stated: Optional[float] = None) -> tuple:
+    """(status, ratio) of the realised cost per question against the stated one.
+
+    *question_equivalents* counts a pick as one question and a one-trial
+    control as 1/K. 'ok', 'warn' above SIBYL_COST_GATE_WARN_RATIO (1.5x),
+    'stop' above SIBYL_COST_GATE_STOP_RATIO (2.5x); (None, None) when there
+    is nothing to compare.
+    """
+    stated = float(_cfg.STATED_COST_PER_QUESTION_USD if stated is None else stated)
+    if stated <= 0 or question_equivalents <= 0:
+        return None, None
+    ratio = (float(cost_usd) / float(question_equivalents)) / stated
+    if ratio > _cfg.COST_GATE_STOP_RATIO:
+        return "stop", ratio
+    if ratio > _cfg.COST_GATE_WARN_RATIO:
+        return "warn", ratio
+    return "ok", ratio
 
 
 def _runtime_cap_reached(started: float, limit_min: float, now: Optional[float] = None) -> bool:
@@ -295,7 +316,8 @@ def process_question(
             log_sink=sink,
             trial_brief=briefs.get(lane, ""),
             resolver_reading=reading.text,
-            pack=pack.text,
+            # Paired design (2026-10-14): only the pack lane sees the pack.
+            pack=(pack.text if lane == _cfg.PACK_LANE else ""),
         )
 
     def _batch(jobs, role: str) -> None:
@@ -314,17 +336,22 @@ def process_question(
             trial.role = role
             outcome.trials.append(trial)
 
-    # Production trials: K on lanes A, B, C (a control: one, on lane A).
-    n_production = 1 if is_control else K
-    _batch([(i, "A" if is_control else lane_for_trial(i)) for i in range(n_production)], "production")
+    # Production trials: K on lanes A, B, ... (a control: one, on the
+    # no-pack lane, so controls show Sibyl without the structured data).
+    n_production = 1 if is_control else _cfg.K
+    _batch([(i, _cfg.NO_PACK_LANE if is_control else lane_for_trial(i))
+            for i in range(n_production)], "production")
 
     def _valid() -> List[TrialResult]:
         return [t for t in outcome.trials if t.ok and t.evidence_ok]
 
-    # Extra trials (lanes D, E) when the production trials disagree or their
-    # pool departs far from the reference. Never for a control.
+    # Extra trials when the production trials disagree or their pool departs
+    # far from the reference. Never for a control. Since 2026-10-14 (K=2,
+    # K_MAX=2) the only extra is the reconciler (lane R), and only on
+    # disagreement: month-1 JSD between the two trials above
+    # SIBYL_EXTRA_TRIALS_JSD. K_MAX above K adds lanes as before.
     metric = question.metric
-    if not is_control and _cfg.K_MAX > n_production and len(_valid()) >= 2:
+    if not is_control and len(_valid()) >= 2:
         from sibyl.aggregate import month_vector  # noqa: PLC0415
 
         valid = _valid()
@@ -342,8 +369,10 @@ def process_question(
         if rule:
             extra = [
                 (n_production + j, LANE_IDS[(n_production + j) % len(LANE_IDS)])
-                for j in range(_cfg.K_MAX - n_production)
+                for j in range(max(0, _cfg.K_MAX - n_production))
             ]
+            if rule == RULE_DISAGREEMENT and not extra:
+                extra = [(n_production, "D")]  # replaced by R below
             if rule == RULE_DISAGREEMENT and extra:
                 # The reconciler (review Part 4) takes D's place: it starts
                 # from a brief of what the production trials found and where
@@ -362,6 +391,8 @@ def process_question(
                     extra = [
                         (idx, RECONCILE_LANE if lane == "D" else lane) for idx, lane in extra
                     ]
+                    if RECONCILE_LANE not in [lane for _i, lane in extra]:
+                        extra[0] = (extra[0][0], RECONCILE_LANE)
                 except (ValueError, KeyError) as exc:
                     logger.warning("sibyl.run: no reconcile brief for %s (%s); lanes D/E run",
                                    question.question_id, exc)
@@ -370,6 +401,9 @@ def process_question(
                 question.question_id, len(extra), rule, measures,
             )
             outcome.extra_trials_rule = rule
+            if not extra:
+                logger.info("sibyl.run: %s %s, but K_MAX leaves no room for extra trials",
+                            question.question_id, rule)
             _batch(extra, rule)
     outcome.trial_checks["n_trials_run"] = len(outcome.trials)
     rec = outcome.trial_checks.get("reconcile")
@@ -385,7 +419,8 @@ def process_question(
 
     # Outlier guard: a trial whose month-1 median sits more than
     # OUTLIER_LOG10 orders of magnitude from the others' is left out of the
-    # pool while two remain; it stays in trials_json, marked.
+    # pool while two remain; it stays in trials_json, marked. It needs three
+    # valid trials to act, so at K=2 it is inert unless the reconciler ran.
     valid = _valid()
     if len(valid) >= 3:
         medians = [
@@ -403,7 +438,7 @@ def process_question(
     # with its trials kept, and nothing reaches the forecast tables.
     finished = [t for t in outcome.trials if t.ok]
     ok_trials = [t for t in finished if t.evidence_ok and not t.outlier_dropped]
-    required = 1 if is_control else max(1, min(_cfg.MIN_VALID_TRIALS, K))
+    required = 1 if is_control else max(1, min(_cfg.MIN_VALID_TRIALS, _cfg.K))
     if len([t for t in finished if t.evidence_ok]) < required:
         if not finished:
             outcome.skip_reason = "no successful trials"
@@ -415,6 +450,11 @@ def process_question(
                 question.question_id, len(ok_trials), len(finished), required,
             )
         return outcome
+
+    # One valid trial is enough since 2026-10-14 (SIBYL_MIN_VALID_TRIALS=1 at
+    # K=2); such a forecast is flagged, and the flag is shown wherever it is.
+    single_trial = (not is_control) and len(ok_trials) == 1
+    outcome.trial_checks["single_trial"] = single_trial
 
     from pythia.buckets import n_buckets_for  # noqa: PLC0415
 
@@ -546,6 +586,7 @@ def process_question(
             "resolver_reading": reading.record or None,
             "pack_arm": pack.arm,
             "pack": pack.record() if pack.arm else None,
+            "single_trial": single_trial,
         },
     )
     outcome.status = "ok"
@@ -683,6 +724,11 @@ def run_sibyl(
     clock = clock or time.monotonic
     budget_capped = False
     time_capped = False
+    cost_gate_status: Optional[str] = None
+    cost_gate_ratio: Optional[float] = None
+    cost_gate_stopped = False
+    n_processed = 0
+    question_equivalents = 0.0
     n_forecast = 0
     n_skipped = 0
     resolved_hs_run_id = hs_run_id
@@ -717,7 +763,7 @@ def run_sibyl(
             resolved_hs_run_id = questions[0].hs_run_id
         logger.info(
             "sibyl.run: %s starting — %d questions, cap $%.2f, K=%d, model=%s",
-            sibyl_run_id, len(questions), tracker.run_hard_cap_usd, K, MODEL,
+            sibyl_run_id, len(questions), tracker.run_hard_cap_usd, _cfg.K, MODEL,
         )
 
         shadow = shadow_setup(model_call_injected=model_call is not None, shadow_call=shadow_call)
@@ -746,6 +792,14 @@ def run_sibyl(
                     con, question,
                     sibyl_run_id=sibyl_run_id, status="skipped",
                     skip_reason=SKIP_REASON_TIME, tracker=tracker,
+                )
+                continue
+            if cost_gate_stopped:
+                n_skipped += 1
+                _persist_non_ok(
+                    con, question,
+                    sibyl_run_id=sibyl_run_id, status="skipped",
+                    skip_reason=SKIP_REASON_COST_GATE, tracker=tracker,
                 )
                 continue
             if tracker.hard_cap_reached():
@@ -786,6 +840,29 @@ def run_sibyl(
 
             con = _ensure_live(con)
             outcomes.append(outcome)
+            # The cost gate (2026-10-14): from the third question on, the
+            # realised cost per question against the stated figure.
+            n_processed += 1
+            question_equivalents += (1.0 / max(_cfg.K, 1)) if question.is_control else 1.0
+            if n_processed >= _cfg.COST_GATE_AFTER_QUESTIONS:
+                status, ratio = cost_gate_verdict(tracker.run_cost_usd, question_equivalents)
+                if status is not None:
+                    first_warn = status in ("warn", "stop") and cost_gate_status in (None, "ok")
+                    cost_gate_status, cost_gate_ratio = status, ratio
+                    if first_warn:
+                        msg = (
+                            f"Sibyl spent ${tracker.run_cost_usd:.2f} over "
+                            f"{question_equivalents:.2f} question(s), {ratio:.2f}x the stated "
+                            f"${_cfg.STATED_COST_PER_QUESTION_USD:.2f} a question"
+                        )
+                        print(f"::warning title=Sibyl cost gate::{msg}")
+                        logger.warning("sibyl.run: cost gate %s: %s", status, msg)
+                    if status == "stop" and not cost_gate_stopped:
+                        cost_gate_stopped = True
+                        logger.warning(
+                            "sibyl.run: cost gate stop (%.2fx > %.2fx): no new question starts",
+                            ratio, _cfg.COST_GATE_STOP_RATIO,
+                        )
             n_evidence_rows += write_evidence(
                 con, sibyl_run_id=sibyl_run_id, question_id=question.question_id,
                 trials=list(outcome.trials) + _reading_evidence(outcome),
@@ -869,7 +946,7 @@ def run_sibyl(
             "hs_run_id": resolved_hs_run_id,
             "as_of": date.today().isoformat(),
             "model": MODEL,
-            "k": K,
+            "k": _cfg.K,
             "max_steps": MAX_STEPS,
             "aggregation": AGGREGATION,
             "run_hard_cap_usd": tracker.run_hard_cap_usd,
@@ -889,13 +966,25 @@ def run_sibyl(
             "reference_weight": weight,
             "reference_weight_source": weight_source,
             "n_evidence_rows": n_evidence_rows,
+            "cost_gate_status": cost_gate_status,
+            "cost_gate_ratio": cost_gate_ratio,
+            "stated_cost_per_question_usd": _cfg.STATED_COST_PER_QUESTION_USD,
+            "n_single_trial": sum(
+                1 for o in outcomes if o.status == "ok" and o.trial_checks.get("single_trial")),
             "config": {
                 "N_QUESTIONS": n_questions,
                 "MIN_PER_HAZARD": MIN_PER_HAZARD,
                 "MAX_PER_HAZARD": MAX_PER_HAZARD,
                 "MAX_PER_HAZARD_OVERRIDES": _cfg.MAX_PER_HAZARD_OVERRIDES,
                 "N_CONTROL": _cfg.N_CONTROL,
+                "SELECTION_RULE": _cfg.SELECTION_RULE,
+                "MIN_RC_LEVEL": _cfg.MIN_RC_LEVEL,
+                "FLOOR_PER_HAZARD": _cfg.FLOOR_PER_HAZARD,
+                "CAP_PER_HAZARD": _cfg.CAP_PER_HAZARD,
+                "HAZARD_MIN_RC_LEVEL": _cfg.HAZARD_MIN_RC_LEVEL,
+                "K": _cfg.K,
                 "K_MAX": _cfg.K_MAX,
+                "PACK_ENABLED": _cfg.PACK_ENABLED,
                 "EXTRA_TRIALS_JSD": _cfg.EXTRA_TRIALS_JSD,
                 "EXTRA_TRIALS_DEPARTURE_JSD": _cfg.EXTRA_TRIALS_DEPARTURE_JSD,
                 "OUTLIER_LOG10": _cfg.OUTLIER_LOG10,

@@ -347,6 +347,51 @@ const fmtPackStat = (st: SibylPackStat | undefined, min: number, n: number) => {
   return `${f(st.brier_diff)} [${f(st.lo)}, ${f(st.hi)}]`;
 };
 
+// Since 2026-10-14 the pack is compared within each question: the first trial
+// gets it and the second does not.
+export const PackPaired = ({ pack }: { pack: SibylPackComparison | null | undefined }) => {
+  const p = pack?.paired;
+  if (!p || p.n_paired === 0) return null;
+  const m = (key: string, label: string) => {
+    const v = p.immediate[key];
+    if (!v || typeof v === "string") return null;
+    return (
+      <div className="ml-2">
+        <span className="text-fred-muted">{label}: </span>
+        {v.pack_minus_no_pack.toFixed(3)} [{v.lo.toFixed(3)}, {v.hi.toFixed(3)}]
+      </div>
+    );
+  };
+  return (
+    <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+      <div className="flex items-center gap-1 text-xs uppercase text-fred-muted">
+        Structured-data pack, paired trials
+        <InfoTooltip text="Since 14 October 2026 each question runs two trials: the first is shown the pipeline's own feeds and the second is not. Each figure is the pack trial minus the no-pack trial, averaged over questions, with a 90% interval that resamples questions. Immediate measures show from five paired questions, the Brier difference from ten scored ones; negative Brier means the pack helped." />
+      </div>
+      <div className="mt-2 text-xs text-fred-text">
+        <div>{p.n_paired} paired questions, {p.n_scored} scored</div>
+        {p.immediate.status === "ok" ? (
+          <>
+            {m("jsd_month1_from_reference", "Month-1 JSD from the reference")}
+            {m("docs", "Documents read")}
+            {m("steps", "Steps")}
+          </>
+        ) : (
+          <div className="ml-2 text-fred-muted">
+            Immediate measures: not yet ({p.n_paired} of {p.min_questions_immediate})
+          </div>
+        )}
+        <div className="ml-2">
+          <span className="text-fred-muted">Brier, pack minus no pack: </span>
+          {p.outcome.status === "ok" && p.outcome.brier_pack_minus_no_pack !== undefined
+            ? `${p.outcome.brier_pack_minus_no_pack.toFixed(4)} [${(p.outcome.lo ?? 0).toFixed(4)}, ${(p.outcome.hi ?? 0).toFixed(4)}]`
+            : `not yet (${p.n_scored} of ${p.min_questions_scored})`}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const PackArms = ({ pack }: { pack: SibylPackComparison | null | undefined }) => {
   if (!pack || !pack.groups || Object.keys(pack.groups).length === 0) return null;
   const minI = pack.min_questions_immediate;
@@ -355,8 +400,8 @@ export const PackArms = ({ pack }: { pack: SibylPackComparison | null | undefine
   return (
     <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
       <div className="flex items-center gap-1 text-xs uppercase text-fred-muted">
-        Structured-data starting pack
-        <InfoTooltip text="Half the questions (by a hash of the question id) start from the pipeline's own feeds. Immediate measures show from ten questions an arm. The outcome is Sibyl's Brier minus its own reference's, per question; negative means the research beat the reference. Pack minus no pack is shown from twenty scored questions an arm, with a 90% interval that resamples questions." />
+        Structured-data starting pack (earlier design, 9 to 13 October 2026)
+        <InfoTooltip text="Until 13 October 2026 half the questions (by a hash of the question id) started from the pipeline's own feeds. Immediate measures show from ten questions an arm. The outcome is Sibyl's Brier minus its own reference's, per question; negative means the research beat the reference. Pack minus no pack is shown from twenty scored questions an arm, with a 90% interval that resamples questions." />
       </div>
       {Object.entries(pack.groups).map(([group, g]) => (
         <div key={group} className="mt-2 text-xs text-fred-text">
@@ -545,6 +590,17 @@ const QuestionDetail = ({
 
   return (
     <div className="space-y-4 p-3">
+      {detail.carried_forward?.carried_forward ? (
+        <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900">
+          {detail.carried_forward.label}
+        </p>
+      ) : null}
+      {detail.record.single_trial ? (
+        <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900">
+          Single trial: only one of this question&apos;s trials rested on evidence, so this forecast
+          is pooled from that one trial.
+        </p>
+      ) : null}
       {detail.question?.wording ? (
         <p className="text-sm text-fred-text">{String(detail.question.wording)}</p>
       ) : null}
@@ -805,6 +861,7 @@ const SibylClient = ({
 
       <ProcessMeasures run={run} />
       <ShadowArm run={run} shadow={summary.shadow} />
+      <PackPaired pack={summary.pack} />
       <PackArms pack={summary.pack} />
 
       <div className="overflow-x-auto rounded-lg border border-fred-secondary">
@@ -860,7 +917,7 @@ const SibylClient = ({
                       </span>
                     ) : row.status === "ok" ? (
                       <span className="rounded bg-green-100 px-2 py-0.5 text-green-700">
-                        forecast
+                        forecast{row.single_trial ? " (single trial)" : ""}
                       </span>
                     ) : (
                       <span

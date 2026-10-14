@@ -403,10 +403,10 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             base_rate_json, advice_arm, advice_as_of_month, evidence_ok,
             reference_json, raw_by_month_json, final_by_month_json,
             extraction_cost_usd, extra_trials_rule, trial_checks_json,
-            resolver_reading_json, pack_arm, pack_json
+            resolver_reading_json, pack_arm, pack_json, single_trial
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -449,6 +449,7 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             _json_or_none(record.get("resolver_reading") or None),
             record.get("pack_arm"),
             _json_or_none(record.get("pack") or None),
+            record.get("single_trial"),
         ],
     )
 
@@ -477,10 +478,12 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             n_shadow_trials, n_shadow_series, n_shadow_skipped, shadow_cost_usd,
             median_docs_per_trial, share_trials_under_doc_gate, steps_per_trial,
             tool_calls_per_trial, share_docs_wikipedia, n_submit_gate_unmet,
-            n_resolver_live_ok, n_resolver_live_failed, share_nowcast_done
+            n_resolver_live_ok, n_resolver_live_failed, share_nowcast_done,
+            cost_gate_status, cost_gate_ratio, stated_cost_per_question_usd,
+            n_single_trial
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -528,5 +531,9 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("n_resolver_live_ok"),
             record.get("n_resolver_live_failed"),
             record.get("share_nowcast_done"),
+            record.get("cost_gate_status"),
+            record.get("cost_gate_ratio"),
+            record.get("stated_cost_per_question_usd"),
+            record.get("n_single_trial"),
         ],
     )

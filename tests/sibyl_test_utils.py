@@ -34,7 +34,7 @@ def seed_db(tmp_path: Path, monkeypatch) -> str:
     # share themselves and inject a loader.
     import sibyl.config as _sibyl_config
 
-    monkeypatch.setattr(_sibyl_config, "PACK_SHARE", 0.0)
+    monkeypatch.setattr(_sibyl_config, "PACK_ENABLED", False)
 
     from pythia.db.schema import connect, ensure_schema
 
@@ -45,15 +45,17 @@ def seed_db(tmp_path: Path, monkeypatch) -> str:
             "INSERT INTO hs_runs (hs_run_id, generated_at) VALUES (?, CURRENT_TIMESTAMP)",
             [HS_RUN_ID],
         )
-        for iso3, rc_score, triage_score in (("ETH", 0.8, 0.9), ("SOM", 0.2, 0.3)):
+        # RC levels so both questions are picks under the 2026-10-14 rule
+        # (a pick needs RC level 1 or above).
+        for iso3, rc_score, triage_score, rc_level in (("ETH", 0.8, 0.9, 2), ("SOM", 0.2, 0.3, 1)):
             con.execute(
                 """
                 INSERT INTO hs_triage (
                     run_id, iso3, hazard_code, tier, triage_score,
-                    need_full_spd, regime_change_score, track
-                ) VALUES (?, ?, 'ACE', 'priority', ?, TRUE, ?, 1)
+                    need_full_spd, regime_change_score, regime_change_level, track
+                ) VALUES (?, ?, 'ACE', 'priority', ?, TRUE, ?, ?, 1)
                 """,
-                [HS_RUN_ID, iso3, triage_score, rc_score],
+                [HS_RUN_ID, iso3, triage_score, rc_score, rc_level],
             )
         for qid, iso3 in ((Q1, "ETH"), (Q2, "SOM")):
             con.execute(
@@ -242,3 +244,51 @@ def stub_reference(*args, **kwargs):
     return Reference(by_month=by_month, source="stub", detail={},
                      history=[("2026-06", 12.0)], current_value=12.0,
                      prompt_text="REFERENCE: test stub")
+
+
+# The one sentence of the step task that changed on 2026-10-14 (raw tool
+# results are shown once; the ledger keeps what matters). Tests that compare
+# a prompt with an archived agent module from before that date map the old
+# sentence onto the new one, so they still pin everything ELSE byte for byte.
+OLD_TRANSCRIPT_RULE = (
+    'Your earlier steps are shown in full in the transcript, with every tool result, '
+    'so nothing you read is lost. Record each new piece of evidence once in "ledger_add"; '
+    'the code numbers the items ([E1], [E2], ...) and keeps the ledger for the whole trial. '
+    'List only items not already in the ledger.'
+)
+
+
+def as_of_2026_10_14(old_prompt: str) -> str:
+    """An archived agent's prompt with the 2026-10-14 sentence swapped in."""
+    import sibyl.agent as _agent
+
+    start = _agent._TASK.index("Your earlier steps stay in the transcript")
+    end = _agent._TASK.index("List only items not already in the ledger.") + len(
+        "List only items not already in the ledger.")
+    assert OLD_TRANSCRIPT_RULE in old_prompt
+    return old_prompt.replace(OLD_TRANSCRIPT_RULE, _agent._TASK[start:end])
+
+
+def legacy_trials(monkeypatch) -> None:
+    """The trial and selection settings of 2 to 13 October 2026 (K=3, up to
+    five trials, two valid trials required, floor-then-fill with five
+    controls on lane A), for tests of the multi-trial machinery that the
+    2026-10-14 defaults (K=2, K_MAX=2) leave mostly idle."""
+    import sibyl.config as _c
+
+    monkeypatch.setattr(_c, "K", 3)
+    monkeypatch.setattr(_c, "K_MAX", 5)
+    monkeypatch.setattr(_c, "MIN_VALID_TRIALS", 2)
+    monkeypatch.setattr(_c, "SELECTION_RULE", "floor_then_fill")
+    monkeypatch.setattr(_c, "NO_PACK_LANE", "A")
+
+
+def set_rc_level(iso3: str, level) -> None:
+    """Set the seeded hs_triage RC level of one country (e.g. 0 for a control)."""
+    from pythia.db.schema import connect
+
+    con = connect(read_only=False)
+    try:
+        con.execute("UPDATE hs_triage SET regime_change_level = ? WHERE iso3 = ?", [level, iso3])
+    finally:
+        con.close()

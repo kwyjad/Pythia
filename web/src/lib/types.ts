@@ -557,10 +557,32 @@ export type SibylPackGroup = {
   pack_minus_no_pack: SibylPackStat;
 };
 
+// The paired design (2026-10-14): the pack trial minus the no-pack trial of
+// the same question.
+export type SibylPackPairedMeasure = {
+  pack_minus_no_pack: number;
+  lo: number;
+  hi: number;
+  n: number;
+} | null;
+
+export type SibylPackPaired = {
+  n_paired: number;
+  n_scored: number;
+  min_questions_immediate: number;
+  min_questions_scored: number;
+  immediate: { status: string; [measure: string]: SibylPackPairedMeasure | string };
+  outcome: { status: string; brier_pack_minus_no_pack?: number; lo?: number; hi?: number };
+};
+
 export type SibylPackComparison = {
+  // The earlier, question-level design (9 to 13 October 2026).
   min_questions_immediate: number;
   min_questions_scored: number;
   groups: Record<string, SibylPackGroup>;
+  design?: string;
+  earlier_design?: string;
+  paired?: SibylPackPaired;
 };
 
 export type SibylQuestionRow = {
@@ -586,6 +608,8 @@ export type SibylQuestionRow = {
   // FALSE: the forecast rested on no evidence (e.g. the July 2026 run, whose
   // searches all failed). Kept and scored, left out of every comparison.
   evidence_ok?: boolean | null;
+  // 2026-10-14: pooled from one valid trial.
+  single_trial?: boolean | null;
 };
 
 export type SibylSummaryResponse = {
@@ -640,9 +664,14 @@ export type SibylQuestionDetailResponse = {
     // Oct 2026: Sibyl's reference and its published vectors by window month.
     reference?: { source?: string; by_month?: Record<string, number[]> } | null;
     final_by_month?: Record<string, number[]> | null;
+    // 2026-10-14: pooled from one valid trial (K=2, one valid trial needed).
+    single_trial?: boolean | null;
   };
   question?: Record<string, unknown> | null;
   bucket_labels: string[];
+  // 2026-10-14: set when this Sibyl forecast is from an earlier forecaster
+  // run than the question's run of record.
+  carried_forward?: { carried_forward: boolean; label: string; sibyl_date?: string | null } | null;
   standard_spd: {
     model_name: string | null;
     by_month: Record<string, number[]>;

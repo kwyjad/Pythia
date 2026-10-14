@@ -30,6 +30,7 @@ from sibyl import pack as sp
 from sibyl.advice import advice_arm
 from sibyl.belief_state import empty_plan, initial_belief
 from sibyl.select_questions import SibylQuestion
+from tests.sibyl_test_utils import as_of_2026_10_14
 from tests.sibyl_test_utils import HS_RUN_ID, Q1, stub_reference
 from tests.test_sibyl_lanes import LOW, _lane_model, run_env  # noqa: F401
 
@@ -55,13 +56,14 @@ SD = {
 
 @pytest.fixture()
 def share_one(monkeypatch):
-    monkeypatch.setattr(sibyl_config, "PACK_SHARE", 1.0)
+    # Name kept from the question-level design: the pack is built.
+    monkeypatch.setattr(sibyl_config, "PACK_ENABLED", True)
     monkeypatch.setattr(sibyl_config, "BACKTEST_MODE", False)
 
 
 # --- the arm -----------------------------------------------------------------------
 
-def test_the_arm_is_a_stable_hash_with_its_own_salt():
+def test_the_earlier_designs_arm_is_a_stable_hash_with_its_own_salt():
     ids = [f"Q{i:03d}_ACE_FATALITIES_2026-11" for i in range(400)]
     arms = [sp.pack_arm(q, 0.5) for q in ids]
     assert arms == [sp.pack_arm(q, 0.5) for q in ids]
@@ -74,9 +76,21 @@ def test_the_arm_is_a_stable_hash_with_its_own_salt():
 
 
 def test_no_pack_loads_nothing(monkeypatch):
-    monkeypatch.setattr(sibyl_config, "PACK_SHARE", 0.0)
+    monkeypatch.setattr(sibyl_config, "PACK_ENABLED", False)
     called = []
     p = sp.build_pack(_q(), date.today(), loader=lambda *a: called.append(a) or SD)
+    assert (p.arm, p.text, called) == (sp.ARM_NO_PACK, "", [])
+
+
+def test_a_control_loads_no_pack(monkeypatch):
+    from sibyl.select_questions import SELECTION_CONTROL
+
+    monkeypatch.setattr(sibyl_config, "PACK_ENABLED", True)
+    q = _q()
+    q.selection_pass = SELECTION_CONTROL
+    q.is_control = True
+    called = []
+    p = sp.build_pack(q, date.today(), loader=lambda *a: called.append(a) or SD)
     assert (p.arm, p.text, called) == (sp.ARM_NO_PACK, "", [])
 
 
@@ -90,7 +104,7 @@ def test_nothing_in_backtest(share_one, monkeypatch):
 
 def test_the_allowlist_never_carries_the_ensembles_own_research(share_one):
     p = sp.build_pack(_q(), date.today(), loader=lambda *a: SD)
-    assert p.arm == sp.ARM_PACK
+    assert p.arm == sp.ARM_PAIRED
     assert p.text.startswith("\n\n=== STRUCTURED DATA HELD BY THE PIPELINE (as of ")
     for own in ("the ensemble's grounding", "the ensemble's check", "a report"):
         assert own not in p.text
@@ -188,7 +202,7 @@ def _args():
 def test_no_pack_leaves_the_sibyl_prompt_byte_identical():
     q, ref, start, kw = _args()
     assert sibyl_agent.build_step_prompt(q, ref, start, **kw) == \
-        _old_agent().build_step_prompt(q, ref, start, **kw)
+        as_of_2026_10_14(_old_agent().build_step_prompt(q, ref, start, **kw))
 
 
 def test_the_pack_follows_the_reading_in_the_question_segment():
@@ -202,8 +216,8 @@ def test_the_pack_follows_the_reading_in_the_question_segment():
 
 # --- a run -------------------------------------------------------------------------
 
-def test_a_run_shows_the_pack_to_every_trial_and_records_the_arm(run_env, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(sibyl_config, "PACK_SHARE", 1.0)
+def test_a_run_shows_the_pack_to_the_first_trial_only(run_env, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(sibyl_config, "PACK_ENABLED", True)
     monkeypatch.setattr(sp, "_default_loader", lambda iso3, hz: {"hdx_signals": "HDX SIGNALS: high"})
     monkeypatch.setattr(sibyl_run, "extra_trials_rule",
                         lambda *a, **k: (None, {"max_pairwise_jsd": 0.0}))
@@ -215,14 +229,20 @@ def test_a_run_shows_the_pack_to_every_trial_and_records_the_arm(run_env, monkey
         return base(prompt)
 
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1, model_call=model)
-    assert prompts and all("HDX SIGNALS: high" in p for p in prompts)
+    lane_a = [p for p in prompts if "Lane A," in p]
+    lane_b = [p for p in prompts if "Lane B," in p]
+    assert lane_a and lane_b
+    assert all("HDX SIGNALS: high" in p for p in lane_a)
+    assert not any("HDX SIGNALS: high" in p for p in lane_b)
     from pythia.db.schema import connect
 
     con = connect(read_only=False)
     try:
-        arm, pj = con.execute("SELECT pack_arm, pack_json FROM sibyl_forecasts "
-                              "WHERE question_id = ?", [Q1]).fetchone()
-        assert arm == sp.ARM_PACK and json.loads(pj)["sections"] == ["hdx_signals"]
+        arm, pj, tj = con.execute("SELECT pack_arm, pack_json, trials_json FROM sibyl_forecasts "
+                                  "WHERE question_id = ?", [Q1]).fetchone()
+        assert arm == sp.ARM_PAIRED and json.loads(pj)["sections"] == ["hdx_signals"]
+        flags = {t["lane"]: t["with_pack"] for t in json.loads(tj)}
+        assert flags == {"A": True, "B": False}
     finally:
         con.close()
 
@@ -298,3 +318,60 @@ def test_nothing_switches_the_pack_on_by_itself():
 
     for mod in (sibyl_run, __import__("sibyl.measure", fromlist=["x"])):
         assert "pack_comparison" not in inspect.getsource(mod)
+
+
+
+# --- the paired comparison (2026-10-14) ------------------------------------------
+
+def _seed_paired(tmp_path, monkeypatch, n, *, pack_gain=-0.04):
+    from tests.sibyl_test_utils import seed_db
+    from pythia.db.schema import connect
+
+    seed_db(tmp_path, monkeypatch)
+    con = connect(read_only=False)
+    ref = json.dumps({"by_month": {"1": [0.5, 0.1, 0.1, 0.1, 0.1, 0.05, 0.05]}})
+    for i in range(n):
+        qid = f"P{i:02d}_ACE_FATALITIES_2026-11"
+        trials = []
+        for lane, wp, docs in (("A", True, 7), ("B", False, 5)):
+            trials.append({"lane": lane, "with_pack": wp, "role": "production", "error": None,
+                           "quantiles": {"0.5": 10}, "evidence_ok": True,
+                           "n_docs_read": docs, "steps_used": 6,
+                           "month_1": {"p_zero": 0.3, "quantiles_positive": {"0.05": 1, "0.25": 3, "0.5": 8, "0.75": 20, "0.95": 60}},
+                           "month_6": {"p_zero": 0.3, "quantiles_positive": {"0.05": 1, "0.25": 3, "0.5": 8, "0.75": 20, "0.95": 60}}})
+        con.execute(
+            "INSERT INTO sibyl_forecasts (sibyl_run_id, run_id, question_id, hazard_code, "
+            "metric, status, trials_json, reference_json, evidence_ok, selection_pass, pack_arm, "
+            "created_at) VALUES ('sr', 'fc', ?, 'ACE', 'FATALITIES', 'ok', ?, ?, TRUE, 'fill', "
+            "'paired', CURRENT_TIMESTAMP)", [qid, json.dumps(trials), ref])
+        for series, v in (("lane_A", 0.3 + pack_gain + 0.001 * i), ("lane_B", 0.3)):
+            con.execute(
+                "INSERT INTO sibyl_variant_scores (question_id, horizon_m, series, score_type, "
+                "value, sibyl_run_id) VALUES (?, 1, ?, 'brier', ?, 'sr')", [qid, series, v])
+    return con
+
+
+def test_paired_rows_are_kept_out_of_the_earlier_design(tmp_path, monkeypatch):
+    con = _seed_paired(tmp_path, monkeypatch, 3)
+    try:
+        out = sp.pack_comparison(con)
+        assert out["groups"] == {} and out["design"] == sp.DESIGN_PAIRED
+        assert out["paired"]["n_paired"] == 3
+        assert out["paired"]["immediate"] == {"status": "not_yet"}
+        assert out["paired"]["outcome"] == {"status": "not_yet"}
+    finally:
+        con.close()
+
+
+def test_the_paired_comparison_reports_from_its_thresholds(tmp_path, monkeypatch):
+    con = _seed_paired(tmp_path, monkeypatch, 12)
+    try:
+        p = sp.pack_comparison(con)["paired"]
+        assert p["min_questions_immediate"] == 5 and p["min_questions_scored"] == 10
+        assert p["immediate"]["status"] == "ok"
+        assert p["immediate"]["docs"]["pack_minus_no_pack"] == pytest.approx(2.0)
+        o = p["outcome"]
+        assert o["status"] == "ok" and o["brier_pack_minus_no_pack"] < 0
+        assert o["lo"] <= o["brier_pack_minus_no_pack"] <= o["hi"]
+    finally:
+        con.close()

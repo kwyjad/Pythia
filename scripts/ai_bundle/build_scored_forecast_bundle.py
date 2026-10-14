@@ -649,11 +649,16 @@ def build_question_record(
     if table_exists(con, "sibyl_forecasts"):
         sib = rows_as_dicts(
             con,
-            "SELECT sibyl_run_id, status, skip_reason, k, aggregation, "
+            "SELECT sibyl_run_id, run_id, "
+            + ("created_at" if column_exists(con, "sibyl_forecasts", "created_at")
+               else "CAST(NULL AS TIMESTAMP) AS created_at")
+            + ", status, skip_reason, k, aggregation, "
             "volatility_score, js_divergence_vs_standard, js_divergence_inter_trial, "
             "cost_usd, opus_cost_usd, brave_cost_usd, leakage_json, "
-            "pooled_quantiles_json, trials_json FROM sibyl_forecasts "
-            "WHERE question_id = ? ORDER BY created_at DESC LIMIT 1",
+            "pooled_quantiles_json, trials_json"
+            + (", single_trial" if column_exists(con, "sibyl_forecasts", "single_trial") else "")
+            + " FROM sibyl_forecasts "
+            "WHERE question_id = ? ORDER BY created_at DESC NULLS LAST LIMIT 1",
             [qid],
         )
         if sib:
@@ -670,7 +675,20 @@ def build_question_record(
                 "cost_usd": s.get("cost_usd"),
                 "leakage": safe_json_loads(s.get("leakage_json")),
                 "pooled_quantiles": safe_json_loads(s.get("pooled_quantiles_json")),
+                "forecast_run_id": s.get("run_id"),
+                "created_at": str(s.get("created_at")) if s.get("created_at") else None,
+                "single_trial": s.get("single_trial"),
             }
+            # A Sibyl forecast from an earlier run than the record's (2026-10-14).
+            from sibyl.labels import carried_forward  # noqa: PLC0415
+
+            carry = carried_forward(
+                sibyl_run_id=s.get("sibyl_run_id"), sibyl_forecast_run_id=s.get("run_id"),
+                current_run_id=run_id, sibyl_created_at=s.get("created_at"),
+            )
+            record["sibyl"]["carried_forward"] = bool(carry)
+            if carry:
+                record["sibyl"]["carried_forward_label"] = carry["label"]
             if include_sibyl_trials:
                 record["sibyl"]["trials"] = safe_json_loads(s.get("trials_json"))
             else:
