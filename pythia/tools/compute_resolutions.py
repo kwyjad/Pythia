@@ -134,7 +134,7 @@ from pythia.tools.base_rate_spd import (
     conflict_displacement_coverage,
     conflict_displacement_series,
     conflict_ladder_lower,
-    conflict_ladder_months,
+    conflict_regular_months,
     resolve_conflict_month,
     resolve_conflict_month_detail,
 )
@@ -1360,10 +1360,14 @@ def compute_resolutions(
                         conflict_status_counts[f"rung:{res_cd.rung}"] += 1
                     for flag in res_cd.flags:
                         conflict_status_counts[f"flag:{flag}"] += 1
-                    # Scored under the LADDER: a figure on any rung counts.
+                    # Scored under the LADDER: IDMC or an extracted figure
+                    # counts toward regularity; a DTM-only month does not. A
+                    # country regular only with the extracted figures is the
+                    # ace_pa_ladder class (Oct 2026).
                     scoring = conflict_scoring_class(
-                        conflict_ladder_months(reported_all.get(iso3_norm, {}), lower_iso),
+                        conflict_regular_months(reported_all.get(iso3_norm, {}), lower_iso),
                         cal_month,
+                        idmc_reported=reported_all.get(iso3_norm, {}),
                     )
                     if status not in (CONFLICT_STATUS_REPORTED, CONFLICT_STATUS_QUIET):
                         skipped_conflict_displacement_gate += 1

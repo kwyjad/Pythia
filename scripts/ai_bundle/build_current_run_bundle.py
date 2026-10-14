@@ -200,7 +200,7 @@ def _previous_run_id(con, run_id: str, include_test: bool) -> str | None:
 
 
 def _ace_pa_scoring_classes(con, questions: list[dict[str, Any]]) -> dict[str, str]:
-    """{question_id: scored|indicative} for the run's ACE/PA questions, from
+    """{question_id: scored|ace_pa_ladder|indicative} for the run's ACE/PA questions, from
     the regular-reporter rule as it stands for the window's first month."""
     acepa = [q for q in questions
              if str(q.get("hazard_code") or "").upper() == "ACE"
@@ -208,10 +208,14 @@ def _ace_pa_scoring_classes(con, questions: list[dict[str, Any]]) -> dict[str, s
     if not acepa:
         return {}
     try:
-        from pythia.tools.base_rate_spd import conflict_ladder_reported  # noqa: PLC0415
+        from pythia.tools.base_rate_spd import (  # noqa: PLC0415
+            conflict_displacement_series,
+            conflict_ladder_reported,
+        )
         from pythia.tools.scoring_class import conflict_scoring_class  # noqa: PLC0415
 
         reported = conflict_ladder_reported(con)
+        idmc, _held = conflict_displacement_series(con)
     except Exception as exc:  # noqa: BLE001 - a missing series leaves the class unknown
         LOGGER.warning("ACE/PA scoring class unavailable: %s", exc)
         return {}
@@ -219,8 +223,9 @@ def _ace_pa_scoring_classes(con, questions: list[dict[str, Any]]) -> dict[str, s
     for q in acepa:
         ym = str(q.get("window_start_date") or "")[:7]
         if len(ym) == 7:
+            iso = str(q.get("iso3") or "").upper()
             out[str(q["question_id"])] = conflict_scoring_class(
-                reported.get(str(q.get("iso3") or "").upper(), {}), ym
+                reported.get(iso, {}), ym, idmc_reported=idmc.get(iso, {}),
             )[0]
     return out
 

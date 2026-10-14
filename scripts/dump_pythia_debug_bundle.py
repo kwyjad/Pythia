@@ -3839,6 +3839,12 @@ def _ace_pa_eligibility_check(elig: dict[str, Any]) -> dict[str, Any]:
         f"{'y' if len(asked) == 1 else 'ies'} ({', '.join(asked) or 'none'}), "
         f"not asked for {len(not_asked)} (displacement not forecast)"
     )
+    try:
+        from pythia.tools.ace_pa_eligibility import admission_rung_summary  # noqa: PLC0415
+
+        detail += admission_rung_summary(elig.get("admission_rungs"))
+    except Exception:  # noqa: BLE001
+        pass
     if elig.get("source") != "rule":
         return {"subsystem": "ACE/PA Eligibility", "status": "WARN",
                 "detail": f"guard: {elig.get('reason')}; {detail}"}
