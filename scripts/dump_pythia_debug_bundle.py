@@ -909,6 +909,24 @@ def _expected_ensemble_entries() -> tuple[list[dict[str, str]], str]:
     )
 
 
+def _load_salvaged_members(con, forecaster_run_id: str) -> dict:
+    """Member answers kept only by salvaging their spds block, per model.
+
+    A salvaged answer would not parse whole; its trace and explanation are
+    lost, so a rise here is worth seeing even when every member is present.
+    """
+    try:
+        rows = con.execute(
+            "SELECT model_name, COUNT(DISTINCT question_id) FROM forecasts_raw "
+            "WHERE run_id = ? AND status = 'ok' "
+            "AND json_extract_string(spd_json, '$.parse_mode') = 'salvaged' GROUP BY 1",
+            [forecaster_run_id],
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — an older DB has no parse_mode
+        return {}
+    return {str(m): int(n) for m, n in rows if n}
+
+
 def _expected_spd_model_ids() -> list[str]:
     entries, _src = _expected_ensemble_entries()
     return sorted({e["model_id"] for e in entries if e.get("model_id")})
@@ -3192,6 +3210,7 @@ class BundleData:
     forecasts_raw_counts: list[dict[str, Any]] = field(default_factory=list)
     forecasts_ensemble_counts: list[dict[str, Any]] = field(default_factory=list)
     spd_model_ids: list[str] = field(default_factory=list)
+    spd_salvaged: dict = field(default_factory=dict)
 
     # CrisisWatch
     crisiswatch_entries: list[dict[str, Any]] = field(default_factory=list)
@@ -3462,6 +3481,7 @@ def _load_bundle_data(
         data.forecasts_raw_counts = _load_forecasts_raw_counts(con, forecaster_run_id)
         data.forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, forecaster_run_id)
         data.spd_model_ids = _load_spd_llm_model_ids(con, forecaster_run_id)
+        data.spd_salvaged = _load_salvaged_members(con, forecaster_run_id)
 
         try:
             _compute_question_run_metrics(con, forecaster_run_id, data.questions)
@@ -4289,6 +4309,14 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             )
             if e_status == "OK":
                 e_status = "FAIL" if share > 0.10 else "WARN"
+        salvaged = data.spd_salvaged or {}
+        if salvaged:
+            e_detail += (
+                f" · {sum(salvaged.values())} member answer(s) salvaged (spds kept, trace lost: "
+                + ", ".join(f"{m}: {n}" for m, n in sorted(salvaged.items())) + ")"
+            )
+            if e_status == "OK":
+                e_status = "WARN"
         checks.append({"subsystem": "SPD Ensemble", "status": e_status, "detail": e_detail})
 
         # Scenarios

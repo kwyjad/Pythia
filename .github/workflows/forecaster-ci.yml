@@ -365,7 +365,8 @@ jobs:
             forecaster/tests/test_providers.py \
             forecaster/tests/test_spd_model_params.py \
             forecaster/tests/test_opus55_lineup.py \
-            forecaster/tests/test_gpt6_lineup.py
+            forecaster/tests/test_gpt6_lineup.py \
+            forecaster/tests/test_prices_cache_truncation.py
 
       - name: Run regime-change shift guidance tests
         run: |
