@@ -101,7 +101,17 @@ TAXONOMY_PATH = Path(__file__).resolve().parent / "signal_taxonomy.csv"
 # Bump when a class is added, removed or re-patterned in a way that changes
 # what an existing signal text classifies as. Month-over-month comparison
 # is only meaningful within one version.
-TAXONOMY_VERSION = "1.0"
+TAXONOMY_VERSION = "2.0"
+
+#: Classes that describe bookkeeping on the distribution rather than a
+#: signal: their rows stay in the ledger, but their mass is never counted as
+#: signal mass (Oct 2026).
+NO_SIGNAL_MASS_CLASSES = frozenset({"prior_arithmetic_repair"})
+
+#: A binary (EVENT_OCCURRENCE) member returns no reasoning trace by design,
+#: so its absence is recorded under its own class, never as "no parseable
+#: trace" (on 13 Oct 2026 314 of the 315 no_trace rows were binary calls).
+BINARY_NO_TRACE_CLASS = "binary_no_trace"
 
 # Aggregates never carry a trace and are not "models"; they are excluded
 # from the ledger. track2_flash IS the member for Track-2 questions and
@@ -169,36 +179,53 @@ def load_taxonomy(path: Path = TAXONOMY_PATH) -> list[dict[str, Any]]:
     return entries
 
 
-def classify_signal(text: str | None, taxonomy: list[dict[str, Any]]) -> tuple[str, float]:
-    """(signal_class, confidence). Highest-priority match wins; confidence
-    rises with how much text the pattern actually matched (a six-letter hit
-    is a weaker claim than a whole phrase) and with a second hit for the
-    same class. Deterministic: no model call, no randomness."""
+def classify_signal_full(
+    text: str | None, taxonomy: list[dict[str, Any]]
+) -> tuple[str, float, str | None]:
+    """(primary class, confidence, secondary class). The highest-priority
+    match is the primary; the next-highest DISTINCT class that also matched
+    is the secondary (None when only one class matched). Confidence rises
+    with how much text the primary pattern matched (a six-letter hit is a
+    weaker claim than a whole phrase) and with a second hit for the same
+    class. Deterministic: no model call, no randomness."""
     if not text or not str(text).strip():
-        return "other", 0.0
+        return "other", 0.0, None
     s = str(text)
-    best: dict[str, Any] | None = None
+    matches: list[dict[str, Any]] = []
     for entry in taxonomy:
         rx = entry.get("regex")
-        if rx is None or entry["signal_class"] == "no_trace":
+        if rx is None or entry["signal_class"] in ("no_trace", BINARY_NO_TRACE_CLASS):
             continue
         hits = [m.group(0) for m in rx.finditer(s)]
+        hits = [h for h in hits if h]
         if not hits:
             continue
-        candidate = {
+        matches.append({
             "signal_class": entry["signal_class"],
             "priority": entry["priority"],
             "longest": max(len(h) for h in hits),
             "n_hits": len(hits),
-        }
-        if best is None or candidate["priority"] > best["priority"]:
-            best = candidate
-    if best is None:
-        return "other", 0.1
+        })
+    if not matches:
+        return "other", 0.1, None
+    matches.sort(key=lambda m: -m["priority"])
+    best = matches[0]
+    secondary = next((m["signal_class"] for m in matches[1:]
+                      if m["signal_class"] != best["signal_class"]), None)
     confidence = 0.5 + 0.04 * best["longest"]
     if best["n_hits"] >= 2:
         confidence += 0.05
-    return best["signal_class"], round(min(confidence, 0.95), 3)
+    return best["signal_class"], round(min(confidence, 0.95), 3), secondary
+
+
+def classify_signal(text: str | None, taxonomy: list[dict[str, Any]]) -> tuple[str, float]:
+    """(signal_class, confidence): the primary class of ``classify_signal_full``."""
+    klass, conf, _secondary = classify_signal_full(text, taxonomy)
+    return klass, conf
+
+
+def carries_signal_mass(signal_class: str | None) -> bool:
+    return (signal_class or "") not in NO_SIGNAL_MASS_CLASSES
 
 
 def _model_family(model_name: str) -> str:
@@ -374,7 +401,8 @@ def _members_for(con, run_id: str, qid: str) -> list[dict[str, Any]]:
 LEDGER_COLUMNS = [
     "attribution_id", "run_id", "hs_run_id", "question_id", "iso3", "hazard_code",
     "metric", "model_name", "model_family", "update_index", "signal_text",
-    "signal_class", "signal_class_confidence", "delta_json", "mass_moved_l1",
+    "signal_class", "signal_class_confidence", "signal_class_secondary",
+    "carries_signal_mass", "delta_json", "mass_moved_l1",
     "direction", "claimed_magnitude", "pre_spd_json", "post_spd_json",
     "delta_sums_to_zero", "post_spd_reconciles", "is_prior_row", "created_at",
 ]
@@ -384,7 +412,8 @@ CREATE TABLE ledger (
     attribution_id VARCHAR, run_id VARCHAR, hs_run_id VARCHAR, question_id VARCHAR,
     iso3 VARCHAR, hazard_code VARCHAR, metric VARCHAR, model_name VARCHAR,
     model_family VARCHAR, update_index INTEGER, signal_text VARCHAR,
-    signal_class VARCHAR, signal_class_confidence DOUBLE, delta_json VARCHAR,
+    signal_class VARCHAR, signal_class_confidence DOUBLE,
+    signal_class_secondary VARCHAR, carries_signal_mass BOOLEAN, delta_json VARCHAR,
     mass_moved_l1 DOUBLE, direction DOUBLE, claimed_magnitude VARCHAR,
     pre_spd_json VARCHAR, post_spd_json VARCHAR, delta_sums_to_zero BOOLEAN,
     post_spd_reconciles BOOLEAN, is_prior_row BOOLEAN, created_at TIMESTAMP
@@ -440,6 +469,8 @@ def ledger_rows_for_member(
                 "signal_text": None,
                 "signal_class": None,
                 "signal_class_confidence": None,
+                "signal_class_secondary": None,
+                "carries_signal_mass": None,
                 "delta_json": None,
                 "mass_moved_l1": None,
                 "direction": None,
@@ -457,18 +488,23 @@ def ledger_rows_for_member(
     if not isinstance(trace, dict):
         # Absence has to be visible in the table, not inferred from a
         # missing row.
+        if str(q.get("metric") or "").upper() == "EVENT_OCCURRENCE":
+            return [_row(-1, signal_class=BINARY_NO_TRACE_CLASS, signal_class_confidence=1.0,
+                         carries_signal_mass=False)]
         return [_row(-1, signal_class="no_trace", signal_class_confidence=1.0)]
 
     prior = trace.get("prior") if isinstance(trace.get("prior"), dict) else {}
     prior_spd = _as_vector(prior.get("spd"))
     rationale = prior.get("rationale") if isinstance(prior.get("rationale"), str) else None
-    prior_class, prior_conf = classify_signal(rationale, taxonomy)
+    prior_class, prior_conf, prior_secondary = classify_signal_full(rationale, taxonomy)
     rows = [
         _row(
             -1,
             signal_text=rationale,
             signal_class=prior_class,
             signal_class_confidence=prior_conf,
+            signal_class_secondary=prior_secondary,
+            carries_signal_mass=False,
             post_spd_json=_json(prior_spd),
             is_prior_row=True,
         )
@@ -483,12 +519,13 @@ def ledger_rows_for_member(
     prev = prior_spd
     for idx, update in enumerate(updates):
         if not isinstance(update, dict):
-            rows.append(_row(idx, signal_class="other", signal_class_confidence=0.0))
+            rows.append(_row(idx, signal_class="other", signal_class_confidence=0.0,
+                             carries_signal_mass=True))
             continue
         detail = next(detail_iter, {}) or {}
         signal = update.get("signal")
         signal_text = signal if isinstance(signal, str) else (_json(signal) if signal else None)
-        klass, conf = classify_signal(signal_text, taxonomy)
+        klass, conf, secondary = classify_signal_full(signal_text, taxonomy)
         delta = _as_vector(update.get("delta"))
         post = _as_vector(update.get("post_update_spd"))
         if post is None and delta is not None and prev is not None and len(prev) == len(delta):
@@ -516,6 +553,8 @@ def ledger_rows_for_member(
                 signal_text=signal_text,
                 signal_class=klass,
                 signal_class_confidence=conf,
+                signal_class_secondary=secondary,
+                carries_signal_mass=carries_signal_mass(klass),
                 delta_json=_json(delta if delta is not None else update.get("delta")),
                 mass_moved_l1=round(mass, 6) if mass is not None else None,
                 direction=round(direction, 6) if direction is not None else None,
@@ -706,6 +745,8 @@ def build_rc_assessment(
     mass_by_key: dict[tuple[str, str], dict[str, float]] = defaultdict(lambda: {"rc": 0.0, "total": 0.0, "n_rc": 0})
     for r in ledger:
         if r.get("is_prior_row") or r.get("mass_moved_l1") is None:
+            continue
+        if not carries_signal_mass(r.get("signal_class")):
             continue
         key = (str(r["question_id"]), str(r["model_name"]))
         mass_by_key[key]["total"] += float(r["mass_moved_l1"])
@@ -1350,6 +1391,8 @@ def _class_mix(ledger_rows: Iterable[dict[str, Any]]) -> dict[str, float]:
     for r in ledger_rows:
         if r.get("is_prior_row") or r.get("mass_moved_l1") is None:
             continue
+        if not carries_signal_mass(r.get("signal_class")):
+            continue
         mass[str(r.get("signal_class") or "other")] += float(r["mass_moved_l1"])
     total = sum(mass.values())
     if total <= 0:
@@ -1582,13 +1625,16 @@ def build_hazard_brief(
     for r in rows:
         klass = str(r.get("signal_class") or "other")
         freq[klass] += 1
-        if r.get("mass_moved_l1") is not None:
+        if r.get("mass_moved_l1") is not None and carries_signal_mass(klass):
             mass[klass] += float(r["mass_moved_l1"])
             per_q_mass[str(r["question_id"])] += float(r["mass_moved_l1"])
             per_q_models[str(r["question_id"])].add(str(r["model_name"]))
     n_no_trace = sum(1 for r in ledger if str(r["question_id"]) in qids and r.get("signal_class") == "no_trace")
+    n_binary = sum(1 for r in ledger if str(r["question_id"]) in qids
+                   and r.get("signal_class") == BINARY_NO_TRACE_CLASS)
     lines.append(f"Questions: {len(qs)}. Update signals in the ledger: {len(rows)}. "
-                 f"Model calls with no parseable trace: {n_no_trace}.")
+                 f"Model calls with no parseable trace: {n_no_trace}."
+                 + (f" Binary calls (no trace by design): {n_binary}." if n_binary else ""))
     lines.append("")
     lines.append("Every figure below is CLAIMED attribution — what the models said moved them.")
     lines.append("")

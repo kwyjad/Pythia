@@ -44,7 +44,7 @@ The `attribution_id` recipe is pinned by a test with hardcoded values and must n
 
 The signal ledger is **claimed** attribution: what a model said moved it, written after the fact. A model can be confidently wrong about its own reasoning. Measured influence needs ablation, which no bundle does yet. The bundle's `ANALYST_GUIDE.md` says this in its opening paragraph; `LINKAGE.md` names the ablation harness as the intended next step.
 
-Signal classes come from `scripts/ai_bundle/signal_taxonomy.csv`, a versioned list of regular expressions. Classification is deterministic and never uses a model call, so ledgers built under one taxonomy version can be compared month over month.
+Signal classes come from `scripts/ai_bundle/signal_taxonomy.csv`, a versioned list of regular expressions. Classification is deterministic and never uses a model call, so ledgers built under one taxonomy version can be compared month over month. Version 2.0 (October 2026) added six classes, a secondary class per row and a separate class for binary members, which return no trace by design; do not compare a 2.0 ledger with a 1.0 one.
 
 ## Building locally
 
