@@ -143,5 +143,7 @@ def test_the_resolver_writes_the_answering_rung_and_scores_under_the_ladder(tmp_
     con.close()
     assert rows[0][:3] == (1, 40000.0, "conflict_displacement_candidates:reliefweb_extracted:new_displacements")
     assert rows[1][:2] == (2, 40000.0)
-    # Regular under the ladder (12 of the 12 months before 2025-02 carry a figure).
-    assert rows[0][3] == "scored"
+    # Regular under the ladder (12 of the 12 months before 2025-02 carry a
+    # figure), but only with the extracted OCHA figures: IDMC held every
+    # month out. Since 2026-10-14 that is the ace_pa_ladder class.
+    assert rows[0][3] == "ace_pa_ladder"

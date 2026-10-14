@@ -704,7 +704,13 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
     ctx = Context(con=con, include_test=include_test, qmeta=qmeta, outcomes=outcomes,
                   bundle_qids=[str(x) for x in bundle_qids if str(x) in qmeta], problems=problems)
     ctx.scores = _load_scores(con, latest)
-    ctx.indicative = {k for k, o in outcomes.items() if o.get("scoring_class") == INDICATIVE}
+    try:
+        from pythia.tools.scoring_class import excluded_classes  # noqa: PLC0415
+
+        _excluded = excluded_classes(con)
+    except Exception:  # noqa: BLE001
+        _excluded = {INDICATIVE}
+    ctx.indicative = {k for k, o in outcomes.items() if o.get("scoring_class") in _excluded}
     ctx.index_scores()
     return ctx
 

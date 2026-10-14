@@ -453,14 +453,16 @@ def load_resolutions(con) -> Dict[str, Dict[int, float]]:
 def indicative_keys(con) -> set:
     """{(question_id, horizon_m)} whose resolution is an indicative ACE/PA
     month (pythia/tools/scoring_class.py): scored, never fitted on."""
-    from pythia.tools.scoring_class import INDICATIVE, has_scoring_class  # noqa: PLC0415
+    from pythia.tools.scoring_class import excluded_classes, has_scoring_class  # noqa: PLC0415
 
     if not has_scoring_class(con):
         return set()
+    classes = sorted(excluded_classes(con))
+    marks = ", ".join("?" for _ in classes)
     return {
         (str(q), int(h))
         for q, h in con.execute(
-            "SELECT question_id, horizon_m FROM resolutions WHERE scoring_class = ?", [INDICATIVE]
+            f"SELECT question_id, horizon_m FROM resolutions WHERE scoring_class IN ({marks})", classes
         ).fetchall()
     }
 

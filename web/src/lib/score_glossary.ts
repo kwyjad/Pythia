@@ -141,8 +141,10 @@ export const ACE_PA_INDICATIVE_NOTE =
   "marked, because no source reports them most months. A month resolves on IDMC " +
   "first, then a figure OCHA or a UN agency reported, then the rise in IOM DTM's " +
   "displaced count (a floor). Only countries with a figure from any of them in at " +
-  "least 8 of the 12 months before a month are scored; the rest are indicative and " +
-  "kept out of calibration and the skill figures.";
+  "least 8 of the 12 months before a month are scored (a month answered by DTM alone " +
+  "does not count); the rest are indicative and kept out of calibration and the skill " +
+  "figures. A country that reaches 8 months only with the OCHA/UN figures is kept out " +
+  "too until six of its months have resolved.";
 
 export function isAcePa(hazard: string | null | undefined, metric: string | null | undefined): boolean {
   return (hazard || "").toUpperCase() === "ACE" && (metric || "").toUpperCase() === "PA";

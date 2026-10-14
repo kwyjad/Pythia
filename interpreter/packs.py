@@ -212,6 +212,14 @@ INDICATIVE_NOTE = (
     "month is resolved only when a figure happens to be reported."
 )
 
+#: What a conflict displacement entry on the ladder class says (Oct 2026).
+LADDER_NOTE = (
+    "This country is reported most months only once figures OCHA or a UN "
+    "agency stated are counted beside IDMC's. Its forecast is resolved and "
+    "stored, but it does not count toward skill until six such months have "
+    "resolved."
+)
+
 
 def report_extras(pack: Pack) -> dict[str, Any]:
     """The pieces the report states about ITSELF, generated not written.
@@ -263,8 +271,10 @@ def report_extras(pack: Pack) -> dict[str, Any]:
         # {question_id: plain-words note} for conflict displacement questions
         # IDMC cannot score fairly (Oct 2026). Generated, never written.
         "scoring_notes": {
-            str(r.get("question_id")): INDICATIVE_NOTE
-            for r in rows if str(r.get("scoring_class") or "") == "indicative"
+            str(r.get("question_id")): (
+                INDICATIVE_NOTE if str(r.get("scoring_class") or "") == "indicative" else LADDER_NOTE
+            )
+            for r in rows if str(r.get("scoring_class") or "") in ("indicative", "ace_pa_ladder")
         },
         # {question_id: what the second reader made of it}, same contract.
         "sibyl_tags": {

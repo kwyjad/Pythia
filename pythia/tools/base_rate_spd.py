@@ -591,6 +591,43 @@ def conflict_ladder_months(
     return out
 
 
+#: Rungs whose figure counts toward the regular-reporter rule (Oct 2026). A
+#: DTM lower bound is the rise in a STOCK between two rounds and only exists
+#: where DTM runs two rounds close together, so a month answered by DTM
+#: alone resolves the month but says nothing about whether the country is
+#: reported most months.
+CONFLICT_REGULAR_RUNGS = (CONFLICT_RUNG_IDMC, CONFLICT_RUNG_EXTRACTED)
+
+
+def conflict_regular_months(
+    reported: Mapping[str, float], lower: Mapping[str, Sequence[ConflictReading]],
+) -> Dict[str, float]:
+    """Months with a figure on a rung that counts toward regularity: IDMC or
+    an extracted OCHA/UN figure. A DTM-only month is left out."""
+    out: Dict[str, float] = {}
+    for ym, readings in (lower or {}).items():
+        vals = [float(r.value) for r in readings
+                if r.rung in CONFLICT_REGULAR_RUNGS and r.value is not None and float(r.value) >= 0]
+        if vals:
+            out[ym] = max(vals)
+    for ym, v in (reported or {}).items():
+        out[ym] = float(v)
+    return out
+
+
+def conflict_admission_rung(
+    reported: Mapping[str, float], lower: Mapping[str, Sequence[ConflictReading]], ym: str,
+) -> Optional[str]:
+    """Which rung makes a country a regular reporter for ``ym``: ``idmc``
+    when IDMC alone does, ``reliefweb_extracted`` when the extracted figures
+    are needed, None when it is not regular."""
+    if conflict_regular_reporter(reported or {}, ym):
+        return CONFLICT_RUNG_IDMC
+    if conflict_regular_reporter(conflict_regular_months(reported, lower), ym):
+        return CONFLICT_RUNG_EXTRACTED
+    return None
+
+
 def conflict_displacement_series(
     con, *, before_ym: Optional[str] = None,
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, set]]:
@@ -697,12 +734,26 @@ def conflict_ladder_lower(con, *, before_ym: Optional[str] = None) -> ConflictLo
 def conflict_ladder_reported(
     con, *, before_ym: Optional[str] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """Per country, the months with a figure on ANY rung (eligibility and
-    the scoring class count these)."""
+    """Per country, the months that count toward the regular-reporter rule
+    (eligibility and the scoring class count these): a figure from IDMC or an
+    extracted OCHA/UN figure. Since 2026-10-14 a DTM-only month does not
+    count (``CONFLICT_REGULAR_RUNGS``)."""
     reported, _held = conflict_displacement_series(con, before_ym=before_ym)
     lower = conflict_ladder_lower(con, before_ym=before_ym)
     return {
-        iso: conflict_ladder_months(reported.get(iso, {}), lower.get(iso, {}))
+        iso: conflict_regular_months(reported.get(iso, {}), lower.get(iso, {}))
+        for iso in set(reported) | set(lower)
+    }
+
+
+def conflict_admission_rungs(
+    con, *, before_ym: str,
+) -> Dict[str, Optional[str]]:
+    """Per country, :func:`conflict_admission_rung` for ``before_ym``."""
+    reported, _held = conflict_displacement_series(con, before_ym=before_ym)
+    lower = conflict_ladder_lower(con, before_ym=before_ym)
+    return {
+        iso: conflict_admission_rung(reported.get(iso, {}), lower.get(iso, {}), before_ym)
         for iso in set(reported) | set(lower)
     }
 
@@ -783,8 +834,9 @@ def conflict_displacement_settled_rows(
         probe = _add_months(probe, -1)
     latest_settled = probe
     next_month = _add_months(latest_settled, 1)
-    regular = conflict_regular_reporter(ladder, next_month)
-    n_12 = sum(1 for m in _window_months(next_month, 12) if m in ladder)
+    regular_months = conflict_regular_months(reported, lower)
+    regular = conflict_regular_reporter(regular_months, next_month)
+    n_12 = sum(1 for m in _window_months(next_month, 12) if m in regular_months)
     rows: List[Tuple[str, float]] = []
     detail: List[Dict[str, Any]] = []
     first = min(ladder) if ladder else None

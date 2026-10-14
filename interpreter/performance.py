@@ -219,6 +219,8 @@ def _mean(values: Sequence[float]) -> float | None:
 #: resolved but never marked (pythia/tools/scoring_class.py). Literal here so
 #: this module stays pure.
 INDICATIVE = "indicative"
+#: The ladder class (Oct 2026): left out of a skill figure as indicative is.
+LADDER = "ace_pa_ladder"
 
 
 def split_indicative(
@@ -234,7 +236,7 @@ def split_indicative(
     kept: list[tuple[float, float]] = []
     dropped = 0
     for row in paired:
-        if len(row) >= 3 and str(row[2] or "").lower() == INDICATIVE:
+        if len(row) >= 3 and str(row[2] or "").lower() in (INDICATIVE, LADDER):
             dropped += 1
             continue
         kept.append((row[0], row[1]))

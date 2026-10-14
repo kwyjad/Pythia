@@ -71,6 +71,10 @@ class Decision:
     newest_month: Optional[str] = None
     rule_countries: Set[str] = field(default_factory=set)
     previous_hs_run_id: Optional[str] = None
+    #: {iso3: rung} for the countries the rule admits: ``idmc`` when IDMC
+    #: alone makes the country regular, ``reliefweb_extracted`` when the
+    #: extracted OCHA/UN figures are needed (Oct 2026).
+    admission_rungs: dict = field(default_factory=dict)
 
     @property
     def used_rule(self) -> bool:
@@ -102,6 +106,7 @@ def ensure_table(con: Any) -> None:
         )
         """
     )
+    con.execute(f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS admission_rung_json TEXT")
 
 
 def _previous_production_list(con: Any, hs_run_id: str) -> tuple[Optional[str], Set[str]]:
@@ -140,6 +145,7 @@ def decide(con: Any, *, window_start: str, hs_run_id: str) -> Decision:
     (``YYYY-MM``). Never raises: a failure is a guard condition."""
     from pythia.tools.base_rate_spd import (  # noqa: PLC0415
         _add_months,
+        conflict_admission_rungs,
         conflict_ladder_reported,
         conflict_regular_reporter,
     )
@@ -167,8 +173,16 @@ def decide(con: Any, *, window_start: str, hs_run_id: str) -> Decision:
     except Exception as exc:  # noqa: BLE001
         reason = f"conflict displacement ladder unreadable: {exc}"
 
+    rungs: dict = {}
+    if rule:
+        try:
+            all_rungs = conflict_admission_rungs(con, before_ym=window_start)
+            rungs = {iso: all_rungs.get(iso) for iso in sorted(rule)}
+        except Exception as exc:  # noqa: BLE001 - the rung is a description, never a gate
+            LOG.warning("ace_pa_eligibility: admission rungs unreadable: %s", exc)
     if not reason:
-        return Decision(window_start, SOURCE_RULE, set(rule), "", newest, set(rule))
+        return Decision(window_start, SOURCE_RULE, set(rule), "", newest, set(rule),
+                        admission_rungs=rungs)
     prev_run, prev = _previous_production_list(con, hs_run_id)
     if prev:
         return Decision(window_start, SOURCE_PREVIOUS_RUN, prev,
@@ -187,18 +201,20 @@ def record(con: Any, decision: Decision, *, hs_run_id: str, asked: List[str],
         f"""
         INSERT INTO {TABLE} (hs_run_id, window_start, source, reason, newest_month,
             countries_json, n_countries, rule_countries_json, asked_json, not_asked_json,
-            previous_hs_run_id, is_test)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            previous_hs_run_id, is_test, admission_rung_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [hs_run_id, decision.window_start, decision.source, decision.reason, decision.newest_month,
          json.dumps(sorted(decision.countries)), len(decision.countries),
          json.dumps(sorted(decision.rule_countries)), json.dumps(sorted(asked)),
-         json.dumps(sorted(not_asked)), decision.previous_hs_run_id, bool(is_test)],
+         json.dumps(sorted(not_asked)), decision.previous_hs_run_id, bool(is_test),
+         json.dumps(decision.admission_rungs or {}, sort_keys=True)],
     )
     line = (
         f"ACE/PA questions for {window_label(decision)}: asked for {len(asked)} ACE "
         f"countr{'y' if len(asked) == 1 else 'ies'} ({', '.join(sorted(asked)) or 'none'}), "
         f"not asked for {len(not_asked)} (displacement not forecast); source: {decision.source}"
+        + admission_rung_summary(decision.admission_rungs)
     )
     print(line)
     if not decision.used_rule:
@@ -212,6 +228,20 @@ def record(con: Any, decision: Decision, *, hs_run_id: str, asked: List[str],
                     fh.write(f"\n**Guard:** {decision.reason}\n")
         except OSError:
             pass
+
+
+def admission_rung_summary(rungs: Optional[dict]) -> str:
+    """'; admitted on IDMC: A, B; on extracted OCHA/UN figures: C' or ''."""
+    if not rungs:
+        return ""
+    idmc = sorted(k for k, v in rungs.items() if v == "idmc")
+    ext = sorted(k for k, v in rungs.items() if v == "reliefweb_extracted")
+    parts = []
+    if idmc:
+        parts.append(f"admitted on IDMC: {', '.join(idmc)}")
+    if ext:
+        parts.append(f"on extracted OCHA/UN figures: {', '.join(ext)}")
+    return ("; " + "; ".join(parts)) if parts else ""
 
 
 def window_label(decision: Decision) -> str:
@@ -235,6 +265,10 @@ def latest_decision(con: Any, hs_run_id: Optional[str] = None) -> Optional[dict]
                 out[key.replace("_json", "")] = json.loads(out.get(key) or "[]")
             except (TypeError, ValueError):
                 out[key.replace("_json", "")] = []
+        try:
+            out["admission_rungs"] = json.loads(out.get("admission_rung_json") or "{}")
+        except (TypeError, ValueError):
+            out["admission_rungs"] = {}
         return out
     except Exception:  # noqa: BLE001 - an older DB has no table
         return None

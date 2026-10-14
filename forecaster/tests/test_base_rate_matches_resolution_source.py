@@ -297,9 +297,10 @@ def test_prompt_anchor_references_and_resolver_read_one_conflict_ladder():
     by_ym = {r["ym"]: r for r in rows["rows_detail"]}
     assert by_ym["2026-06"]["rung"] == brs.CONFLICT_RUNG_EXTRACTED
     assert by_ym["2026-08"]["lower_bound"] is True
-    # Eligibility and the scoring class count any rung.
+    # Eligibility and the scoring class count IDMC and extracted figures; the
+    # DTM-only month (2026-08) resolves but does not count (Oct 2026).
     ladder = brs.conflict_ladder_reported(con, before_ym="2026-09")
-    assert set(ladder["PHL"]) == {"2026-05", "2026-06", "2026-07", "2026-08"}
+    assert set(ladder["PHL"]) == {"2026-05", "2026-06", "2026-07"}
 
 
 def test_the_ace_pa_prompt_names_the_rung_per_month():

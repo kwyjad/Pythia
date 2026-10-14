@@ -778,7 +778,7 @@ def _emit_indicative_questions(con, out_dir: Path, qids: list[str]) -> int:
             f"{score_cols} FROM resolutions r "
             "JOIN questions q ON q.question_id = r.question_id "
             f"{score_join}"
-            "WHERE r.scoring_class = 'indicative' "
+            "WHERE r.scoring_class IN ('indicative', 'ace_pa_ladder') "
             "AND r.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
             "ORDER BY r.question_id, r.horizon_m, s.model_name, s.score_type"
             if has_scores else
@@ -786,7 +786,7 @@ def _emit_indicative_questions(con, out_dir: Path, qids: list[str]) -> int:
             "r.observed_month, r.value, " + _resolution_extra_cols(con, "r") + ", "
             f"{score_cols} FROM resolutions r "
             "JOIN questions q ON q.question_id = r.question_id "
-            "WHERE r.scoring_class = 'indicative' "
+            "WHERE r.scoring_class IN ('indicative', 'ace_pa_ladder') "
             "AND r.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
             "ORDER BY r.question_id, r.horizon_m",
             [qids],
