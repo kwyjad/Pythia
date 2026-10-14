@@ -199,6 +199,13 @@ def _prose_fields(content: dict[str, Any]) -> list[tuple[str, list[str], str]]:
     return out
 
 
+def scored_question_ids(content: dict[str, Any] | None) -> set[str]:
+    """Every question id a stored scored report cites."""
+    if not isinstance(content, dict):
+        return set()
+    return {qid for _path, qid in _cited_question_ids(content)}
+
+
 def _cited_question_ids(content: dict[str, Any]) -> list[tuple[str, str]]:
     """Every (path, question_id) citation in the content."""
     out: list[tuple[str, str]] = []
@@ -278,11 +285,23 @@ def check_referential(
     valid_question_ids: set[str],
     per_question: dict[str, dict[str, Any]],
     global_figures: dict[str, Any],
+    performance_question_ids: set[str] | None = None,
 ) -> CheckResult:
+    """``performance_question_ids`` widens the universe for ``performance.*``
+    citations only: a combined report folds in the stored scored report,
+    whose best and worst calls are questions of EARLIER epochs that the
+    current pack never holds (13 Oct 2026: KEN_DR_PHASE3PLUS_IN_NEED_2026-09
+    failed the whole report). Those ids were checked against the scored
+    pack when the scored report was stored. An attention citation must still
+    be in the current pack."""
     errors: list[str] = []
+    perf_ok = set(performance_question_ids or ())
     for path, qid in _cited_question_ids(content):
-        if qid not in valid_question_ids:
-            errors.append(f"{path}: question_id {qid!r} is not in the pack")
+        if qid in valid_question_ids:
+            continue
+        if path.startswith("performance.") and qid in perf_ok:
+            continue
+        errors.append(f"{path}: question_id {qid!r} is not in the pack")
     for path, qids, key in _referenced_figures(content):
         found, _ = _lookup_figure(key, qids, per_question, global_figures)
         if not found:
@@ -932,6 +951,7 @@ def validate_interpretation(
     evidence_text: str | None = None,
     require_performance: bool = True,
     require_attention: bool = True,
+    performance_question_ids: set[str] | None = None,
 ) -> ValidationReport:
     """Run every check. Never raises — a validator crash is reported as
     a failed check, not an unhandled error (the report must still store)."""
@@ -946,7 +966,8 @@ def validate_interpretation(
     for name, fn in (
         ("referential", lambda: check_referential(
             content, valid_question_ids=valid_question_ids,
-            per_question=per_question, global_figures=global_figures)),
+            per_question=per_question, global_figures=global_figures,
+            performance_question_ids=performance_question_ids)),
         ("numeric", lambda: check_numeric(
             content, con=con, run_id=run_id,
             per_question=per_question, global_figures=global_figures)),
