@@ -1,31 +1,29 @@
 {
   "countries": 237,
   "coverage": {
-    "cells": 24446,
-    "nearest_cell": 5890
+    "cells": 24636,
+    "nearest_cell": 5937
   },
   "feed": "spei3_country_means",
-  "generated_at": "2026-10-08T12:17:14+00:00",
+  "generated_at": "2026-11-08T12:13:46+00:00",
   "last_failure": null,
-  "last_success_run_id": "37775311681",
-  "months": 128,
+  "last_success_run_id": "42478933373",
+  "months": 129,
   "months_owed": [],
-  "newest_month": "2026-08",
+  "newest_month": "2026-09",
   "newest_month_dataset_type": "intermediate_dataset",
   "oldest_month": "2016-01",
   "restale": {
     "hazard": "DR",
     "months": [
-      "2026-06",
-      "2026-07",
-      "2026-08"
+      "2026-09"
     ],
-    "requested_at": "2026-09-14T11:01:01+00:00",
-    "token": "3m-c012ec172e8d3bf0"
+    "requested_at": "2026-11-08T12:13:46+00:00",
+    "token": "1m-ddefe13687d3f29f"
   },
-  "rows": 30336,
+  "rows": 30573,
   "rows_by_dataset_type": {
-    "consolidated_dataset": 29862,
+    "consolidated_dataset": 30099,
     "intermediate_dataset": 474
   },
   "status": "ok"
