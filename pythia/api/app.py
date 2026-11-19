@@ -370,6 +370,17 @@ def health():
     visible without trawling the server logs.
     """
     sync = get_sync_status()
+    from pythia.api import core as _core  # noqa: PLC0415
+
+    open_error = getattr(_core, "_LAST_OPEN_ERROR", None)
+    if open_error:
+        return {
+            "ok": True,
+            "status": "degraded",
+            "reason": "db_unreadable",
+            "db_open_error": open_error,
+            "sync": sync,
+        }
     degraded = bool(sync.get("last_error")) or sync.get("in_sync") is False
     if not degraded:
         return {"ok": True, "status": "ok", "sync": sync}

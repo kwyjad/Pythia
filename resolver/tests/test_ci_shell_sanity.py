@@ -383,3 +383,23 @@ def test_publish_gathers_the_cycle_after_the_release_upload():
     assert "name: pythia-cycle-diagnostics" in text
     block = text[gather - 600:]
     assert block.count("continue-on-error: true") >= 2
+
+
+def test_no_workflow_installs_an_unbounded_duckdb():
+    """Every ``pip install ... duckdb`` names an upper bound (or a constraints file).
+
+    DuckDB 2.0.0 reached PyPI on 2026-10-21. The publish workflow ran a bare
+    ``pip install duckdb``, built the release copy as a fresh file in 2.0's
+    storage format (version 999), and the API's DuckDB 1.x answered 500 on
+    every route for five days. An unbounded install is how the next major
+    version arrives on one runner and nowhere else.
+    """
+    bare = re.compile(r'pip3? install[^\n#]*?(?<![\w."-])duckdb(?![\w<>=~!."-])')
+    bad = []
+    for path, text in _workflow_texts():
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#") or "constraints" in line:
+                continue
+            if bare.search(line):
+                bad.append(f"{path}:{n}: {line.strip()}")
+    assert not bad, "unbounded duckdb install(s):\n" + "\n".join(bad)

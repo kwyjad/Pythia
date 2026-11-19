@@ -347,6 +347,10 @@ def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
     return con
 
 
+# The last error opening the served DB, or None; read by /v1/health.
+_LAST_OPEN_ERROR: Optional[str] = None
+
+
 def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
     """Return a singleton DuckDB connection (created on first call).
 
@@ -373,7 +377,18 @@ def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
             logger.warning("DB sync failed: %s", exc)
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="DB not available yet")
-        _READ_CON = _open_duckdb_connection()
+        global _LAST_OPEN_ERROR  # noqa: PLW0603
+        try:
+            _READ_CON = _open_duckdb_connection()
+        except duckdb.Error as exc:
+            # A file this DuckDB cannot open (the 2026-11-14 release was in
+            # DuckDB 2.0's storage format) is a data problem, not a bug in
+            # the route: answer 503 and let /v1/health name it, rather than
+            # 500 on every page with nothing saying why.
+            _LAST_OPEN_ERROR = str(exc).splitlines()[0][:300]
+            logger.error("Cannot open the served DB: %s", _LAST_OPEN_ERROR)
+            raise HTTPException(status_code=503, detail="DB cannot be opened") from exc
+        _LAST_OPEN_ERROR = None
         global _READ_CON_MTIME  # noqa: PLW0603
         _READ_CON_MTIME = _db_file_mtime()
         return _READ_CON

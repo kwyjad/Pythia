@@ -57,7 +57,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests duckdb
+        run: pip install requests "duckdb>=1.4,<2"
 
       # The G3 coverage gate compares Montandon against what our IFRC ingest
       # already holds. Without the DB the probe reports the baseline as

@@ -286,7 +286,7 @@ jobs:
       - name: Build publishable DB (strip, scrub credentials, compact, size-guard)
         run: |
           set -euo pipefail
-          python -c "import duckdb" 2>/dev/null || pip install duckdb >/dev/null
+          python -c "import duckdb" 2>/dev/null || pip install "duckdb>=1.4,<2" >/dev/null
           rm -f data_out/resolver.duckdb.wal
           mv data_out/resolver.duckdb data_out/resolver.canonical.duckdb
           python -m scripts.ci.build_release_db \
@@ -327,7 +327,7 @@ jobs:
           set -euo pipefail
 
           python -m pip install --upgrade pip >/dev/null
-          pip install duckdb >/dev/null
+          pip install "duckdb>=1.4,<2" >/dev/null
 
           # Download the currently-published DB (if any) for comparison.
           # If the release doesn't exist yet, skip the check.
@@ -635,7 +635,7 @@ jobs:
           set -euo pipefail
 
           python -m pip install --upgrade pip >/dev/null
-          pip install duckdb >/dev/null
+          pip install "duckdb>=1.4,<2" >/dev/null
 
           python - <<'PY'
           import json, os, datetime
@@ -808,7 +808,7 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          python -c "import duckdb" 2>/dev/null || pip install duckdb >/dev/null
+          python -c "import duckdb" 2>/dev/null || pip install "duckdb>=1.4,<2" >/dev/null
           rm -f data_out/resolver.duckdb.wal
           python -m scripts.ci.inspect_resolver_db \
             --db data_out/resolver.duckdb \
@@ -920,7 +920,7 @@ jobs:
           CHAIN_RELEASE_UPLOAD_OUTCOME: ${{ steps.release_upload.outcome }}
           CHAIN_JOB_STATUS: ${{ job.status }}
         run: |
-          python -m pip install --quiet pyyaml duckdb || true
+          python -m pip install --quiet pyyaml "duckdb>=1.4,<2" || true
           ARGS=()
           if [ -f resolver_inspect.md ]; then
             ARGS=(--include resolver_inspect.md)

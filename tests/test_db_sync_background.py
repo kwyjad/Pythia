@@ -228,3 +228,28 @@ def test_served_is_not_the_same_as_downloaded(env, monkeypatch):
     status = db_sync.get_sync_status()
     assert status["in_sync"] is False
     assert status["served_key"] == "old"
+
+
+def test_a_release_this_duckdb_cannot_open_is_never_swapped_in(env, monkeypatch, tmp_path):
+    """The 2026-11-14 release was DuckDB 2.0's storage format (version 999).
+
+    It downloaded whole and matched its sha256, was swapped in, and every DB
+    route answered 500. A staged file this process cannot open is refused and
+    the previous file keeps serving.
+    """
+    import duckdb
+    import struct
+
+    good = tmp_path / "good.duckdb"
+    duckdb.connect(str(good)).execute("CREATE TABLE t AS SELECT 1").close()
+    env.write_bytes(good.read_bytes())
+    unreadable = bytearray(good.read_bytes())
+    unreadable[12:20] = struct.pack("<Q", 999)
+    content = bytes(unreadable)
+    sha = hashlib.sha256(content).hexdigest()
+    _serve(monkeypatch, {"db_sha256": sha}, content, length=len(content))
+    with pytest.raises(db_sync.DbSyncError, match="cannot be opened"):
+        db_sync.maybe_sync_latest_db()
+    assert env.read_bytes() == good.read_bytes()
+    assert not env.with_suffix(".duckdb.tmp").exists()
+    assert "cannot be opened" in db_sync.get_sync_status()["last_error"]

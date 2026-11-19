@@ -193,3 +193,26 @@ def test_the_serving_connection_cannot_read_other_files(api_env):
             con.execute("SET enable_external_access=true")
     finally:
         con.close()
+
+
+def test_an_unreadable_db_answers_503_and_health_names_it(api_env, monkeypatch):
+    """The 2026-11-14 release was DuckDB 2.0's storage format (version 999).
+
+    The API's DuckDB 1.x could not open it, and every DB route answered a bare
+    500 while /v1/health said "ok". Now the routes answer 503 and health says
+    why.
+    """
+    import struct
+
+    raw = bytearray(api_env.read_bytes())
+    raw[12:20] = struct.pack("<Q", 999)
+    api_env.write_bytes(bytes(raw))
+    monkeypatch.setattr(_core, "maybe_sync_latest_db", lambda *a, **k: None)
+    monkeypatch.setattr(_core, "_LAST_OPEN_ERROR", None)
+    client = TestClient(app)
+    resp = client.get("/v1/questions?iso3=ETH")
+    assert resp.status_code == 503
+    body = client.get("/v1/health").json()
+    assert body["status"] == "degraded"
+    assert body["reason"] == "db_unreadable"
+    assert body["db_open_error"].startswith("IO Error")

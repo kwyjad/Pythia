@@ -103,7 +103,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
-          pip install duckdb
+          pip install "duckdb>=1.4,<2"
 
       # Forced mode: operator-supplied db_run_id (fatal if unavailable).
       # Path A: triggering HS Triage run. Path B: canonical discovery.

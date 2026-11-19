@@ -366,3 +366,40 @@ class TestCredentialScrub:
         assert rc == 2
         out = capsys.readouterr().out
         assert "::error::" in out and "clobber" in out
+
+
+class TestStorageVersion:
+    """A release the API's DuckDB 1.x cannot open is refused before upload.
+
+    The 2026-11-14 asset was written by DuckDB 2.0.0 as a fresh file, in
+    storage version 999, and every DB route on the dashboard answered 500.
+    """
+
+    def test_the_release_and_the_compacted_file_are_1x_readable(self, tmp_path):
+        brd.build_release_db(str(_src(tmp_path)), str(tmp_path / "out.duckdb"),
+                             report_top=0)
+        number, _ = brd.storage_version_of(tmp_path / "out.duckdb")
+        assert number <= brd.MAX_READABLE_STORAGE_VERSION
+        brd.compact_database(str(tmp_path / "out.duckdb"), str(tmp_path / "c.duckdb"))
+        number, _ = brd.storage_version_of(tmp_path / "c.duckdb")
+        assert number <= brd.MAX_READABLE_STORAGE_VERSION
+
+    def test_a_2x_format_file_stops_the_publish(self, tmp_path, monkeypatch, capsys):
+        src = _src(tmp_path)
+        monkeypatch.setattr(brd, "storage_version_of", lambda p: (999, "v2.0.0"))
+        rc = brd.main(["--src", str(src), "--out", str(tmp_path / "o.duckdb"),
+                       "--report-top", "0"])
+        assert rc == 3
+        assert "storage version 999" in capsys.readouterr().out
+
+    def test_the_header_reader_names_the_writer(self, tmp_path):
+        path = tmp_path / "h.duckdb"
+        duckdb.connect(str(path)).close()
+        number, writer = brd.storage_version_of(path)
+        assert number >= 64 and writer.startswith("v")
+
+    def test_a_non_duckdb_file_is_refused(self, tmp_path):
+        path = tmp_path / "x.duckdb"
+        path.write_bytes(b"not a database" * 10)
+        with pytest.raises(ValueError):
+            brd.storage_version_of(path)
