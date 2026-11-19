@@ -38,7 +38,8 @@ only way to choose what to cut was to guess. Now the same log block that says
         [--max-bytes 2147483648] [--keep-all]
 
 Exit codes: 0 on success, 1 when the result still exceeds --max-bytes, 2 when
-credential-shaped text survives the scrub. Either failure stops the publish
+credential-shaped text survives the scrub, 3 when the file is in a storage
+format the API's DuckDB 1.x cannot read. Any failure stops the publish
 workflow BEFORE it clobbers a working asset.
 
 Since Oct 2026 it also drops licensed and internal tables (``EXCLUDED_TABLES``)
@@ -104,10 +105,54 @@ EXCLUDED_TABLES = frozenset(
 )
 
 
+# Every file this module CREATES is written in the storage format DuckDB 1.x
+# reads (Nov 2026). DuckDB 2.0.0 (PyPI, 2026-10-21) writes a fresh database
+# in storage version 999, which no 1.x release can open, and the publish
+# workflow installed duckdb unpinned: the 2026-11-14 release asset was
+# written by 2.0.0, and the API (``duckdb>=1.1,<2``) answered 500 on every
+# route that touched the DB. An EXISTING 1.x file keeps its format when a
+# 2.0 process writes to it, so only the fresh files built here and by the
+# compaction copy were exposed. 'v1.4.0' gives storage version 67 under 1.x
+# and 2.0 alike, readable by every DuckDB from 1.4 on. Not 'v1.0.0': that
+# format lacks the newer compression, and the 2026-11-14 release came out at
+# 1,218 MB in it against 262 MB in v1.4.0 (measured on the release itself).
+FRESH_FILE_STORAGE_VERSION = "v1.4.0"
+
+# The newest storage version DuckDB 1.5 can read ("we can only read versions
+# between 64 and 68"). A file above it is refused before anything is
+# uploaded or swapped in.
+MAX_READABLE_STORAGE_VERSION = 68
+
+
 def _connect():
     import duckdb
 
     return duckdb.connect()
+
+
+def _attach_fresh(con, path: Path, alias: str) -> None:
+    """Attach a NEW database file in the 1.x-readable storage format."""
+    con.execute(
+        f"ATTACH '{path}' AS {alias} "
+        f"(STORAGE_VERSION '{FRESH_FILE_STORAGE_VERSION}')"
+    )
+
+
+def storage_version_of(path: str | Path) -> tuple[int, str]:
+    """(storage version number, writer version string) from a file header.
+
+    Read straight from the bytes, so it answers without a DuckDB that can
+    open the file, which is exactly the case it exists to catch.
+    """
+    import struct
+
+    with open(path, "rb") as fh:
+        head = fh.read(64)
+    if len(head) < 60 or head[8:12] != b"DUCK":
+        raise ValueError(f"{path} is not a DuckDB database file")
+    number = struct.unpack("<Q", head[12:20])[0]
+    writer = head[52:60].split(b"\x00", 1)[0].decode("ascii", "replace")
+    return int(number), writer
 
 
 def tables_in(con, alias: str) -> list[str]:
@@ -202,12 +247,19 @@ def compact_database(src: str, out: str) -> dict[str, int]:
     con = _connect()
     try:
         con.execute(f"ATTACH '{src_path}' AS csrc (READ_ONLY)")
-        con.execute(f"ATTACH '{out_path}' AS cdst")
+        _attach_fresh(con, out_path, "cdst")
         con.execute("COPY FROM DATABASE csrc TO cdst")
         con.execute("CHECKPOINT cdst")
     finally:
         con.close()
     out_bytes = out_path.stat().st_size
+    storage_version, writer = storage_version_of(out_path)
+    if storage_version > MAX_READABLE_STORAGE_VERSION:
+        raise RuntimeError(
+            f"compacted DB has storage version {storage_version} (written by "
+            f"DuckDB {writer}); DuckDB 1.x cannot read it, so it must not "
+            "replace the canonical DB"
+        )
     return {
         "src_bytes": src_bytes,
         "out_bytes": out_bytes,
@@ -261,7 +313,7 @@ def build_release_db(
     con = _connect()
     try:
         con.execute(f"ATTACH '{src_path}' AS src (READ_ONLY)")
-        con.execute(f"ATTACH '{work_path}' AS work")
+        _attach_fresh(con, work_path, "work")
         con.execute("COPY FROM DATABASE src TO work")
         # Blocks are not allocated until the write is flushed, so an
         # un-checkpointed database measures as zero bytes.
@@ -277,7 +329,7 @@ def build_release_db(
         scrub = scrub_database(con, "work")
         con.execute("CHECKPOINT work")
         con.execute("DETACH src")
-        con.execute(f"ATTACH '{out_path}' AS dst")
+        _attach_fresh(con, out_path, "dst")
         con.execute("COPY FROM DATABASE work TO dst")
         con.execute("CHECKPOINT dst")
         after = _size_lines(con, "dst", report_top)
@@ -287,9 +339,12 @@ def build_release_db(
     Path(str(work_path) + ".wal").unlink(missing_ok=True)
 
     out_bytes = out_path.stat().st_size
+    storage_version, writer = storage_version_of(out_path)
     return {
         "src_bytes": src_bytes,
         "out_bytes": out_bytes,
+        "storage_version": storage_version,
+        "writer_version": writer,
         "dropped_tables": dropped,
         "scrubbed": scrub["scrubbed"],
         "residual": scrub["residual"],
@@ -350,6 +405,17 @@ def main(argv: list[str] | None = None) -> int:
     for label, key in (("canonical", "sizes_before"), ("published", "sizes_after")):
         for line in stats.get(key) or []:
             LOGGER.info("%s | %s", label, line)
+    storage_version = int(stats["storage_version"])
+    LOGGER.info("storage version %d (written by DuckDB %s)",
+                storage_version, stats["writer_version"])
+    if storage_version > MAX_READABLE_STORAGE_VERSION:
+        # The 2026-11-14 release was storage version 999 and the API could
+        # not open it. Refuse before the clobber, like the other guards.
+        print(f"::error::Release DB has storage version {storage_version} "
+              f"(written by DuckDB {stats['writer_version']}); the API's "
+              "DuckDB 1.x cannot open it. Publish aborted before clobbering "
+              "the existing asset.")
+        return 3
     out_bytes = int(stats["out_bytes"])
     if out_bytes > args.max_bytes:
         # Loud and non-destructive: the caller must NOT proceed to a clobbering

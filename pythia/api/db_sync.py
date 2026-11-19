@@ -179,6 +179,36 @@ def _check_free_space(dest_path: Path, needed_bytes: Optional[int]) -> None:
         )
 
 
+def _check_readable(path: Path) -> None:
+    """Refuse a staged DB this process's DuckDB cannot open.
+
+    The 2026-11-14 release was written by DuckDB 2.0.0 in storage version
+    999. It downloaded whole, its sha256 matched, it was swapped in, and
+    every route that touched the DB then answered 500 for five days, because
+    the API's DuckDB 1.x cannot read that format. Opening the staged file
+    read-only costs a header and a catalog read; refusing it here keeps the
+    previous file serving and names the cause in ``sync_status.last_error``.
+    """
+    import duckdb
+
+    with open(path, "rb") as fh:
+        if fh.read(12)[8:12] != b"DUCK":
+            # Not a DuckDB header at all: the sha256 check is what answers
+            # for the bytes; this check is about the storage format.
+            return
+    try:
+        con = duckdb.connect(str(path), read_only=True)
+    except duckdb.Error as exc:
+        raise DbSyncError(
+            f"Downloaded DB cannot be opened by DuckDB {duckdb.__version__} "
+            f"({str(exc).splitlines()[0][:200]}); refusing to swap it in"
+        ) from exc
+    try:
+        con.execute("SELECT 1").fetchall()
+    finally:
+        con.close()
+
+
 def download_db_atomic(dest_path: Path, expected_sha256: Optional[str] = None) -> None:
     """Download the release DB to ``<dest>.tmp`` and swap it into place.
 
@@ -246,6 +276,7 @@ def download_db_atomic(dest_path: Path, expected_sha256: Optional[str] = None) -
                 f"Downloaded DB sha256 {digest.hexdigest()[:12]}... does not match "
                 f"the manifest's {want[:12]}...; refusing to swap it in"
             )
+        _check_readable(tmp_path)
     except Exception as exc:
         try:
             if tmp_path.exists():
