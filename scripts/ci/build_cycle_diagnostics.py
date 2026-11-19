@@ -39,6 +39,12 @@ workflow step is non-fatal), and kept under ``--max-bytes`` by dropping, in
 order, workflow logs, code snapshots, zips nested from Sibyl's artifacts and
 then the largest CSVs cut to head and tail; every drop is in the manifest.
 A missing artifact is a line in the README and manifest, never a failure.
+
+``--full`` (Nov 2026, for the Drive archive in ``scripts/ci/drive_archive.py``)
+builds the same zip with no size ceiling: nothing is dropped, nested zips are
+kept whole, and Sibyl's six large artifacts the 200 MB mode leaves out are
+collected too (``FULL_ARTIFACT_PATTERNS``). The DB rule and the credential
+scan are the same in both modes.
 """
 
 from __future__ import annotations
@@ -105,6 +111,22 @@ ARTIFACT_PATTERNS: dict[str, tuple[str, ...]] = {
     "Publish Latest Data (Release)": ("resolver-inspect",),
 }
 
+#: Artifacts only the full (archive) mode collects. Kept apart so the 200 MB
+#: mode Publish runs is byte-for-byte what it was.
+FULL_ARTIFACT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "Sibyl Deep Research": (
+        "pythia-llm-calls-detail", "pythia-spd-tables", "pythia-question-metrics",
+        "pythia-evidence-packs", "pythia-llm-prompts", "pythia-interpreter-gate-diagnostics",
+    ),
+}
+
+
+def artifact_patterns(workflow: str, *, full: bool = False) -> tuple[str, ...]:
+    """The artifact name patterns collected for one workflow's runs."""
+    base = ARTIFACT_PATTERNS.get(workflow, ())
+    return base + FULL_ARTIFACT_PATTERNS.get(workflow, ()) if full else base
+
+
 #: Files the size policy never drops.
 PROTECTED_NAMES = frozenset({
     "README.md", "CYCLE_SUMMARY.md", "manifest.json", "summary.md", "issues.json",
@@ -170,7 +192,7 @@ class RunRecord:
 
     @property
     def workflow(self) -> str:
-        return str(self.info.get("name") or "")
+        return workflow_name(self.info)
 
     @property
     def slug(self) -> str:
@@ -179,6 +201,22 @@ class RunRecord:
     @property
     def created_at(self) -> str:
         return str(self.info.get("created_at") or "")
+
+
+_FILE_TO_NAME = {file: name for name, (_slug, file) in WORKFLOWS.items()}
+
+
+def workflow_name(info: Mapping[str, Any]) -> str:
+    """The run's WORKFLOW name, read from its file path.
+
+    The Actions API puts a workflow's ``run-name`` in a run's ``name`` field,
+    so a Pythia Pipeline Stage run is named "Pythia Pipeline Stage: <pipeline>
+    — <stage>" there, and a lookup by ``name`` never recognised one (found
+    Nov 2026, building the Drive archive: the cycle zip held one stage of
+    four). ``path`` names the file, which does not move."""
+    path = str(info.get("path") or "")
+    file = path.rsplit("/", 1)[-1].split("@", 1)[0]
+    return _FILE_TO_NAME.get(file) or str(info.get("name") or "")
 
 
 def _ts(raw: Any) -> dt.datetime | None:
@@ -211,8 +249,9 @@ def trusted(info: Mapping[str, Any], repo: str, *, require_main: bool = True) ->
 class Collector:
     def __init__(self, gh: Any, repo: str, staging: Path, *, wait_sec: float = 600,
                  poll_sec: float = 30, sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, full: bool = False) -> None:
         self.gh = gh
+        self.full = full
         self.repo = repo
         self.staging = staging
         self.wait_sec = wait_sec
@@ -256,7 +295,7 @@ class Collector:
     # -- lineage ---------------------------------------------------------------
 
     def lineage_of(self, run_id: str, info: Mapping[str, Any]) -> dict[str, Any] | None:
-        slug = WORKFLOWS.get(str(info.get("name") or ""), ("", ""))[0]
+        slug = WORKFLOWS.get(workflow_name(info), ("", ""))[0]
         if not slug:
             return None
         name = f"{ARTIFACT_PREFIX}-{slug}-{run_id}"
@@ -293,7 +332,7 @@ class Collector:
         """Newest successful run of an expected upstream created before this one."""
         created = _ts(info.get("created_at"))
         best: tuple[dt.datetime, str] | None = None
-        for upstream in EXPECTED_UPSTREAM.get(str(info.get("name") or ""), ()):
+        for upstream in EXPECTED_UPSTREAM.get(workflow_name(info), ()):
             for r in self.workflow_runs(upstream):
                 if r.get("conclusion") != "success":
                     continue
@@ -388,7 +427,8 @@ class Collector:
             return False
         if name.startswith(f"{ARTIFACT_PREFIX}-"):
             return True
-        return any(fnmatch.fnmatch(name, pat) for pat in ARTIFACT_PATTERNS.get(rec.workflow, ()))
+        return any(fnmatch.fnmatch(name, pat)
+                   for pat in artifact_patterns(rec.workflow, full=self.full))
 
     def download_all(self, ordered: list[RunRecord]) -> None:
         for i, rec in enumerate(ordered, start=1):
@@ -421,7 +461,7 @@ class Collector:
                 ok, why = self.gh.download(rec.run_id, name, dest)
                 if not ok:
                     self.missing.append({"run_id": rec.run_id, "artifact": name, "reason": why})
-            for pat in ARTIFACT_PATTERNS.get(rec.workflow, ()):
+            for pat in artifact_patterns(rec.workflow, full=self.full):
                 if own:
                     continue
                 if not any(fnmatch.fnmatch(str(n), pat) for n in names):
@@ -690,15 +730,82 @@ def manifest_files(staging: Path, folder_runs: Mapping[str, RunRecord]) -> list[
     return rows
 
 
+#: Reasons that put a run in the chain itself, rather than beside it.
+_CHAIN_REASONS = ("source", "trigger", "upstream", "stage of pipeline")
+
+
+def _stage_context(staging: Path) -> dict[str, Any]:
+    """The forecaster stage's ``stage_context.json``, wherever the zip holds one."""
+    for path in sorted(staging.rglob("stage_context*.json")):
+        payload = _read_json(path)
+        if isinstance(payload, dict) and ("forecaster_run_id" in payload or "hs_run_id" in payload):
+            return payload
+    return {}
+
+
+def _truthy(raw: Any) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes"}
+
+
+def chain_facts(ordered: list[RunRecord], staging: Path) -> dict[str, Any]:
+    """What the archive names a cycle by: its kind, start, and identifiers.
+
+    ``kind`` is ``forecast`` when Sibyl is in the chain, ``scoring`` when
+    Calibration is, else ``other``. ``started_at`` is the earliest start of a
+    run in the chain itself (never a run that joined by time window or as the
+    canonical source). ``fc_run_id``, ``hs_run_id`` and test mode come from the
+    forecaster stage's ``stage_context.json``; a forecaster run id is also
+    read from file names when that file is absent."""
+    chain = [r for r in ordered if r.reason.startswith(_CHAIN_REASONS)] or list(ordered)
+    names = {r.workflow for r in chain}
+    if "Sibyl Deep Research" in names:
+        kind = "forecast"
+    elif "Pythia — Compute Calibration Weights & Advice" in names:
+        kind = "scoring"
+    else:
+        kind = "other"
+    starts = [t for t in (_ts(r.info.get("run_started_at") or r.created_at) for r in chain) if t]
+    started = min(starts) if starts else None
+    sibyl = next((r.run_id for r in chain if r.workflow == "Sibyl Deep Research"), None)
+    ctx = _stage_context(staging)
+    fc = ctx.get("forecaster_run_id") or None
+    if not fc and kind == "forecast":
+        for path in _files(staging):
+            m = re.search(r"(fc_\d{6,})", path.name)
+            if m:
+                fc = m.group(1)
+                break
+    env = ((ctx.get("env_snapshot") or {}).get("env") or {}) if isinstance(ctx.get("env_snapshot"), dict) else {}
+    test_raw = env.get("PYTHIA_TEST_MODE")
+    return {
+        "kind": kind,
+        "started_at": started.isoformat() if started else None,
+        "start_date": started.date().isoformat() if started else None,
+        "fc_run_id": fc,
+        "hs_run_id": ctx.get("hs_run_id") or None,
+        "pipeline_id": ctx.get("pipeline_id") or None,
+        "sibyl_run_id": sibyl,
+        # "<unset>" is the env snapshot saying the variable was not set: production.
+        "is_test": None if (test_raw is None and not ctx) else _truthy(test_raw),
+    }
+
+
 def build(*, gh: Any, repo: str, source_run_id: str, publish_run_id: str, out_dir: Path,
           own_dir: Path | None = None, max_bytes: int = DEFAULT_MAX_BYTES,
           wait_sec: float = 600, env: Mapping[str, str] | None = None,
           staging: Path | None = None, today: dt.date | None = None,
-          sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+          sleep: Callable[[float], None] = time.sleep, full: bool = False,
+          zip_name: str | None = None, keep_staging: bool = False) -> dict[str, Any]:
+    """Gather the cycle and write the zip; returns the manifest.
+
+    ``full`` drops nothing for size (``max_bytes`` is ignored) and collects
+    ``FULL_ARTIFACT_PATTERNS`` too. ``zip_name`` overrides the file name.
+    ``keep_staging`` leaves the unzipped tree in place (``manifest["staging"]``)
+    so a caller can lift loose files out of it."""
     env = dict(os.environ if env is None else env)
     tmp = staging or Path(tempfile.mkdtemp(prefix="cycle_diag_"))
     tmp.mkdir(parents=True, exist_ok=True)
-    collector = Collector(gh, repo, tmp, wait_sec=wait_sec, sleep=sleep)
+    collector = Collector(gh, repo, tmp, wait_sec=wait_sec, sleep=sleep, full=full)
     chain = collector.walk_chain(source_run_id)
     collector.add_pipeline_stages()
     root = chain[-1] if chain else None
@@ -721,7 +828,7 @@ def build(*, gh: Any, repo: str, source_run_id: str, publish_run_id: str, out_di
                                    encoding="utf-8")
     shutil.rmtree(tmp / ".lineage_cache", ignore_errors=True)
     stamp = (today or dt.date.today()).isoformat()
-    out_path = out_dir / f"cycle_diagnostics__{stamp}__{publish_run_id or 'local'}.zip"
+    out_path = out_dir / (zip_name or f"cycle_diagnostics__{stamp}__{publish_run_id or 'local'}.zip")
     folders = {r.folder: r.slug for r in ordered}
     manifest: dict[str, Any] = {
         "built_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -733,12 +840,17 @@ def build(*, gh: Any, repo: str, source_run_id: str, publish_run_id: str, out_di
                   "lineage": r.lineage} for r in ordered],
         "missing": collector.missing,
         "notes": collector.notes,
-        "max_bytes": max_bytes,
+        "mode": "full" if full else "ceiling",
+        "max_bytes": None if full else max_bytes,
+        "chain": chain_facts(ordered, tmp),
     }
     # Size first, then the manifest (it names the drops), then the scan over
     # everything that will be in the zip, then the final zip.
     (tmp / "manifest.json").write_text("{}\n", encoding="utf-8")
-    size, dropped = enforce_size(tmp, out_path, max_bytes, folders)
+    if full:
+        dropped: list[dict[str, Any]] = []
+    else:
+        _size, dropped = enforce_size(tmp, out_path, max_bytes, folders)
     manifest["dropped"] = dropped
     manifest["files"] = manifest_files(tmp, {r.folder: r for r in ordered})
     (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n", encoding="utf-8")
@@ -753,7 +865,9 @@ def build(*, gh: Any, repo: str, source_run_id: str, publish_run_id: str, out_di
     manifest["compressed_bytes"] = zip_tree(tmp, out_path)
     manifest["zip"] = str(out_path)
     manifest["summary_md"] = summary
-    if staging is None:
+    if keep_staging:
+        manifest["staging"] = str(tmp)
+    elif staging is None:
         shutil.rmtree(tmp, ignore_errors=True)
     return manifest
 
@@ -767,6 +881,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default="cycle_out")
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     parser.add_argument("--wait-sec", type=float, default=600)
+    parser.add_argument("--full", action="store_true",
+                        help="no size ceiling; collect Sibyl's large artifacts too (the Drive archive)")
     args = parser.parse_args(argv)
     if not args.source_run_id or not args.repo:
         print("::warning title=Cycle diagnostics::no source run or repository; nothing to gather")
@@ -775,7 +891,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest = build(gh=Gh(args.repo), repo=args.repo, source_run_id=args.source_run_id,
                          publish_run_id=args.publish_run_id, out_dir=Path(args.out_dir),
                          own_dir=Path(args.own_dir) if args.own_dir else None,
-                         max_bytes=args.max_bytes, wait_sec=args.wait_sec)
+                         max_bytes=args.max_bytes, wait_sec=args.wait_sec, full=args.full)
     except SecretLeak as exc:
         print(f"::error title=Cycle diagnostics redaction failure::{exc}")
         return 2

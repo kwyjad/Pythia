@@ -37,7 +37,7 @@ on:
 
 permissions:
   contents: write   # needed to upload release assets
-  actions: read     # needed to download artifacts from workflow_run
+  actions: write    # download artifacts; dispatch the Drive archive (last step)
 
 concurrency:
   group: pythia-publish-latest-data
@@ -949,3 +949,28 @@ jobs:
           path: cycle_out/cycle_diagnostics__*.zip
           retention-days: 14
           if-no-files-found: warn
+
+      # Its own lineage on its own page too: the Drive archive walks the chain
+      # back from this run, and lineage.json names the run it published.
+      - name: Upload this run's chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-publish_latest_data-${{ github.run_id }}
+          path: diagnostics/publish_latest_data
+          retention-days: 14
+          if-no-files-found: warn
+
+      # The permanent copy (archive_to_drive.yml, CLAUDE.md "Drive archive").
+      # Dispatched, never workflow_run: GitHub sends no workflow_run for a
+      # chain a bot dispatched. Last step, and never able to fail a publish;
+      # the archive's weekly backfill catches a dispatch that never arrived.
+      - name: Dispatch the Drive archive
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run archive_to_drive.yml --ref main -f publish_run_id="${GITHUB_RUN_ID}" \
+            || echo "::warning::Could not dispatch the Drive archive; the weekly backfill will pick this run up."

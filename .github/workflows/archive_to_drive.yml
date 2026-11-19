@@ -1,0 +1,293 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# A permanent copy of every finished chain in the owner's Google Drive.
+#
+# GitHub deletes artifacts after 90 days at most, and some of ours after 14.
+# For each completed chain this leaves, under Fred_archive/ in Drive:
+#
+#   runs/<YYYY>/<YYYY-MM-DD>__<chain>__<ids>/   the full cycle zip
+#       (build_cycle_diagnostics --full: no size ceiling, nothing dropped,
+#       no DB inside) plus loose README, CYCLE_SUMMARY, manifest, executive
+#       summary, health report and interpreter report
+#   db_snapshots/<YYYY>/   after a forecast chain, the canonical DB as
+#       .duckdb.zst, verified (decompressed, sha256 compared, opened)
+#
+# Started three ways: Publish dispatches it as its last step (passing its own
+# run id); a person dispatches it; and a weekly backfill over 80 days catches
+# any dispatch that never arrived, well inside the 90-day artifact expiry.
+# Not workflow_run: GitHub sends none for a chain a bot dispatched, which is
+# why Publish itself is dispatch-only.
+#
+# Drive is reached through rclone, signed in as the owner with the drive.file
+# scope (it sees only what it created). The config is the RCLONE_CONF_B64
+# secret, decoded in one step and deleted at the end of every job. Setup:
+# docs/SECRETS.md, "Google Drive archive".
+#
+# Outside the pythia-resolver-db group: it reads artifacts and writes Drive,
+# never the canonical DB. Its own group keeps two runs off Drive at once.
+
+name: Archive Run to Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_run_id:
+        description: "Publish Latest Data run id to archive (blank with backfill_days for a window)"
+        required: false
+        default: ""
+      include_test:
+        description: "Archive test-mode chains too"
+        required: false
+        default: false
+        type: boolean
+      backfill_days:
+        description: "Archive every Publish run of the last N days not yet in Drive (blank = off)"
+        required: false
+        default: ""
+  schedule:
+    # Weekly safety net: Mondays 05:23 UTC, backfill mode over 80 days.
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: drive-archive
+  cancel-in-progress: false
+
+env:
+  DRIVE_ROOT: Fred_archive
+  RCLONE_REMOTE: pythia_drive
+
+jobs:
+  plan:
+    name: Which chains need archiving?
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install rclone
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone >/dev/null && rclone version | head -1
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RCLONE_CONF_B64:-}" ]; then
+            echo "::error title=Drive archive not configured::The RCLONE_CONF_B64 secret is missing. See docs/SECRETS.md, 'Google Drive archive'."
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          IN_BACKFILL_DAYS: ${{ inputs.backfill_days }}
+          IN_INCLUDE_TEST: ${{ inputs.include_test }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ -n "${IN_PUBLISH_RUN_ID:-}" ]; then
+            ARGS+=(--publish-run-id "${IN_PUBLISH_RUN_ID}")
+          elif [ -n "${IN_BACKFILL_DAYS:-}" ]; then
+            ARGS+=(--backfill-days "${IN_BACKFILL_DAYS}")
+          elif [ "${EVENT_NAME}" = "schedule" ]; then
+            ARGS+=(--backfill-days 80)
+          else
+            echo "::error::Give publish_run_id or backfill_days."
+            exit 1
+          fi
+          # A boolean input can arrive as the STRING "false" over the REST API.
+          if [ "${IN_INCLUDE_TEST:-}" = "true" ]; then
+            ARGS+=(--include-test)
+          fi
+          python3 -m scripts.ci.drive_archive plan "${ARGS[@]}" --out diagnostics/archive_plan.json
+
+      - name: Upload plan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-plan
+          path: diagnostics/archive_plan.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"
+
+  archive:
+    name: Archive one chain
+    needs: plan
+    if: needs.plan.outputs.count != '0' && needs.plan.outputs.count != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone zstd >/dev/null
+          python -m pip install --quiet "duckdb>=1.4,<2" pyyaml
+
+      # The canonical DB, its zstd copy and the check copy share this disk.
+      - name: Free runner space
+        run: |
+          set -uo pipefail
+          echo "Disk before: $(df -h . | tail -1)"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost 2>/dev/null || true
+          echo "Disk after: $(df -h . | tail -1)"
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+
+      - name: Build, snapshot and upload
+        id: leg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE_SPEC: ${{ matrix.spec }}
+          PUBLISH_RUN_ID: ${{ matrix.publish_run_id }}
+        run: |
+          python -m scripts.ci.drive_archive leg --out-dir archive_out \
+            --report "archive_leg/leg_${PUBLISH_RUN_ID}.json"
+
+      # The zip on GitHub too, so a Drive outage loses nothing.
+      - name: Upload the zip as an artifact
+        if: always() && steps.leg.outputs.artifact_name != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.leg.outputs.artifact_name }}
+          path: archive_out/*.zip
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload the leg report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-leg-${{ matrix.publish_run_id }}
+          path: archive_leg/*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"
+
+  housekeeping:
+    name: Thin snapshots, check space, write diagnostics
+    needs: [plan, archive]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record chain start
+        run: echo "CHAIN_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
+      - name: Install rclone
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone >/dev/null
+
+      - name: Fetch the plan
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: archive-plan
+          path: diagnostics
+
+      - name: Fetch the leg reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-leg-*
+          path: archive_legs
+          merge-multiple: true
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+
+      - name: Thin DB snapshots and check Drive space
+        run: python3 -m scripts.ci.drive_archive housekeeping --out diagnostics/archive_report.json
+
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_ARCHIVE_RESULT: ${{ needs.archive.result }}
+        # --no-api: this job installs no packages, and the step-timing section
+        # borrows the resolver bundle's code, which needs them.
+        run: |
+          python3 -m scripts.ci.chain_diagnostics write --workflow archive_to_drive \
+            --started-at "${CHAIN_STARTED_AT:-}" --no-api
+
+      # 90 days, not the chain's usual 14: the Cron Watchdog reads these
+      # reports back to confirm every Publish run of the last 90 days was
+      # archived. The file is a few kilobytes.
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-archive_to_drive-${{ github.run_id }}
+          path: diagnostics/archive_to_drive
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"

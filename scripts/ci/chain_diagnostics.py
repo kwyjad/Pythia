@@ -81,6 +81,7 @@ WORKFLOWS: dict[str, tuple[str, str]] = {
     "Sibyl Deep Research": ("sibyl", "run_sibyl.yml"),
     "Pythia Pipeline Stage": ("pipeline_stage", "pythia_pipeline_stage.yml"),
     "Horizon Scanner Triage": ("horizon_scanner", "run_horizon_scanner.yml"),
+    "Archive Run to Drive": ("archive_to_drive", "archive_to_drive.yml"),
 }
 SLUG_TO_NAME = {slug: name for name, (slug, _file) in WORKFLOWS.items()}
 ARTIFACT_PREFIX = "chain-diagnostics"
@@ -671,6 +672,68 @@ class Writer:
             self.issue("publish_skipped", "degraded",
                        "Publish skipped: the release already holds more post-pipeline rows")
 
+    def archive(self) -> None:
+        """The Drive archive run: what was archived, where, sizes, thinning, space.
+
+        Reads ``archive_report.json`` (``scripts/ci/drive_archive.py
+        housekeeping``) from the diagnostics directory and copies it here; the
+        Cron Watchdog reads it back from this run's artifact."""
+        src = self.diagnostics_dir / "archive_report.json"
+        report = read_json(src)
+        if not isinstance(report, dict):
+            raise RuntimeError(f"no archive report at {src}")
+        write_json(self.out / "archive_report.json", report)
+        if (self.diagnostics_dir / "archive_plan.json").is_file():
+            shutil.copy2(self.diagnostics_dir / "archive_plan.json", self.out / "archive_plan.json")
+        runs = report.get("publish_runs") or []
+        counts: dict[str, int] = {}
+        for r in runs:
+            counts[str(r.get("status"))] = counts.get(str(r.get("status")), 0) + 1
+        self.summary.append("- Drive archive: " + (", ".join(
+            f"{v} {k}" for k, v in sorted(counts.items())) or "nothing to do") + ".")
+        for r in runs:
+            names = r.get("names") or {}
+            z = r.get("zip") or {}
+            db = r.get("db_snapshot") or {}
+            line = f"  - Publish {r.get('publish_run_id')}: {r.get('status')}"
+            if names.get("zip_name"):
+                line += f", `{names['zip_name']}`"
+            if z.get("bytes"):
+                line += f" ({int(z['bytes']) / 1e6:.1f} MB)"
+            if db.get("compressed_bytes"):
+                line += (f"; DB {int(db['uncompressed_bytes']) / 1e9:.2f} GB -> "
+                         f"{int(db['compressed_bytes']) / 1e9:.2f} GB zst")
+            if r.get("reason"):
+                line += f"; {r['reason']}"
+            self.summary.append(line)
+        failed = [r for r in runs if r.get("status") == "failed"]
+        if failed:
+            self.issue("drive_archive_failed", "degraded",
+                       f"{len(failed)} Publish run(s) not archived to Drive",
+                       evidence="; ".join(f"{r.get('publish_run_id')}: {r.get('reason')}" for r in failed),
+                       cost=len(failed), cost_unit="Publish runs")
+        thin = report.get("thinning") or {}
+        deleted = thin.get("deleted") or []
+        self.summary.append(f"- DB snapshots: {len(thin.get('kept') or [])} kept, {len(deleted)} "
+                            "moved to the Drive trash" + (f" ({thin['error']})" if thin.get("error") else "")
+                            + ".")
+        for d in deleted:
+            self.summary.append(f"  - deleted {d.get('name')}: {d.get('reason')}")
+        st = report.get("storage") or {}
+        if st.get("error"):
+            self.summary.append(f"- Drive space: unreadable ({st['error']}).")
+        else:
+            free = st.get("free_bytes")
+            self.summary.append(
+                f"- Drive space: {st.get('used_fraction')} used, "
+                f"{(int(free) / 1e9) if free is not None else float('nan'):.1f} GB free.")
+        if st.get("low"):
+            self.issue("drive_space_low", "blocking",
+                       "Google Drive is nearly full: under 20 GB free or over 85% used. "
+                       "The next archive may not fit",
+                       evidence=f"free {st.get('free_bytes')} bytes, used {st.get('used_fraction')}",
+                       owner="pythia", recovers_on_rerun=False)
+
     # -- outputs ---------------------------------------------------------------
 
     def write_issues(self) -> None:
@@ -826,6 +889,7 @@ SECTIONS: dict[str, list[str]] = {
     "ingest_structured_data": ["ingest"],
     "refresh_crisiswatch": ["crisiswatch"],
     "publish_latest_data": ["publish"],
+    "archive_to_drive": ["archive"],
 }
 
 
