@@ -517,3 +517,134 @@ def test_run_summary_test_on_shows_sibyl_run(api_env_test_only: None) -> None:
     assert data["sibyl"] is not None
     assert data["sibyl"]["sibyl_run_id"] == "sib_t"
     assert data["sibyl"]["run_cost_usd"] == 9.99
+
+
+@pytest.fixture()
+def api_env_full_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[None, None, None]:
+    """A run whose spend spans every stage: HS (with Brave), forecasts, Sibyl,
+    the interpreter. The breakdown used to list four hard-coded phases, so
+    Sibyl and the interpreter were in the headline and in no row."""
+    db_path = tmp_path / "api-run-summary-fullcost.duckdb"
+    con = duckdb.connect(str(db_path), read_only=False)
+    con.execute(
+        "CREATE TABLE hs_triage (run_id TEXT, iso3 TEXT, hazard_code TEXT, tier TEXT, "
+        "triage_score DOUBLE, regime_change_likelihood DOUBLE, regime_change_level INTEGER, "
+        "data_quality_json TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+        "is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE forecasts_ensemble (question_id TEXT, run_id TEXT, month_index INTEGER, "
+        "bucket_index INTEGER, probability DOUBLE, model_name TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE llm_calls (run_id TEXT, hs_run_id TEXT, phase TEXT, provider TEXT, "
+        "cost_usd DOUBLE, total_tokens INTEGER, error_text TEXT, status TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE sibyl_runs (sibyl_run_id TEXT, hs_run_id TEXT, budget_capped BOOLEAN, "
+        "run_cost_usd DOUBLE, opus_cost_usd DOUBLE, brave_cost_usd DOUBLE, "
+        "extraction_cost_usd DOUBLE, shadow_cost_usd DOUBLE, n_selected INTEGER, "
+        "n_forecast INTEGER, n_skipped INTEGER, k INTEGER, aggregation TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE sibyl_forecasts (sibyl_run_id TEXT, question_id TEXT, status TEXT, "
+        "skip_reason TEXT, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, "
+        "regime_change_likelihood, regime_change_level, data_quality_json) "
+        "VALUES ('hs_f', 'AAA', 'ACE', 'priority', 0.8, 0.45, 2, '{}')"
+    )
+    con.execute(
+        "INSERT INTO forecasts_ensemble (question_id, run_id, month_index, bucket_index, "
+        "probability, model_name) VALUES ('q1', 'fc_f', 1, 1, 0.5, 'ensemble_mean_v2')"
+    )
+    rows = [
+        # HS rows carry no run_id, only the HS run.
+        ("", "hs_f", "hs_triage", "google", 1.001),
+        ("", "hs_f", "hs_triage", "brave", 0.505),
+        ("fc_f", "hs_f", "spd_v2", "openai", 2.333),
+        ("fc_f", "hs_f", "binary_v2", "google", 0.334),
+        ("fc_f", "hs_f", "scenario_v2", "google", 0.333),
+        ("sib_f", "hs_f", "sibyl", "anthropic", 4.004),
+        ("sib_f", "hs_f", "sibyl", "brave", 0.405),
+        ("fc_f", "hs_f", "interpreter", "anthropic", 1.111),
+        # Another run's spend must not appear.
+        ("fc_other", "hs_other", "spd_v2", "openai", 50.0),
+    ]
+    for run, hs, phase, provider, cost in rows:
+        con.execute(
+            "INSERT INTO llm_calls (run_id, hs_run_id, phase, provider, cost_usd, "
+            "total_tokens, error_text, status) VALUES (?, ?, ?, ?, ?, 10, '', 'ok')",
+            [run, hs, phase, provider, cost],
+        )
+    con.execute(
+        "INSERT INTO sibyl_runs (sibyl_run_id, hs_run_id, budget_capped, run_cost_usd, "
+        "opus_cost_usd, brave_cost_usd, extraction_cost_usd, shadow_cost_usd, n_selected, "
+        "n_forecast, n_skipped, k, aggregation) VALUES ('sib_f', 'hs_f', FALSE, 4.41, "
+        "3.50, 0.30, 0.21, 0.40, 15, 15, 0, 2, 'linear_pool')"
+    )
+    con.close()
+
+    config_path = _write_config(tmp_path, db_path)
+    monkeypatch.setenv("PYTHIA_CONFIG_PATH", str(config_path))
+    pythia_config.load.cache_clear()
+    import pythia.api.app as _app_mod
+    _app_mod._READ_CON = None
+    try:
+        yield
+    finally:
+        _app_mod._READ_CON = None
+        pythia_config.load.cache_clear()
+
+
+def test_cost_breakdown_adds_up_to_the_run_cost(api_env_full_cost: None) -> None:
+    """Every dollar in the headline is in a row, and the rows sum to it."""
+    data = TestClient(app).get("/v1/diagnostics/run_summary").json()
+    cost = data["cost"]
+    assert data["hs_run_id"] == "hs_f"
+    assert cost["total_usd"] == 10.03
+    rows = {p["phase"]: p for p in cost["by_phase"]}
+    assert set(rows) == {
+        "hs_triage", "spd_v2", "binary_v2", "scenario_v2", "sibyl", "interpreter",
+    }
+    assert round(sum(p["cost_usd"] for p in cost["by_phase"]), 2) == cost["total_usd"]
+    assert rows["sibyl"]["cost_usd"] == pytest.approx(4.41, abs=0.01)
+    assert rows["interpreter"]["cost_usd"] == pytest.approx(1.11, abs=0.01)
+    # Brave is named, inside the stage that spent it and in total.
+    assert rows["hs_triage"]["search_usd"] == 0.51
+    assert rows["sibyl"]["search_usd"] == 0.41
+    assert cost["search_usd"] == 0.91
+    assert rows["spd_v2"]["search_usd"] == 0.0
+
+
+def test_sibyl_card_parts_add_up_to_its_run_cost(api_env_full_cost: None) -> None:
+    s = TestClient(app).get("/v1/diagnostics/run_summary").json()["sibyl"]
+    parts = (
+        s["opus_cost_usd"] + s["brave_cost_usd"]
+        + s["extraction_cost_usd"] + s["shadow_cost_usd"]
+    )
+    assert round(parts, 2) == s["run_cost_usd"]
+
+
+@pytest.mark.parametrize(
+    "values,total",
+    [
+        ([1.004, 1.004, 1.004], 3.012),
+        ([0.333, 0.333, 0.334], 1.0),
+        ([8.096, 9.186, 2.504, 0.981, 23.691, 2.073], 46.531),
+        ([0.0, 0.0], 0.0),
+    ],
+)
+def test_cents_always_add_up_to_the_total(values: list, total: float) -> None:
+    from pythia.api.routes.diagnostics import _cents_summing_to
+
+    cents = _cents_summing_to(values, total)
+    assert sum(cents) == int(round(total * 100))
+    for c, v in zip(cents, values):
+        assert abs(c - v * 100) < 1.0

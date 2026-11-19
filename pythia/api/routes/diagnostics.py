@@ -12,6 +12,7 @@ decomposition); shared helpers come from pythia.api.core.
 """
 
 import logging
+import math
 import resource
 from typing import Any, Dict, List, Optional
 
@@ -1091,6 +1092,104 @@ def diagnostics_kpi_scopes(
 # Run summary endpoint — aggregate KPIs for the "All metrics" summary view
 # ---------------------------------------------------------------------------
 
+# Rows of the run summary's cost breakdown, in display order. The first four
+# are always shown (a zero says the stage spent nothing); the rest appear only
+# when the run spent something on them.
+_COST_ROWS = [
+    ("hs_triage", "Horizon scan (triage, RC, grounding)", True),
+    ("spd_v2", "Ensemble forecasts", True),
+    ("binary_v2", "Binary forecasts", True),
+    ("scenario_v2", "Scenarios", True),
+    ("sibyl", "Sibyl deep research", False),
+    ("interpreter", "Interpreter report", False),
+    ("resolution", "PA resolution", False),
+    ("other", "Other", False),
+]
+
+
+def _cost_row_for_phase(phase: Any) -> str:
+    """Map a raw ``llm_calls.phase`` onto a ``_COST_ROWS`` key.
+
+    Uses the Costs page's own grouping (``resolver.query.costs.phase_group``)
+    so the two pages cannot file a phase differently, then splits the
+    forecast bucket into its SPD and binary halves.
+    """
+    raw = str(phase or "").strip().lower()
+    try:
+        from resolver.query.costs import phase_group  # noqa: PLC0415
+
+        group = phase_group(raw)
+    except Exception:  # pragma: no cover - resolver always importable here
+        group = "other"
+    if group in ("hs", "web_search"):
+        return "hs_triage"
+    if group == "forecast":
+        return "binary_v2" if "binary" in raw else "spd_v2"
+    if group == "scenario":
+        return "scenario_v2"
+    if group in ("sibyl", "interpreter", "resolution"):
+        return group
+    return "other"
+
+
+def _cents_summing_to(values: List[float], total: float) -> List[int]:
+    """Round ``values`` to whole cents so they add to ``round(total, 2)``.
+
+    Largest-remainder rounding: rounding each figure on its own can leave the
+    rows a cent or two away from the headline, which reads as a missing cost.
+    """
+    target = int(round(total * 100))
+    exact = [v * 100 for v in values]
+    floors = [int(math.floor(x)) for x in exact]
+    short = target - sum(floors)
+    order = sorted(range(len(values)), key=lambda i: exact[i] - floors[i], reverse=True)
+    # The rows are read from the same calls as the total, so ``short`` lies
+    # between 0 and the row count; the loop also copes with the other cases.
+    step = 1 if short > 0 else -1
+    if step < 0:
+        order = list(reversed(order))
+    i = 0
+    while short != 0 and order:
+        floors[order[i % len(order)]] += step
+        short -= step
+        i += 1
+    return floors
+
+
+def _cost_breakdown(rows: List[Any], total: float) -> tuple:
+    """Group ``(phase, provider, cost)`` rows into the page's cost rows.
+
+    Returns ``(by_phase, search_usd)``. Every row carries ``cost_usd`` and
+    ``search_usd`` (the part spent on web search, provider 'brave'), and the
+    rows' ``cost_usd`` add up to the run total to the cent.
+    """
+    spent: Dict[str, float] = {key: 0.0 for key, _, _ in _COST_ROWS}
+    search: Dict[str, float] = {key: 0.0 for key, _, _ in _COST_ROWS}
+    for phase, provider, amount in rows:
+        key = _cost_row_for_phase(phase)
+        value = float(amount or 0.0)
+        spent[key] += value
+        if str(provider or "").lower() == "brave":
+            search[key] += value
+    shown = [
+        (key, label)
+        for key, label, always in _COST_ROWS
+        if always or abs(spent[key]) >= 0.005
+    ]
+    cents = _cents_summing_to([spent[k] for k, _ in shown], total)
+    by_phase = [
+        {
+            "phase": key,
+            "label": label,
+            "cost_usd": c / 100.0,
+            "search_usd": round(search[key], 2),
+            "llm_usd": round(c / 100.0 - round(search[key], 2), 2),
+        }
+        for (key, label), c in zip(shown, cents)
+    ]
+    return by_phase, round(sum(search.values()), 2)
+
+
 @router.get("/v1/diagnostics/run_summary")
 @_heavy
 def diagnostics_run_summary(
@@ -1509,6 +1608,7 @@ def diagnostics_run_summary(
         "total_usd": 0.0,
         "total_tokens": 0,
         "by_phase": [],
+        "search_usd": 0.0,
     }
 
     llm_health: Dict[str, Any] = {
@@ -1518,22 +1618,32 @@ def diagnostics_run_summary(
     }
 
     if _table_exists(con, "llm_calls"):
-        # Build filter for this run's llm_calls
-        lc_filters = []
+        # This run's calls are ONE clause, the one the debug bundle uses
+        # (scripts/debug_bundle/run_comparison.run_llm_where): the forecaster
+        # run, the Sibyl run and every row stamped with the HS run. The total
+        # and the breakdown below are read from the SAME rows, so they agree
+        # by construction (they did not: the breakdown listed four hard-coded
+        # phases and left out Sibyl, the interpreter and anything else).
+        sibyl_run_for_cost: Optional[str] = None
+        if hs_run_id and _table_exists(con, "sibyl_runs"):
+            sibyl_run_for_cost = _q1(
+                "SELECT sibyl_run_id FROM sibyl_runs WHERE hs_run_id = ?"
+                + _test_filter_for(con, "sibyl_runs", include_test)
+                + " ORDER BY created_at DESC LIMIT 1",
+                [hs_run_id],
+            )
+        run_ids = [i for i in (run_id, sibyl_run_for_cost) if i]
+        lc_filters: list = []
         lc_params: list = []
-        if run_id:
-            lc_filters.append("lc.run_id = ?")
-            lc_params.append(run_id)
+        if run_ids:
+            lc_filters.append(f"lc.run_id IN ({','.join('?' for _ in run_ids)})")
+            lc_params.extend(run_ids)
         if hs_run_id:
-            if lc_filters:
-                lc_filters = [f"({lc_filters[0]} OR lc.hs_run_id = ?)"]
-                lc_params.append(hs_run_id)
-            else:
-                lc_filters.append("lc.hs_run_id = ?")
-                lc_params.append(hs_run_id)
+            lc_filters.append("lc.hs_run_id = ?")
+            lc_params.append(hs_run_id)
 
         if lc_filters:
-            where = " AND ".join(lc_filters)
+            where = "(" + " OR ".join(lc_filters) + ")"
 
             # Total cost and tokens
             row = _q(
@@ -1541,28 +1651,25 @@ def diagnostics_run_summary(
                 f"FROM llm_calls lc WHERE {where}{tf_lc}",
                 lc_params,
             )
+            total_raw = 0.0
             if row:
-                cost["total_usd"] = round(float(row[0][0]), 2)
-                cost["total_tokens"] = int(row[0][1])
+                total_raw = float(row[0][0] or 0.0)
+                cost["total_usd"] = round(total_raw, 2)
+                cost["total_tokens"] = int(row[0][1] or 0)
 
-            # By phase
-            PHASE_LABELS = [
-                ("hs_triage", "Horizon Scan Triage and RC"),
-                ("spd_v2", "Ensemble Forecasts"),
-                ("binary_v2", "Binary Forecasts"),
-                ("scenario_v2", "Scenarios"),
-            ]
-            for phase_val, phase_label in PHASE_LABELS:
-                phase_cost = _q1(
-                    f"SELECT COALESCE(SUM(lc.cost_usd), 0) FROM llm_calls lc "
-                    f"WHERE {where}{tf_lc} AND lc.phase = ?",
-                    lc_params + [phase_val],
-                )
-                cost["by_phase"].append({
-                    "phase": phase_val,
-                    "label": phase_label,
-                    "cost_usd": round(float(phase_cost or 0), 2),
-                })
+            # By phase, and within each phase what went to web search (Brave
+            # bills per query and logs provider='brave'; it is not an LLM).
+            lc_cols = _table_columns(con, "llm_calls")
+            provider_expr = (
+                "LOWER(COALESCE(lc.provider, ''))" if "provider" in lc_cols else "''"
+            )
+            rows = _q(
+                f"SELECT lc.phase, {provider_expr} AS provider, "
+                f"COALESCE(SUM(lc.cost_usd), 0) "
+                f"FROM llm_calls lc WHERE {where}{tf_lc} GROUP BY 1, 2",
+                lc_params,
+            ) or []
+            cost["by_phase"], cost["search_usd"] = _cost_breakdown(rows, total_raw)
 
             # LLM health
             llm_health["total_calls"] = _q1(
@@ -1645,10 +1752,22 @@ def diagnostics_run_summary(
             if _table_has_columns(con, "sibyl_runs", ["time_capped"])
             else "FALSE"
         )
+        # run_cost_usd also holds the Haiku document extraction and the shadow
+        # arm; without them the card's parts fell short of its own total.
+        _x_col = (
+            "extraction_cost_usd"
+            if _table_has_columns(con, "sibyl_runs", ["extraction_cost_usd"])
+            else "NULL"
+        )
+        _sh_col = (
+            "shadow_cost_usd"
+            if _table_has_columns(con, "sibyl_runs", ["shadow_cost_usd"])
+            else "NULL"
+        )
         sibyl_run = _q(
             "SELECT sibyl_run_id, budget_capped, run_cost_usd, opus_cost_usd, "
             "brave_cost_usd, n_selected, n_forecast, n_skipped, k, aggregation, "
-            + _tc_col + " FROM sibyl_runs "
+            + _tc_col + ", " + _x_col + ", " + _sh_col + " FROM sibyl_runs "
             "WHERE hs_run_id = ?" + tf_sr + " "
             "ORDER BY created_at DESC LIMIT 1",
             [hs_run_id],
@@ -1656,7 +1775,7 @@ def diagnostics_run_summary(
         if sibyl_run:
             (s_run_id, s_capped, s_cost, s_opus, s_brave,
              s_selected, s_forecast, s_skipped, s_k, s_agg,
-             s_time_capped) = sibyl_run[0]
+             s_time_capped, s_extract, s_shadow) = sibyl_run[0]
             skipped_by_cap = _q1(
                 "SELECT COUNT(*) FROM sibyl_forecasts "
                 "WHERE sibyl_run_id = ? AND status = 'skipped' "
@@ -1679,6 +1798,8 @@ def diagnostics_run_summary(
                 "run_cost_usd": round(float(s_cost or 0.0), 2),
                 "opus_cost_usd": round(float(s_opus or 0.0), 2),
                 "brave_cost_usd": round(float(s_brave or 0.0), 2),
+                "extraction_cost_usd": round(float(s_extract or 0.0), 2),
+                "shadow_cost_usd": round(float(s_shadow or 0.0), 2),
                 "n_selected": int(s_selected or 0),
                 "n_forecast": int(s_forecast or 0),
                 "n_skipped": int(s_skipped or 0),

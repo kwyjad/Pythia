@@ -189,7 +189,19 @@ export type RunSummaryResponse = {
   cost: {
     total_usd: number;
     total_tokens: number;
-    by_phase: Array<{ phase: string; label: string; cost_usd: number }>;
+    /**
+     * Rows add up to total_usd to the cent. search_usd is the part of a row
+     * spent on web search (Brave); llm_usd the rest. Both absent on older APIs.
+     */
+    by_phase: Array<{
+      phase: string;
+      label: string;
+      cost_usd: number;
+      search_usd?: number;
+      llm_usd?: number;
+    }>;
+    /** Web search (Brave) across the whole run; absent on older APIs. */
+    search_usd?: number;
   };
   llm_health: {
     total_calls: number;
@@ -213,6 +225,10 @@ export type RunSummaryResponse = {
     run_cost_usd: number;
     opus_cost_usd: number;
     brave_cost_usd: number;
+    /** Haiku document extraction; absent on older APIs. */
+    extraction_cost_usd?: number;
+    /** Shadow-arm trials (their model calls and searches); absent on older APIs. */
+    shadow_cost_usd?: number;
     n_selected: number;
     n_forecast: number;
     n_skipped: number;

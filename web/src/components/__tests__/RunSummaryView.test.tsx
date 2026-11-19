@@ -197,4 +197,26 @@ describe("RunSummaryView", () => {
     expect(screen.getByText("$2.02")).toBeDefined();
     expect(screen.getByText("$0.28")).toBeDefined();
   });
+
+  it("names web search inside a stage and shows the total", () => {
+    const data = {
+      ...MOCK_DATA,
+      cost: {
+        total_usd: 46.53,
+        total_tokens: 1,
+        search_usd: 5.92,
+        by_phase: [
+          { phase: "hs_triage", label: "Horizon scan", cost_usd: 8.1, search_usd: 4.0, llm_usd: 4.1 },
+          { phase: "sibyl", label: "Sibyl deep research", cost_usd: 23.69, search_usd: 1.92, llm_usd: 21.77 },
+          { phase: "interpreter", label: "Interpreter report", cost_usd: 14.74, search_usd: 0, llm_usd: 14.74 },
+        ],
+      },
+    };
+    render(<RunSummaryView data={data} />);
+
+    expect(screen.getByText("Sibyl deep research")).toBeDefined();
+    expect(screen.getByText(/web\s+search \$4\.00/)).toBeDefined();
+    expect(screen.getByText("Total $46.53")).toBeDefined();
+    expect(screen.getByText("of which web search (Brave) $5.92")).toBeDefined();
+  });
 });
