@@ -438,8 +438,10 @@ function SibylSection({ data }: Props) {
             ${s.run_cost_usd.toFixed(2)}
           </div>
           <div className="mt-0.5 text-xs text-fred-muted">
-            Opus ${s.opus_cost_usd.toFixed(2)} · Brave ${s.brave_cost_usd.toFixed(2)} ·
-            K={s.k} · {s.aggregation ?? "?"}
+            Opus ${s.opus_cost_usd.toFixed(2)} · Brave ${s.brave_cost_usd.toFixed(2)}
+            {s.extraction_cost_usd ? ` · extraction $${s.extraction_cost_usd.toFixed(2)}` : ""}
+            {s.shadow_cost_usd ? ` · shadow arm $${s.shadow_cost_usd.toFixed(2)}` : ""}
+            {` · K=${s.k} · ${s.aggregation ?? "?"}`}
           </div>
         </div>
         <div className="rounded-lg border border-fred-secondary/30 bg-fred-bg p-4">
@@ -517,7 +519,10 @@ function PerformanceSection({ data }: Props) {
 }
 
 // ---- 7. Cost breakdown ----
+// The rows come from the same calls as the "Run cost" headline and add up to
+// it to the cent; each row says how much of it was web search (Brave).
 function CostBreakdown({ data }: Props) {
+  const search = data.cost.search_usd;
   return (
     <Section title="Cost breakdown">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -532,8 +537,24 @@ function CostBreakdown({ data }: Props) {
             <div className="mt-1 text-xl font-bold text-fred-primary">
               ${p.cost_usd.toFixed(2)}
             </div>
+            {p.search_usd ? (
+              <div className="text-[11px] text-fred-muted">
+                models ${(p.llm_usd ?? p.cost_usd - p.search_usd).toFixed(2)} · web
+                search ${p.search_usd.toFixed(2)}
+              </div>
+            ) : null}
           </div>
         ))}
+      </div>
+      <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 border-t border-fred-secondary/40 pt-2 text-sm">
+        <span className="font-semibold text-fred-primary">
+          Total ${data.cost.total_usd.toFixed(2)}
+        </span>
+        {search != null ? (
+          <span className="text-xs text-fred-muted">
+            of which web search (Brave) ${search.toFixed(2)}
+          </span>
+        ) : null}
       </div>
     </Section>
   );
