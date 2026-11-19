@@ -403,3 +403,59 @@ def test_no_workflow_installs_an_unbounded_duckdb():
             if bare.search(line):
                 bad.append(f"{path}:{n}: {line.strip()}")
     assert not bad, "unbounded duckdb install(s):\n" + "\n".join(bad)
+
+
+# --------------------------------------------------------------------------
+# The Drive archive (Nov 2026): a permanent copy of every chain in Drive.
+# --------------------------------------------------------------------------
+
+
+def _step(text, name):
+    """The text of one step, from its `- name:` line to the next one."""
+    i = text.index(f"- name: {name}")
+    j = text.find("\n      - name:", i + 1)
+    return text[i:] if j == -1 else text[i:j]
+
+
+def test_publish_dispatches_the_drive_archive_and_cannot_fail_for_it():
+    text = (WF_DIR / "publish_latest_data.yml").read_text(encoding="utf-8")
+    step = _step(text, "Dispatch the Drive archive")
+    assert "if: always()" in step and "continue-on-error: true" in step
+    assert "gh workflow run archive_to_drive.yml" in step
+    # The last step of the job: nothing after it can be skipped for it.
+    assert text.rstrip().endswith(step.rstrip())
+    assert "actions: write" in text, "dispatching a workflow needs actions: write"
+    # Never by workflow_run: GitHub sends none for a bot-dispatched chain.
+    archive = (WF_DIR / "archive_to_drive.yml").read_text(encoding="utf-8")
+    assert not re.search(r"(?m)^\s{2}workflow_run:", archive)
+
+
+def test_the_rclone_config_lives_in_one_step_and_is_always_removed():
+    text = (WF_DIR / "archive_to_drive.yml").read_text(encoding="utf-8")
+    # The secret is named only in the steps that write the config, at step scope.
+    for m in re.finditer(r"secrets\.RCLONE_CONF_B64", text):
+        head = text[:m.start()]
+        step_name = head[head.rfind("- name:"):].splitlines()[0]
+        assert step_name == "- name: Write rclone config", (
+            "RCLONE_CONF_B64 may appear only in a 'Write rclone config' step's env")
+    jobs = re.split(r"(?m)^  [a-z_]+:\n", text.split("\njobs:\n", 1)[1])[1:]
+    assert jobs
+    for job in jobs:
+        if "Write rclone config" not in job:
+            continue
+        removal = _step(job, "Remove rclone config")
+        assert "if: always()" in removal and 'rm -rf "${RUNNER_TEMP}/rclone"' in removal
+        assert job.index("- name: Write rclone config") < job.index("- name: Remove rclone config")
+    # Never at workflow or job scope.
+    top = text.split("\njobs:\n", 1)[0]
+    assert "secrets.RCLONE_CONF_B64" not in top
+
+
+def test_the_archive_keeps_its_report_for_the_watchdog():
+    text = (WF_DIR / "archive_to_drive.yml").read_text(encoding="utf-8")
+    assert "chain_diagnostics write --workflow archive_to_drive" in text
+    step = _step(text, "Upload chain diagnostics")
+    assert "chain-diagnostics-archive_to_drive-${{ github.run_id }}" in step
+    assert "retention-days: 90" in step, "the watchdog reads these back over 90 days"
+    watchdog = (WF_DIR / "cron_watchdog.yml").read_text(encoding="utf-8")
+    assert "scripts.ci.check_drive_archive" in watchdog

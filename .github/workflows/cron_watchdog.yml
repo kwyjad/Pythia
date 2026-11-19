@@ -78,3 +78,22 @@ jobs:
           PYTHIA_API_BASE_URL: ${{ vars.PYTHIA_API_BASE_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 -m scripts.ci.check_dashboard_sync --mode watchdog --wait-min 15 --grace-min 90
+
+  drive_archive:
+    # Has every published chain reached the Drive archive (archive_to_drive.yml)?
+    # A Publish run with no archive 48 hours on is a warning; past 60 days it is
+    # an error, since its artifacts expire within 30 days. A nearly full Drive,
+    # as the newest archive run measured it, is an error too.
+    name: Is every published chain archived to Drive?
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Compare Publish runs with the archive reports
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m scripts.ci.check_drive_archive

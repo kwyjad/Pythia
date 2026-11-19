@@ -18,6 +18,20 @@ There is a fifth, unrelated bundle for the ingestion side: `resolver-debug-bundl
 
 Separate from the four above, and built for a person rather than an analyst: `pythia-cycle-diagnostics`, on every Publish run. Each workflow in the post-ingest chain (Compute Resolutions, Compute SPD Scores, Calibration, Ingest Structured Data, Refresh CrisisWatch, Publish) writes `chain-diagnostics-<slug>-<run_id>` with `scripts/ci/chain_diagnostics.py`: what triggered the run, which canonical DB it started from and whether its upload landed (`lineage.json`), table counts before and after, freshness, step timings, a short issue register, and a section of its own (the resolution outcome table, scores written by model, calibration weights against the floor, the CrisisWatch edition, and so on). After the release upload, Publish runs `scripts/ci/build_cycle_diagnostics.py`, which follows `lineage.json` back from the run it published to the start of the chain, adds the weekly ingest and CrisisWatch runs of the window, and gathers every run's diagnostics, Resolver Update's debug bundle, Calibration's scored bundle and (on the forecast chain) Sibyl's bundles into one zip with `README.md`, `CYCLE_SUMMARY.md` and `manifest.json`. No DB artifact is ever included, the zip is scanned for credentials before it is written, and it is kept under 200 MB by dropping logs and code before evidence. Retention is 14 days. Details: `CLAUDE.md`, "Cycle diagnostics bundle".
 
+## Drive archive
+
+GitHub keeps artifacts for 14 to 90 days. `archive_to_drive.yml` keeps a permanent copy of every finished chain in the owner's Google Drive, under `Fred_archive/`. Each Publish run dispatches it as its last step, and a weekly run catches any that were missed.
+
+For each chain it uploads one zip built by `build_cycle_diagnostics.py --full`: the same runs and artifacts as the cycle zip, with no size ceiling, nothing dropped, the nested bundles kept whole, and six Sibyl artifacts the 200 MB zip leaves out (`pythia-llm-calls-detail`, `pythia-spd-tables`, `pythia-question-metrics`, `pythia-evidence-packs`, `pythia-llm-prompts`, `pythia-interpreter-gate-diagnostics`). No DB is ever inside the zip, and the credential scan is the same. Beside the zip it lays `README.md`, `CYCLE_SUMMARY.md`, `manifest.json`, the executive summary, the health report and the interpreter report, so the archive can be read without opening zips. After a forecast chain it also stores the canonical DB compressed with zstd, checked by decompressing it, comparing SHA-256 and opening it.
+
+| What | Where in Drive | Example name |
+|---|---|---|
+| Forecast chain zip | `Fred_archive/runs/<YYYY>/<date>__forecast__<fc_run_id>__gh<publish>/` | `pythia_2026-11-13__forecast__fc_1794543371__gh43538181703.zip` |
+| Scoring chain zip | `Fred_archive/runs/<YYYY>/<date>__scoring__gh<publish>/` | `pythia_2026-11-11__scoring__gh43009722469.zip` |
+| DB snapshot | `Fred_archive/db_snapshots/<YYYY>/` | `pythia_resolver_db_2026-11-13__fc_1794543371__gh43531717339.duckdb.zst` |
+
+The date is the UTC day the chain's first run started. Zips are kept for ever; DB snapshots are kept for a year, then one per calendar quarter, and never fewer than six. Setup: `docs/SECRETS.md`, "Google Drive archive". Details: `CLAUDE.md`, "Drive archive".
+
 ## Where they are produced
 
 Since September 2026 everything a forecast cycle produces at its end is produced in one job, in one order. The `run_sibyl.yml` job runs: forecast deviation, the current-run bundle, the interpreter report and PDF, the operational debug bundle with the LLM prompt snapshot and its sibling uploads, the forecast attribution bundle, and only then the canonical DB upload and the publish dispatch. Every diagnostic step is `if: always()` with `continue-on-error: true`, so a bundle bug can never cost a run its DB upload.
