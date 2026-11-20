@@ -28,7 +28,10 @@ For each chain it uploads one zip built by `build_cycle_diagnostics.py --full`: 
 |---|---|---|
 | Forecast chain zip | `Fred_archive/runs/<YYYY>/<date>__forecast__<fc_run_id>__gh<publish>/` | `pythia_2026-11-13__forecast__fc_1794543371__gh43538181703.zip` |
 | Scoring chain zip | `Fred_archive/runs/<YYYY>/<date>__scoring__gh<publish>/` | `pythia_2026-11-11__scoring__gh43009722469.zip` |
+| Scored bundle, unzipped (scoring chains) | `Fred_archive/runs/<YYYY>/<date>__scoring__gh<publish>/scored_bundle/` | `scored_bundle/monthly_report_inputs.json`, `scored_bundle/digest.md`, `scored_bundle/SKIPPED.md` |
 | DB snapshot | `Fred_archive/db_snapshots/<YYYY>/` | `pythia_resolver_db_2026-11-13__fc_1794543371__gh43531717339.duckdb.zst` |
+
+A scoring chain also gets `scored_bundle/`: the scored bundle's report files lifted out of the bundle zip nested inside the chain zip, because the Drive connector the monthly report session uses reads text and cannot open a zip inside a zip. Only an allowlist is copied (the digest, `headline.json`, `monthly_report_inputs.json`, `ANALYST_GUIDE.md`, the small tables and summaries, and `case_studies_new/`), at most 1 MB a file and 10 MB in all; anything skipped or missing is named in `SKIPPED.md`. A chain archived before this folder existed gets it from a dispatch with `scored_bundle_only` and its `publish_run_id`, which reads the zip back from Drive and writes only the folder.
 
 The date is the UTC day the chain's first run started. Zips are kept for ever; DB snapshots are kept for a year, then one per calendar quarter, and never fewer than six. Setup: `docs/SECRETS.md`, "Google Drive archive". Details: `CLAUDE.md`, "Drive archive".
 

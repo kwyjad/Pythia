@@ -16,7 +16,10 @@ Layout under ``$DRIVE_ROOT`` (``Fred_archive``)::
     runs/<YYYY>/<YYYY-MM-DD>__<chain>__<ids>/   the zip, plus loose README,
                                                 CYCLE_SUMMARY, manifest,
                                                 executive summary, health
-                                                report and interpreter report
+                                                report and interpreter report;
+                                                a scoring chain also gets
+                                                scored_bundle/ (the scored
+                                                bundle's report files, unzipped)
     db_snapshots/<YYYY>/                        pythia_resolver_db_*.duckdb.zst
                                                 and its .db_snapshot.json
 
@@ -26,6 +29,9 @@ Subcommands, each a step of the workflow:
                  window), named and checked against Drive; writes the matrix.
 ``leg``          archive one: build the zip, (forecast) snapshot the DB, upload
                  with ``rclone copy --checksum`` and ``rclone check``.
+``scored-bundle`` add only the missing ``scored_bundle/`` folder to a chain
+                 already in Drive (read back from its zip; the zip and loose
+                 files are never replaced).
 ``housekeeping`` thin old DB snapshots, check Drive space, merge the legs'
                  reports into ``archive_report.json`` for the chain diagnostics.
 
@@ -312,6 +318,17 @@ class Rclone:
         self.run("copy", str(local), self.path(), "--checksum")
         self.run("check", str(local), self.path(), "--one-way", "--checksum")
 
+    def download(self, rel_file: str, local: Path) -> None:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        self.run("copyto", self.path(rel_file), str(local), "--checksum")
+
+    def upload_subtree(self, local_root: Path, rel_dir: str) -> None:
+        """Copy ``local_root/rel_dir`` to the same place in Drive and check it,
+        touching nothing outside ``rel_dir``."""
+        src = local_root / rel_dir
+        self.run("copy", str(src), self.path(rel_dir), "--checksum")
+        self.run("check", str(src), self.path(rel_dir), "--one-way", "--checksum")
+
     def delete(self, rel_file: str) -> None:
         # Drive's default is to move to the trash (rclone drive use_trash=true),
         # so a mistake can be undone for 30 days.
@@ -544,6 +561,106 @@ def _loose_name(path: Path, staging: Path) -> str:
     return f"{prefix}__{rel.name}"
 
 
+# ---------------------------------------------------------------------------
+# The scored bundle, unzipped beside the scoring chain's zip
+# ---------------------------------------------------------------------------
+
+#: The monthly performance report is written by a Claude session that reads
+#: Drive through the connector: it reads text, not a 15 MB zip nested inside
+#: another zip. So the files the report reads are lifted out of the scored
+#: bundle into ``scored_bundle/`` beside the chain zip.
+SCORED_BUNDLE_GLOB = "scored_forecast_analysis__*.zip"
+SCORED_BUNDLE_DIR = "scored_bundle"
+SCORED_BUNDLE_FILES = (
+    "digest.md", "headline.json", "manifest.json", "ANALYST_GUIDE.md",
+    "monthly_report_inputs.json",
+    "questions_index.csv", "skill_history.csv", "indicative_questions.csv",
+    "resolution_sources.csv", "unasked_outcomes.csv", "binary_reliability.csv",
+    "experiments.csv", "advice_experiment.csv", "recalibration_effect.csv",
+    "calibration_status.csv", "calibration_weights.csv", "calibration_advice.md",
+    "trace_stages_summary.csv", "update_value_summary.csv", "rc_outcomes_summary.csv",
+)
+SCORED_BUNDLE_GLOBS = ("case_studies_new/*.json",)
+SCORED_FILE_CAP = 1024 * 1024
+SCORED_TOTAL_CAP = 10 * 1024 * 1024
+#: Files a bundle built before monthly_report_inputs (Nov 2026) cannot carry.
+SCORED_BUNDLE_LATER_ADDITIONS = {
+    "monthly_report_inputs.json": "added to the scored bundle after this bundle was built",
+    "case_studies_new/*.json": "added to the scored bundle after this bundle was built",
+}
+
+
+def find_scored_bundle(staging: Path) -> Path | None:
+    """The scored bundle zip inside a chain's staging tree (newest name), or None."""
+    found = sorted(p for p in staging.rglob(SCORED_BUNDLE_GLOB) if p.is_file())
+    return found[-1] if found else None
+
+
+def _allowed(name: str) -> bool:
+    import fnmatch
+
+    return name in SCORED_BUNDLE_FILES or any(fnmatch.fnmatchcase(name, g) for g in SCORED_BUNDLE_GLOBS)
+
+
+def extract_scored_bundle(bundle_zip: Path, dest: Path, *, file_cap: int = SCORED_FILE_CAP,
+                          total_cap: int = SCORED_TOTAL_CAP,
+                          env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Lift the allowlisted files out of ``bundle_zip`` into ``dest``.
+
+    A file over ``file_cap``, or one that would take the folder past
+    ``total_cap``, is skipped and named in ``SKIPPED.md`` with its size, as is
+    any allowlisted file the bundle does not hold. The folder is scanned for
+    every credential in ``env`` before it is returned (raises ``SecretLeak``).
+    """
+    import zipfile
+
+    from scripts.ci.build_cycle_diagnostics import scan_for_secrets
+
+    dest.mkdir(parents=True, exist_ok=True)
+    written: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    total = 0
+    with zipfile.ZipFile(bundle_zip) as zf:
+        infos = {i.filename: i for i in zf.infolist() if not i.is_dir()}
+        chosen = sorted((n for n in infos if _allowed(n)),
+                        key=lambda n: (n not in SCORED_BUNDLE_FILES, n))
+        for name in chosen:
+            size = infos[name].file_size
+            if size > file_cap:
+                skipped.append({"file": name, "bytes": size, "reason": f"over the {file_cap} byte per-file cap"})
+                continue
+            if total + size > total_cap:
+                skipped.append({"file": name, "bytes": size,
+                                "reason": f"would take the folder past the {total_cap} byte cap"})
+                continue
+            target = dest / name
+            if Path(name).is_absolute() or ".." in Path(name).parts:
+                skipped.append({"file": name, "bytes": size, "reason": "unsafe path"})
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(name))
+            total += size
+            written.append({"file": name, "bytes": size})
+        present = set(infos)
+    absent = [n for n in SCORED_BUNDLE_FILES if n not in present]
+    if not any(n.startswith("case_studies_new/") for n in present):
+        absent.append("case_studies_new/*.json")
+    for name in absent:
+        skipped.append({"file": name, "bytes": None,
+                        "reason": SCORED_BUNDLE_LATER_ADDITIONS.get(name, "not in this bundle")})
+    if skipped:
+        lines = ["# Files not copied out of the scored bundle", "",
+                 f"Source: `{bundle_zip.name}`. Caps: {file_cap} bytes per file, "
+                 f"{total_cap} bytes in all.", "",
+                 "| File | Bytes | Why |", "|---|---|---|"]
+        lines += [f"| `{s['file']}` | {s['bytes'] if s['bytes'] is not None else '-'} | {s['reason']} |"
+                  for s in skipped]
+        (dest / "SKIPPED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    scan_for_secrets(dest, dict(os.environ if env is None else env))
+    return {"folder": SCORED_BUNDLE_DIR, "source": bundle_zip.name, "files": written,
+            "skipped": skipped, "total_bytes": total}
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -671,6 +788,9 @@ def run_leg(spec: Mapping[str, Any], *, gh: Any, repo: str, rclone: Rclone, work
         shutil.copy2(path, run_dir / target)
         loose.append(target)
     report["loose_files"] = loose
+    bundle = find_scored_bundle(staging)
+    if bundle is not None:
+        report["scored_bundle"] = extract_scored_bundle(bundle, run_dir / SCORED_BUNDLE_DIR, env=env)
     shutil.rmtree(staging, ignore_errors=True)
     if names.db_name and spec.get("chain", {}).get("sibyl_run_id"):
         sibyl = str(spec["chain"]["sibyl_run_id"])
@@ -717,6 +837,91 @@ def cmd_leg(args: argparse.Namespace, *, gh: Any = None, rclone: Rclone | None =
     _output("zip_name", zip_name)
     _output("artifact_name", "pythia-archive-" + Path(zip_name).stem if zip_name else "")
     print(json.dumps({k: report.get(k) for k in ("status", "zip", "db_snapshot", "drive_paths")},
+                     indent=2, default=str))
+    return code
+
+
+def nested_scored_bundle(chain_zip: Path, dest_dir: Path) -> Path | None:
+    """Copy the scored bundle zip out of an archived chain zip (where it sits
+    as ``<nn>_compute_calibration__<run>/pythia-ai-analysis-bundle/...zip``)."""
+    import fnmatch
+    import zipfile
+
+    with zipfile.ZipFile(chain_zip) as zf:
+        names = sorted(n for n in zf.namelist()
+                       if fnmatch.fnmatchcase(Path(n).name, SCORED_BUNDLE_GLOB))
+        if not names:
+            return None
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = dest_dir / Path(names[-1]).name
+        out.write_bytes(zf.read(names[-1]))
+        return out
+
+
+def backfill_scored_bundle(spec: Mapping[str, Any], *, rclone: Rclone, work: Path,
+                           env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Add the missing ``scored_bundle/`` folder to a chain already in Drive.
+
+    Reads the chain zip back from Drive (so an expired GitHub artifact does not
+    matter), takes the scored bundle out of it, and uploads ONLY
+    ``<run_dir>/scored_bundle/``. The zip and the loose files beside it are
+    never replaced; a folder already in Drive is left alone.
+    """
+    names = ArchiveNames(**spec["names"])
+    pid = str(spec.get("publish_run_id"))
+    report: dict[str, Any] = {"publish_run_id": pid, "names": dataclasses.asdict(names),
+                              "mode": "scored_bundle_only", "status": "failed"}
+    rclone.assert_single_root()
+    zip_rel = f"{names.run_dir}/{names.zip_name}"
+    if not rclone.exists(zip_rel):
+        report["reason"] = f"{zip_rel} is not in Drive; run the normal archive leg instead"
+        return report
+    folder_rel = f"{names.run_dir}/{SCORED_BUNDLE_DIR}"
+    already = rclone.list_files(folder_rel)
+    if already:
+        report.update(status="already_present", reason=f"{folder_rel} already holds {len(already)} file(s)")
+        return report
+    shutil.rmtree(work, ignore_errors=True)
+    local_zip = work / "chain" / names.zip_name
+    rclone.download(zip_rel, local_zip)
+    bundle = nested_scored_bundle(local_zip, work / "bundle")
+    if bundle is None:
+        report.update(status="no_scored_bundle", reason="the chain zip holds no scored bundle")
+        shutil.rmtree(work, ignore_errors=True)
+        return report
+    upload = work / "upload"
+    report["scored_bundle"] = extract_scored_bundle(bundle, upload / folder_rel, env=env)
+    rclone.upload_subtree(upload, folder_rel)
+    report["drive_paths"] = sorted(
+        f"{rclone.root}/{p.relative_to(upload).as_posix()}" for p in upload.rglob("*") if p.is_file())
+    report["status"] = "archived"
+    shutil.rmtree(work, ignore_errors=True)
+    return report
+
+
+def cmd_scored_bundle(args: argparse.Namespace, *, gh: Any = None, rclone: Rclone | None = None) -> int:
+    gh = gh or _gh_cls()(args.repo)
+    rclone = rclone or Rclone(args.remote, args.root)
+    work = Path(args.work_dir)
+    try:
+        spec = plan_one(gh, args.repo, None, str(args.publish_run_id), include_test=True, work=work)
+        if spec.get("status") != "todo":
+            report = {**spec, "mode": "scored_bundle_only"}
+            code = 1 if spec.get("status") == "failed" else 0
+        else:
+            report = backfill_scored_bundle(spec, rclone=rclone, work=work / "scored")
+            code = 1 if report.get("status") == "failed" else 0
+    except Exception as exc:  # noqa: BLE001
+        from scripts.ci.build_cycle_diagnostics import SecretLeak
+
+        report = {"publish_run_id": str(args.publish_run_id), "mode": "scored_bundle_only",
+                  "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        code = 2 if isinstance(exc, SecretLeak) else 1
+    if report.get("status") == "failed":
+        print(f"::error title=Drive scored-bundle backfill failed::{report.get('reason')}")
+    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.report).write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
+    print(json.dumps({k: report.get(k) for k in ("status", "reason", "scored_bundle", "drive_paths")},
                      indent=2, default=str))
     return code
 
@@ -832,6 +1037,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--work-dir", default="archive_work")
     p.add_argument("--out-dir", default="archive_out")
     p.add_argument("--report", default="archive_leg/leg.json")
+    p = sub.add_parser("scored-bundle",
+                       help="add only the missing scored_bundle/ folder to a chain already in Drive")
+    p.add_argument("--publish-run-id", required=True)
+    p.add_argument("--work-dir", default="archive_work")
+    p.add_argument("--report", default="archive_leg/scored_bundle.json")
     p = sub.add_parser("housekeeping")
     p.add_argument("--plan", default="diagnostics/archive_plan.json")
     p.add_argument("--legs-dir", default="archive_legs")
@@ -842,6 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_plan(args)
     if args.cmd == "leg":
         return cmd_leg(args)
+    if args.cmd == "scored-bundle":
+        return cmd_scored_bundle(args)
     return cmd_housekeeping(args)
 
 

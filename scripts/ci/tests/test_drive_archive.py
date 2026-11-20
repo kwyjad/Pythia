@@ -203,6 +203,7 @@ class FakeRclone(da.Rclone):
         self.store = store
         self.roots = roots
         self.deleted: list[str] = []
+        self.copies: list[tuple[str, str]] = []
         self.about_payload = {"total": 2 * 1024 ** 4, "used": 1024 ** 4, "free": 1024 ** 4}
 
     def root_folders(self):
@@ -215,7 +216,16 @@ class FakeRclone(da.Rclone):
         return sorted(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file())
 
     def copy_tree(self, local):
+        self.copies.append(("tree", ""))
         shutil.copytree(local, self.store / self.root, dirs_exist_ok=True)
+
+    def download(self, rel_file, local):
+        local.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.store / self.root / rel_file, local)
+
+    def upload_subtree(self, local_root, rel_dir):
+        self.copies.append(("subtree", rel_dir))
+        shutil.copytree(local_root / rel_dir, self.store / self.root / rel_dir, dirs_exist_ok=True)
 
     def delete(self, rel_file):
         (self.store / self.root / rel_file).unlink()
@@ -536,3 +546,159 @@ def test_watchdog_failed_entries_do_not_count():
     publish = [_pub(6, 5)]
     reports = [({"id": 97}, {"publish_runs": [{"publish_run_id": "6", "status": "failed"}]})]
     assert len(cda.evaluate(publish, reports, NOW)["warnings"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# scored_bundle/: the scored bundle's report files, unzipped beside the zip
+# ---------------------------------------------------------------------------
+
+
+def _scored_bundle_zip(*, with_new_files=True, big=0, secret=None) -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name in da.SCORED_BUNDLE_FILES:
+            if name == "monthly_report_inputs.json" and not with_new_files:
+                continue
+            zf.writestr(name, f"{name}\n")
+        zf.writestr("scores_flat.csv", "too big for the connector\n")
+        zf.writestr("questions/AAA_ACE_FATALITIES_2026-10.json", "{}")
+        if with_new_files:
+            zf.writestr("case_studies_new/AAA_ACE_FATALITIES_2026-10.json", "{}")
+        if big:
+            zf.writestr("skill_history.csv", "x" * big)
+        if secret:
+            zf.writestr("digest.md", f"leaked {secret}")
+    return buf.getvalue()
+
+
+def _scoring_chain(gh: FakeGh, bundle: bytes):
+    gh.add(_run(20, "Pythia — Compute Calibration Weights & Advice", "2026-11-11T11:03:28Z",
+                event="workflow_run"),
+           {"pythia-ai-analysis-bundle": {"scored_forecast_analysis__2026-11.zip": bundle},
+            "pythia-resolver-db": {"resolver.duckdb": b"DB"}})
+    lineage = {"slug": "publish_latest_data", "this_run": "21", "trigger_run": "20"}
+    gh.add(_run(21, "Publish Latest Data (Release)", "2026-11-11T11:10:25Z"),
+           {"chain-diagnostics-publish_latest_data-21": {"lineage.json": json.dumps(lineage),
+                                                          "issues.json": json.dumps({"issues": []})}})
+
+
+def _archive_scoring(tmp_path, bundle: bytes, env=None):
+    gh = FakeGh()
+    _scoring_chain(gh, bundle)
+    rc = FakeRclone(tmp_path / "drive")
+    spec = da.plan_one(gh, REPO, rc, "21", include_test=False, work=tmp_path / "w")
+    assert spec["status"] == "todo" and spec["chain"]["kind"] == "scoring", spec
+    report = da.run_leg(spec, gh=gh, repo=REPO, rclone=rc, work=tmp_path / "w",
+                        out_dir=tmp_path / "out", env=env or {})
+    names = da.ArchiveNames(**spec["names"])
+    return gh, rc, spec, report, tmp_path / "drive" / "Fred_archive" / names.run_dir
+
+
+def test_a_scoring_leg_lifts_the_allowlist_out_of_the_nested_bundle(tmp_path):
+    _gh, _rc, _spec, report, run_dir = _archive_scoring(tmp_path, _scored_bundle_zip())
+    folder = run_dir / "scored_bundle"
+    got = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+    assert set(da.SCORED_BUNDLE_FILES) <= set(got)
+    assert "case_studies_new/AAA_ACE_FATALITIES_2026-10.json" in got
+    # Only the allowlist: never the 3 MB tables or the per-question records.
+    assert "scores_flat.csv" not in got and not any(g.startswith("questions/") for g in got)
+    assert "SKIPPED.md" not in got
+    sb = report["scored_bundle"]
+    assert sb["folder"] == "scored_bundle" and sb["source"] == "scored_forecast_analysis__2026-11.zip"
+    assert {f["file"] for f in sb["files"]} == set(got)
+    assert report["loose_files"]  # recorded beside it, not instead of it
+
+
+def test_both_caps_skip_a_file_and_name_it_with_its_size(tmp_path):
+    src = tmp_path / "scored_forecast_analysis__2026-11.zip"
+    src.write_bytes(_scored_bundle_zip(big=5000))
+    out = da.extract_scored_bundle(src, tmp_path / "sb", file_cap=4000, total_cap=10**9, env={})
+    skipped = {s["file"]: s for s in out["skipped"]}
+    assert skipped["skill_history.csv"]["bytes"] == 5000
+    assert "per-file cap" in skipped["skill_history.csv"]["reason"]
+    md = (tmp_path / "sb" / "SKIPPED.md").read_text()
+    assert "`skill_history.csv` | 5000" in md
+    assert not (tmp_path / "sb" / "skill_history.csv").exists()
+    # The total cap: files taken in allowlist order until the folder is full.
+    out2 = da.extract_scored_bundle(src, tmp_path / "sb2", file_cap=10**9, total_cap=60, env={})
+    assert out2["total_bytes"] <= 60
+    assert any("folder past" in s["reason"] for s in out2["skipped"])
+    assert "folder past" in (tmp_path / "sb2" / "SKIPPED.md").read_text()
+
+
+def test_a_bundle_built_before_the_report_inputs_says_so(tmp_path):
+    src = tmp_path / "scored_forecast_analysis__2026-11.zip"
+    src.write_bytes(_scored_bundle_zip(with_new_files=False))
+    da.extract_scored_bundle(src, tmp_path / "sb", env={})
+    md = (tmp_path / "sb" / "SKIPPED.md").read_text()
+    assert "`monthly_report_inputs.json`" in md and "`case_studies_new/*.json`" in md
+    assert "after this bundle was built" in md
+
+
+def test_the_folder_is_scanned_for_credentials(tmp_path):
+    secret = "ghs_" + "Q1w2E3r4T5y6U7i8O9p0" * 2
+    src = tmp_path / "scored_forecast_analysis__2026-11.zip"
+    src.write_bytes(_scored_bundle_zip(secret=secret))
+    with pytest.raises(bcd.SecretLeak):
+        da.extract_scored_bundle(src, tmp_path / "sb", env={"GH_TOKEN": secret})
+
+
+def test_a_chain_with_no_scored_bundle_gets_no_folder(tmp_path):
+    gh = FakeGh()
+    _forecast_chain(gh)
+    rc = FakeRclone(tmp_path / "drive")
+    spec = da.plan_one(gh, REPO, rc, "13", include_test=False, work=tmp_path / "w")
+
+    def fetch_db(_gh, _repo, _sibyl, dest):
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "resolver.duckdb").write_bytes(b"db")
+        return dest / "resolver.duckdb"
+
+    def snapshot(db, out, verify_dir=None):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"zst")
+        return {"verified": True}
+
+    report = da.run_leg(spec, gh=gh, repo=REPO, rclone=rc, work=tmp_path / "w",
+                        out_dir=tmp_path / "out", env={}, snapshot=snapshot, fetch_db=fetch_db)
+    assert report["status"] == "archived" and "scored_bundle" not in report
+    run_dir = tmp_path / "drive" / "Fred_archive" / da.ArchiveNames(**spec["names"]).run_dir
+    assert not (run_dir / "scored_bundle").exists()
+
+
+def test_the_backfill_adds_only_the_folder_and_never_touches_the_zip(tmp_path):
+    gh, rc, spec, _report, run_dir = _archive_scoring(
+        tmp_path, _scored_bundle_zip(with_new_files=False))
+    names = da.ArchiveNames(**spec["names"])
+    # Archived before scored_bundle/ existed: take the folder away again.
+    shutil.rmtree(run_dir / "scored_bundle")
+    zip_path = run_dir / names.zip_name
+    before = {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in run_dir.iterdir() if p.is_file()}
+    rc.copies.clear()
+
+    out = da.backfill_scored_bundle(spec, rclone=rc, work=tmp_path / "bf", env={})
+    assert out["status"] == "archived"
+    after = {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in run_dir.iterdir() if p.is_file()}
+    assert after == before  # the zip and every loose file are byte- and time-identical
+    assert zip_path.name in after
+    assert rc.copies == [("subtree", f"{names.run_dir}/scored_bundle")]
+    folder = run_dir / "scored_bundle"
+    assert (folder / "digest.md").is_file() and (folder / "SKIPPED.md").is_file()
+    assert all(p.startswith(f"Fred_archive/{names.run_dir}/scored_bundle/") for p in out["drive_paths"])
+
+    # A second run finds the folder and does nothing.
+    rc.copies.clear()
+    again = da.backfill_scored_bundle(spec, rclone=rc, work=tmp_path / "bf2", env={})
+    assert again["status"] == "already_present" and rc.copies == []
+
+
+def test_the_backfill_refuses_a_chain_not_in_drive(tmp_path):
+    gh = FakeGh()
+    _scoring_chain(gh, _scored_bundle_zip())
+    rc = FakeRclone(tmp_path / "drive")
+    spec = da.plan_one(gh, REPO, None, "21", include_test=True, work=tmp_path / "w")
+    out = da.backfill_scored_bundle(spec, rclone=rc, work=tmp_path / "bf", env={})
+    assert out["status"] == "failed" and "not in Drive" in out["reason"]
+    assert rc.copies == []
