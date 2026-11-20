@@ -491,6 +491,26 @@ jobs:
       # stage's own db_signature_before), so the provenance table's before
       # column is the stage's; its after column is this job's DB, which
       # also carries Sibyl's rows.
+      # The GDACS history blocks the forecaster actually SENT, read back from
+      # llm_calls and checked (repeated months, a rate over too few months,
+      # event months the DB did not hold). Its issues.json rides in
+      # pythia-stage-diagnostics-sibyl so CYCLE_SUMMARY.md shows a violation;
+      # the debug bundle runs the same check as a collector.
+      - name: Check GDACS history blocks in forecast prompts
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics/gdacs_prompt_check
+          python -m scripts.ci.check_gdacs_prompt_blocks \
+            --db "${RESOLVER_DB_URL}" \
+            --run-id "${FORECASTER_RUN_ID:-}" \
+            --out-dir diagnostics/gdacs_prompt_check
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/gdacs_prompt_check/gdacs_prompt_check.md ]; then
+            head -c 60000 diagnostics/gdacs_prompt_check/gdacs_prompt_check.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
       - name: Dump Pythia v2 debug artifacts
         if: always()
         continue-on-error: true
@@ -738,6 +758,7 @@ jobs:
           name: pythia-stage-diagnostics-sibyl
           path: |
             diagnostics/stage_health__sibyl.json
+            diagnostics/gdacs_prompt_check/
             diagnostics/provider_preflight.json
             diagnostics/grounding_citation.json
             diagnostics/job_logs/

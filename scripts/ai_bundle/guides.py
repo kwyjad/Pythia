@@ -595,6 +595,18 @@ reason when absent. Stale means: ENSO carried forward or over 100 days old;
 CrisisWatch three or more editions old; a conflict-forecast vintage over 45
 days; the ACLED trajectory when `input_partial_month`. The digest counts
 stale and absent injects per hazard and lists CrisisWatch status for ACE.
+**Two sources, kept apart.** `present`, `observed`, `age_months`, `stale`
+and `reason` are REBUILT from the database as it stands when the bundle is
+built (`inject_status.*.reconstructed_at_bundle_time`); they say what the
+prompt could have carried, not what it did. On the `gdacs_history` row the
+`prompt_*` columns are PARSED from the question's stored prompt
+(`spd_prompt`): `prompt_total_months`, `prompt_event_months` (0 when the
+block printed "history unavailable"), `prompt_history_unavailable`,
+`prompt_repeated_months` (months listed more than once in the timeline) and
+`prompt_vs_rebuild` (`match`, `prompt_lower`, `prompt_higher`, `no_block`).
+`invalid` is true when the block as shown repeated a month or printed a rate
+over fewer than 24 months. Read the prompt columns for what a model saw;
+prompts before 29 September 2026 counted rows, not months.
 
 **Record fields.** `base_rate_shown`: the structured figures behind the
 prompt's base-rate block. For ACE: the six ACLED months before the forecast

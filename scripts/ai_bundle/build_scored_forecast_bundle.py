@@ -1899,7 +1899,10 @@ def build_bundle(
                 LOGGER.warning("trace prior rescoring failed for %s: %s", qid, exc)
             try:
                 inject_rows.extend(
-                    _err.inject_health_rows(qid, meta, record.get("inject_status") or {})
+                    _err.inject_health_rows(
+                        qid, meta, record.get("inject_status") or {},
+                        prompt_text=record.get("spd_prompt"),
+                    )
                 )
             except Exception as exc:  # noqa: BLE001
                 inject_error = f"{type(exc).__name__}: {exc}"

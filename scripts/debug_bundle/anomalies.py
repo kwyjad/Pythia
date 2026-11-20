@@ -61,6 +61,7 @@ def build(
     workflow_logs_index: dict[str, Any] | None = None,
     retry_rows: list[dict[str, Any]] | None = None,
     breaker: dict[str, Any] | None = None,
+    gdacs_prompt_check: dict[str, Any] | None = None,
     collector_errors: list[dict[str, Any]] | None = None,
     file_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -319,6 +320,22 @@ def build(
                     f("retry_report", "retry_report.csv"),
                 )
             )
+    gp = gdacs_prompt_check or {}
+    if int(gp.get("n_violating_prompts") or 0):
+        kinds: dict[str, int] = {}
+        for row in (gp.get("by_hazard") or {}).values():
+            for k, n in (row.get("by_kind") or {}).items():
+                kinds[k] = kinds.get(k, 0) + int(n)
+        detail = ", ".join(f"{k} {n}" for k, n in sorted(kinds.items()))
+        out.append(
+            _entry(
+                WARN,
+                "prompts",
+                f"{gp['n_violating_prompts']} of {gp.get('n_with_block')} GDACS history "
+                f"blocks the forecaster sent break a rule ({detail})",
+                f("gdacs_prompt_check", "gdacs_prompt_check.md"),
+            )
+        )
     br = breaker or {}
     if int(br.get("brave_breaker_short_circuits") or 0):
         out.append(

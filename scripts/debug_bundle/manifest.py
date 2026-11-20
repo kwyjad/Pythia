@@ -91,6 +91,7 @@ DESCRIPTIONS: dict[str, str] = {
     "prompt_cache_report": "Per phase/provider/model cache reads, writes, hit rate and dollars saved.",
     "retry_report": "Per phase/provider/model attempts, backoff seconds, error classes and breaker trips.",
     "model_completeness": "Per (question, model, month): did the forecast land, and with how many buckets.",
+    "gdacs_prompt_check": "The GDACS history blocks the forecaster actually sent, checked: repeated or missing months, a rate over too few months, event months the database did not hold, base-rate section disagreeing.",
     "run_comparison": "This run's key metrics beside the previous two production runs.",
     "workflow_logs": "Actions logs for the whole cycle: this run, the pipeline stages, and the poller ticks.",
     "code_snapshot": "Verbatim copies of the files most often implicated in a bad run, plus the commit range since the last production run.",
