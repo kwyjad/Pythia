@@ -5056,29 +5056,16 @@ async def _run_binary_forecast_for_question(
         # Load current GDACS alerts
         current_alerts: list[dict] = []
         try:
+            from forecaster.gdacs_history import recent_alert_months
+
             alert_con = connect(read_only=True)
-            # Only Orange/Red event months: the binary question's own
-            # definition says Green does not count, so surfacing Green/zero
-            # rows as "alerts" was pure noise that biased models upward.
-            alert_rows = alert_con.execute(
-                """
-                SELECT ym, value, alertlevel
-                FROM facts_resolved
-                WHERE upper(iso3) = ? AND upper(hazard_code) = ?
-                  AND lower(metric) = 'event_occurrence'
-                  AND COALESCE(value, 0) >= 1
-                  AND upper(COALESCE(alertlevel, '')) IN ('ORANGE', 'RED')
-                ORDER BY ym DESC LIMIT 6
-                """,
-                [iso3, hz],
-            ).fetchall()
-            alert_con.close()
-            for arow in alert_rows:
-                current_alerts.append({
-                    "ym": str(arow[0]),
-                    "value": float(arow[1] or 0),
-                    "alertlevel": str(arow[2] or ""),
-                })
+            # Only Orange/Red event months, each month once with its
+            # strongest level (GDACS writes several rows per month, and a
+            # list of rows repeated months: see recent_alert_months).
+            try:
+                current_alerts = recent_alert_months(alert_con, iso3, hz, limit=6)
+            finally:
+                alert_con.close()
         except Exception as exc:
             # Non-fatal: the prompt just loses recent-alert context — but
             # that degradation must be visible, not silent.

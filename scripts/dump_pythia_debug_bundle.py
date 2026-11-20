@@ -6942,6 +6942,24 @@ def emit_operational_files(
 
     collected["run_comparison"] = _run_collector("run_comparison", rc_path, _comparison) or []
 
+    # --- GDACS history blocks as sent ------------------------------------
+    gp_json = out_dir / f"gdacs_prompt_check__{run}.json"
+
+    def _gdacs_prompts() -> dict[str, Any]:
+        from scripts.ci import check_gdacs_prompt_blocks as gdacs_check
+
+        report = gdacs_check.check_run(con, data.forecaster_run_id or None)
+        report["issue"] = gdacs_check.issue_record(report)
+        gp_json.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+        (out_dir / f"gdacs_prompt_check__{run}.md").write_text(
+            gdacs_check.render_markdown(report), encoding="utf-8"
+        )
+        return report
+
+    collected["gdacs_prompt_check"] = _run_collector(
+        "gdacs_prompt_check", gp_json, _gdacs_prompts
+    ) or {}
+
     # --- anomalies (last: it reads everything above) ----------------------
     an_path = out_dir / f"anomalies__{run}.json"
 
@@ -6956,6 +6974,7 @@ def emit_operational_files(
             workflow_logs_index=collected.get("workflow_logs"),
             retry_rows=collected.get("retry_rows"),
             breaker=collected.get("breaker"),
+            gdacs_prompt_check=collected.get("gdacs_prompt_check"),
             collector_errors=_COLLECTOR_ERRORS,
             file_names={
                 "health_report": f"health_report__{run}.json",
@@ -6965,6 +6984,7 @@ def emit_operational_files(
                 "crisiswatch_inject": f"crisiswatch_inject__{run}.json",
                 "model_completeness": f"model_completeness__{run}.csv",
                 "retry_report": f"retry_report__{run}.csv",
+                "gdacs_prompt_check": f"gdacs_prompt_check__{run}.md",
             },
         )
         an_path.write_text(

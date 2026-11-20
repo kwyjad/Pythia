@@ -302,7 +302,8 @@ def _section_current_situation(
         for alert in current_alerts[:10]:
             level = alert.get("alertlevel") or "?"
             ym = alert.get("ym", "?")
-            parts.append(f"  - [{level}] {ym}")
+            note = " (month in progress; alerts so far)" if alert.get("in_progress") else ""
+            parts.append(f"  - [{level}] {ym}{note}")
     else:
         parts.append(f"\nNo recent Orange/Red GDACS event months for {country}.")
 

@@ -129,6 +129,8 @@ on:
       - "scripts/ci/tests/test_batch_canary.py"
       - ".github/workflows/poll_llm_batches.yml"
       - "scripts/ci/stage_health.py"
+      - "scripts/ci/check_gdacs_prompt_blocks.py"
+      - "scripts/ci/tests/test_check_gdacs_prompt_blocks.py"
       - "scripts/ci/tests/test_batch_economics.py"
       - "scripts/ci/tests/test_stage_health.py"
       - "scripts/ci/provider_preflight.py"
@@ -464,6 +466,7 @@ jobs:
             scripts/ci/tests/test_batch_economics.py \
             scripts/ci/tests/test_batch_canary.py \
             scripts/ci/tests/test_stage_health.py \
+            scripts/ci/tests/test_check_gdacs_prompt_blocks.py \
             scripts/ci/tests/test_provider_preflight.py \
             scripts/ci/tests/test_billing_reconciliation.py \
             scripts/ci/tests/test_advice_arm_text.py \
@@ -623,7 +626,8 @@ jobs:
           pytest -vv \
             forecaster/tests/test_binary_prompts.py \
             forecaster/tests/test_aggregation_gaps.py \
-            forecaster/tests/test_drought_binary_inputs.py
+            forecaster/tests/test_drought_binary_inputs.py \
+            forecaster/tests/test_gdacs_prompt_block.py
 
       - name: Run calibration + benchmark scoring tests
         run: |

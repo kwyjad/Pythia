@@ -1642,6 +1642,11 @@ def build_tails(ctx: Context) -> tuple[list[dict[str, Any]], list[dict[str, Any]
 INJECT_HEALTH_COLUMNS = [
     "question_id", "iso3", "hazard_code", "metric", "track", "inject", "present",
     "observed", "age_days", "age_months", "stale", "reason",
+    # gdacs_history rows only: the block AS SENT, parsed from the stored
+    # prompt (forecaster.gdacs_history.parse_gdacs_prompt_block). The columns
+    # above it are rebuilt from today's DB and cannot see what was shown.
+    "invalid", "prompt_total_months", "prompt_event_months",
+    "prompt_history_unavailable", "prompt_repeated_months", "prompt_vs_rebuild",
 ]
 
 
@@ -1737,8 +1742,58 @@ def base_rate_shown(con, meta: Mapping[str, Any], record: Mapping[str, Any] | No
     return out
 
 
-def inject_health_rows(qid: str, meta: Mapping[str, Any], inject: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """One row per inject the question's prompt could carry."""
+def gdacs_prompt_columns(prompt_text: Any, rebuild: Mapping[str, Any]) -> dict[str, Any]:
+    """The GDACS history block as the question's stored prompt showed it.
+
+    ``prompt_vs_rebuild`` compares the event months the prompt printed with
+    the rebuild from today's DB: ``match``, ``prompt_lower``,
+    ``prompt_higher`` or ``no_block``. A block that printed the unavailable
+    line counts as zero event months. ``invalid`` is True when the block
+    repeated a month in its timeline or printed a rate over fewer than
+    ``MIN_HISTORY_MONTHS`` months, the two faults the November 2026 review
+    found; it is None when there is no block.
+    """
+    try:
+        from forecaster.gdacs_history import MIN_HISTORY_MONTHS, parse_gdacs_prompt_block
+    except Exception:  # noqa: BLE001
+        return {"prompt_vs_rebuild": "no_block"}
+    block = parse_gdacs_prompt_block(prompt_text if isinstance(prompt_text, str) else None)
+    if block is None:
+        return {"prompt_vs_rebuild": "no_block", "invalid": None}
+    unavailable = bool(block.get("history_unavailable"))
+    total = block.get("total_months")
+    events = 0 if unavailable else block.get("event_months")
+    repeated = len(block.get("repeated_months") or [])
+    short_rate = (not unavailable) and (total is None or int(total) < MIN_HISTORY_MONTHS)
+    rebuilt = rebuild.get("event_months")
+    if events is None or rebuilt is None:
+        verdict = "match" if events == rebuilt else ("prompt_lower" if rebuilt else "prompt_higher")
+    elif int(events) == int(rebuilt):
+        verdict = "match"
+    else:
+        verdict = "prompt_lower" if int(events) < int(rebuilt) else "prompt_higher"
+    return {
+        "invalid": bool(repeated or short_rate),
+        "prompt_total_months": total,
+        "prompt_event_months": events,
+        "prompt_history_unavailable": unavailable,
+        "prompt_repeated_months": repeated,
+        "prompt_vs_rebuild": verdict,
+    }
+
+
+def inject_health_rows(
+    qid: str,
+    meta: Mapping[str, Any],
+    inject: Mapping[str, Any],
+    prompt_text: Any = None,
+) -> list[dict[str, Any]]:
+    """One row per inject the question's prompt could carry.
+
+    ``prompt_text`` is the stored prompt (the record's ``spd_prompt``); the
+    ``gdacs_history`` row parses it so the row says what the model was SHOWN
+    beside the rebuild from today's DB.
+    """
     base = {"question_id": qid, "iso3": meta.get("iso3"), "hazard_code": meta.get("hazard_code"),
             "metric": meta.get("metric"), "track": meta.get("track")}
     rows: list[dict[str, Any]] = []
@@ -1760,6 +1815,7 @@ def inject_health_rows(qid: str, meta: Mapping[str, Any], inject: Mapping[str, A
         add("gdacs_history", bool(gd.get("available")), gd.get("window_end"),
             age_months=gd.get("total_months"), stale=False if gd.get("available") else None,
             reason=gd.get("reason"))
+        rows[-1].update(gdacs_prompt_columns(prompt_text, gd))
     cw = inject.get("crisiswatch") or {}
     if cw.get("applicable"):
         add("crisiswatch", bool(cw.get("available")), cw.get("edition"),
@@ -1798,6 +1854,30 @@ def inject_digest_lines(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     ]
     for (hz, inj), c in sorted(counts.items()):
         lines.append(f"| {hz} | {inj} | {c['n']} | {c['absent']} | {c['stale']} |")
+    gd_rows = [r for r in rows if r["inject"] == "gdacs_history"]
+    if gd_rows:
+        lines += ["", "**GDACS history block as shown** (parsed from each stored prompt; the "
+                      "table above rebuilds it from today's database):", ""]
+        by_hz: dict[str, Counter] = defaultdict(Counter)
+        for r in gd_rows:
+            c = by_hz[str(r["hazard_code"])]
+            if r.get("prompt_vs_rebuild") == "no_block":
+                c["no_block"] += 1
+                continue
+            if (r.get("prompt_repeated_months") or 0) > 0:
+                c["repeated"] += 1
+            if r.get("prompt_history_unavailable"):
+                c["unavailable"] += 1
+            elif r.get("prompt_event_months") == 0 and r.get("prompt_vs_rebuild") == "prompt_lower":
+                c["zero_where_db"] += 1
+            if r.get("invalid"):
+                c["invalid"] += 1
+        for hz, c in sorted(by_hz.items()):
+            lines.append(
+                f"- {hz}: GDACS block as shown: {c['repeated']} repeated-month, "
+                f"{c['zero_where_db']} zero-where-DB-has-events, {c['unavailable']} unavailable "
+                f"({c['invalid']} invalid, {c['no_block']} with no block)."
+            )
     cw = [r for r in rows if r["inject"] == "crisiswatch"]
     if cw:
         status = Counter(
@@ -2130,6 +2210,7 @@ __all__ = [
     "history_digest_lines",
     "inject_digest_lines",
     "inject_health_rows",
+    "gdacs_prompt_columns",
     "input_partial_month",
     "last_acled_ingest_on_or_before",
     "months_affected",
