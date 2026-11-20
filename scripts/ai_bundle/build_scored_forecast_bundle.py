@@ -35,6 +35,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from scripts.ai_bundle import error_attribution as _err
+from scripts.ai_bundle import monthly_report_inputs as _mri
 from scripts.ai_bundle import provenance as _prov
 from scripts.ai_bundle.common import (
     column_exists,
@@ -1637,6 +1638,10 @@ def _write_digest(
         "`update_value.csv` (+ summary), `rc_outcomes.csv` (+ summary), "
         "`unasked_outcomes.csv`, `experiments.csv`, `skill_history.csv`, "
         "`tail_outcomes.csv`, `binary_reliability.csv`, `inject_health.csv`.",
+        "- `monthly_report_inputs.json` — the figures the monthly performance report quotes "
+        "(round, forecast vintage, new this round, Track 1 paired comparisons, CrisisWatch "
+        "split, GDACS blocks as shown, confounded flags, case candidates); "
+        "`case_studies_new/` holds the full records of the worst and best new pairs.",
         "- `briefing/` — condensed chat-uploadable digest + case studies.",
     ]
     path = out_dir / "digest.md"
@@ -1812,6 +1817,7 @@ def build_bundle(
     include_test: bool = False,
     include_sibyl_trials: str = "case-studies",
     keep_staging: bool = False,
+    round_date: str | None = None,
 ) -> Path | None:
     con = open_db(db)
     db_path = resolve_db_path(db)
@@ -1879,6 +1885,9 @@ def build_bundle(
             LOGGER.warning("error-attribution context unavailable: %s", err_ctx_error)
         inject_rows: list[dict[str, Any]] = []
         inject_error: str | None = None
+        # The few fields monthly_report_inputs.json needs, kept while each
+        # record is released.
+        report_facts: dict[str, dict[str, Any]] = {}
         for q in questions:
             qid = str(q["question_id"])
             try:
@@ -1906,6 +1915,10 @@ def build_bundle(
                 )
             except Exception as exc:  # noqa: BLE001
                 inject_error = f"{type(exc).__name__}: {exc}"
+            try:
+                report_facts[qid] = _mri.question_facts(record)
+            except Exception as exc:  # noqa: BLE001 - a fact never costs the record
+                LOGGER.warning("monthly report facts failed for %s: %s", qid, exc)
             write_json(staging / "questions" / f"{qid}.json", record)
             summaries.append(_question_summary(record))
             del record
@@ -1957,6 +1970,19 @@ def build_bundle(
             else {"status": "ok", "rows": len(inject_rows)}
         )
         err_digest["inject"] = inject_rows
+        report_inputs_status: dict[str, Any]
+        try:
+            rd = datetime.strptime(round_date, "%Y-%m-%d").date() if round_date else None
+            report_doc = _mri.build(con, err_ctx, report_facts, staging, round_date=rd,
+                                    ctx_error=err_ctx_error)
+            report_inputs_status = {"file": _mri.FILE_NAME,
+                                    "sections": report_doc.get("section_status"),
+                                    "round_date": (report_doc.get("round") or {}).get("round_date")}
+        except Exception as exc:  # noqa: BLE001 - the file never costs the bundle
+            LOGGER.warning("monthly_report_inputs.json failed: %s", exc)
+            write_json(staging / _mri.FILE_NAME, {"stub": True, "reason": f"{type(exc).__name__}: {exc}"})
+            report_inputs_status = {"file": _mri.FILE_NAME, "error": f"{type(exc).__name__}: {exc}"}
+        del report_facts
         weight_movement = _emit_calibration(con, staging)
         calibration_state = _prov.calibration_status(con)
         write_csv(
@@ -2034,6 +2060,7 @@ def build_bundle(
                         "skill figure and calibration step"
                     ),
                 },
+                "monthly_report_inputs": report_inputs_status,
                 "error_attribution": {
                     "files": err_sections.files,
                     "context_error": err_ctx_error,
@@ -2079,6 +2106,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Where to inline full Sibyl trial traces")
     parser.add_argument("--keep-staging", action="store_true",
                         help="Keep the unzipped staging directory")
+    parser.add_argument("--round-date", default=None,
+                        help="Resolver Update date of this round (YYYY-MM-DD); default: the "
+                             "latest resolutions.source_snapshot_ym date")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="[ai_bundle] %(message)s")
@@ -2091,6 +2121,7 @@ def main(argv: list[str] | None = None) -> int:
             include_test=args.include_test,
             include_sibyl_trials=args.include_sibyl_trials,
             keep_staging=args.keep_staging,
+            round_date=args.round_date,
         )
     except Exception as exc:  # noqa: BLE001 - the bundle never fails calibration
         LOGGER.exception("scored bundle failed")

@@ -608,6 +608,42 @@ block printed "history unavailable"), `prompt_history_unavailable`,
 over fewer than 24 months. Read the prompt columns for what a model saw;
 prompts before 29 September 2026 counted rows, not months.
 
+**`monthly_report_inputs.json`** — the figures the monthly performance
+report quotes, computed here so the report never recomputes them from
+`scores_flat.csv`. Same rules as the files above: one run per question,
+binary and SPD never blended, Track 1 never compared with Track 2, 90%
+intervals from 2,000 resamples of whole questions (seed 20261002); a section
+that cannot be computed is `{"stub": true, "reason": ...}` and
+`section_status` says which. Sections: `round` (the Resolver Update date,
+the newest `resolutions.source_snapshot_ym` unless `--round-date` was given;
+the calibration run id; the git sha); `forecast_vintage` (per latest run
+behind the scored questions: its date, question count and the value counts
+of lineup, prompt versions, advice arm, recalibration mode and
+`input_partial_month`; `single_value_flags` names methods not yet in the
+scored set); `new_this_round` (per hazard, metric and track: questions and
+horizon-months resolved this round, horizon-months from earlier rounds,
+undated ones, new indicative months, and new ones `rewritten`, read before
+the round and read again now; "new" is the resolution's
+`source_snapshot_ym`, or for a zero-default its first `resolution_vintages`
+reading, on or after the round date); `paired_comparisons` (Track 1 only,
+same question and horizon, indicative months left out: BayesMC minus the
+plain mean on SPD RPS and on binary Brier, each member minus the primary
+aggregate on SPD RPS, Sibyl minus the primary on SPD RPS and Brier; lower is
+better); `crisiswatch_split` (ACE/FATALITIES paired RPS skill against
+climatology by the age of the CrisisWatch edition shown, per track, with the
+runs behind each class and `confounded_with_run` when two classes come from
+different runs, so the split cannot separate edition age from the run);
+`gdacs_prompt_checks` (per DR/FL/TC, from the stored prompt text: blocks
+with repeated months, blocks showing zero events where the database holds
+some, unavailable lines, rates over fewer than 24 months); `confounded_experiments`
+(pairs of `experiments.csv` flags whose arms hold the same questions, so the
+two cannot be told apart); `case_candidates` (the five worst and five best
+NEW pairs per family by the primary's score minus climatology's, with
+persistence and Sibyl where scored, the resolved value, `source_desc` and
+`resolution_reading`). `case_studies_new/` holds the full records of the
+three worst and three best per family, at most 2 MB in all; any dropped for
+size are listed in `case_studies_new.dropped_for_size`.
+
 **Record fields.** `base_rate_shown`: the structured figures behind the
 prompt's base-rate block. For ACE: the six ACLED months before the forecast
 month (value, month, the row's `updated_at` and `updated_after_forecast`, true
@@ -654,6 +690,8 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "(start or adjustments?), `update_value_summary.csv`, `rc_outcomes_summary.csv`, "
         "`experiments.csv`, `skill_history.csv`, `tail_outcomes.csv`, "
         "`binary_reliability.csv`, `unasked_outcomes.csv`, `inject_health.csv`.",
+        "7. `monthly_report_inputs.json` — the monthly report's figures, ready to quote; "
+        "`case_studies_new/` holds the worst and best newly resolved questions.",
         "",
         "`briefing/` holds condensed, size-capped versions of the digest and "
         "case studies for chat-upload contexts. If you can read the whole "

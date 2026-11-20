@@ -13,6 +13,8 @@
 #       (build_cycle_diagnostics --full: no size ceiling, nothing dropped,
 #       no DB inside) plus loose README, CYCLE_SUMMARY, manifest, executive
 #       summary, health report and interpreter report
+#       (a scoring chain also gets scored_bundle/: the scored bundle's
+#       report files unzipped, for the monthly report's Drive reader)
 #   db_snapshots/<YYYY>/   after a forecast chain, the canonical DB as
 #       .duckdb.zst, verified (decompressed, sha256 compared, opened)
 #
@@ -48,6 +50,11 @@ on:
         description: "Archive every Publish run of the last N days not yet in Drive (blank = off)"
         required: false
         default: ""
+      scored_bundle_only:
+        description: "With publish_run_id: add only the missing scored_bundle/ folder to a chain already in Drive (never replaces the zip)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Weekly safety net: Mondays 05:23 UTC, backfill mode over 80 days.
     - cron: "23 5 * * 1"
@@ -67,6 +74,8 @@ env:
 jobs:
   plan:
     name: Which chains need archiving?
+    # A boolean input can arrive as the STRING "false" over the REST API.
+    if: inputs.scored_bundle_only != true && inputs.scored_bundle_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -216,10 +225,73 @@ jobs:
         if: always()
         run: rm -rf "${RUNNER_TEMP}/rclone"
 
+  # Adds scored_bundle/ to a scoring chain archived before that folder
+  # existed. Reads the chain zip back from Drive, so an expired artifact does
+  # not matter, and uploads only that folder.
+  scored_bundle:
+    name: Add scored_bundle/ to an archived chain
+    if: inputs.scored_bundle_only == true || inputs.scored_bundle_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone >/dev/null
+          python -m pip install --quiet "duckdb>=1.4,<2" pyyaml
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+
+      - name: Add scored_bundle/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${IN_PUBLISH_RUN_ID:-}" ]; then
+            echo "::error::scored_bundle_only needs publish_run_id."
+            exit 1
+          fi
+          python -m scripts.ci.drive_archive scored-bundle --publish-run-id "${IN_PUBLISH_RUN_ID}" \
+            --report "archive_leg/scored_bundle_${IN_PUBLISH_RUN_ID}.json"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-scored-bundle-${{ github.run_id }}
+          path: archive_leg/*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"
+
   housekeeping:
     name: Thin snapshots, check space, write diagnostics
     needs: [plan, archive]
-    if: always()
+    if: always() && inputs.scored_bundle_only != true && inputs.scored_bundle_only != 'true'
+
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
