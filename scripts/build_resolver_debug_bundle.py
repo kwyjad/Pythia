@@ -2518,6 +2518,9 @@ class BundleBuilder:
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
             self._check_figures_inside_their_document_window,
+            self._check_accepted_figures_name_no_earlier_year,
+            self._check_no_household_conversion_beside_stated_people,
+            self._check_no_figure_resolves_flood_and_cyclone,
             self._check_no_revision_against_an_unfrozen_cell,
             self._check_no_unexplained_no_row,
             self._check_drought_severity_base_rates,
@@ -3731,46 +3734,59 @@ class BundleBuilder:
             f"target month has passed (stored, flagged, not served): {stale_rows or 'none'}.",
         )
 
+    def _accepted_ledger_figures(self) -> list[dict[str, Any]] | None:
+        """The accepted rows of the figures ledger, or None when there is none."""
+
+        ledger = self.path("hazard", "figures_ledger.csv")
+        if not ledger.is_file():
+            return None
+        with open(ledger, encoding="utf-8", newline="") as handle:
+            body = "".join(line for line in handle if not line.startswith("#"))
+        return [
+            record for record in csv.DictReader(io.StringIO(body))
+            if str(record.get("outcome")) == "accepted"
+        ]
+
     def _check_figures_inside_their_document_window(self) -> None:
         """No accepted figure is about a date outside its cell's reporting window.
 
-        Documents 4222929 and 4222839 (floods between March and May) were
-        filed under AFG / FL / 2026-07 in the September 2026 run. The
-        ledger now carries the date each figure is about and the
-        document's primary country; this check re-runs the window test
-        over the accepted rows alone, so it fails the day the attribution
-        stage stops rejecting them.
+        Re-dates every accepted figure the way the attribution stage does
+        (``figures.figure_period``): the figure's own date or period, then
+        the time its quote names, then the document's dates, with a
+        period's START deciding the cell. Until November 2026 this check
+        read only the figure's date and the document's, as the stage did,
+        so it reported 0 of 787 while "The 2022 floods ... 33 million
+        people" resolved PAK / FL / 2026-10.
         """
 
         name = "no_accepted_figure_lies_outside_its_cell_reporting_window"
-        ledger = self.path("hazard", "figures_ledger.csv")
-        if not ledger.is_file():
+        accepted_rows = self._accepted_ledger_figures()
+        if accepted_rows is None:
             return self._check(name, "SKIP", "", "", "no figures ledger")
         try:
-            from resolver.hazard_resolution.figures import reporting_window
+            from types import SimpleNamespace
+
+            from resolver.hazard_resolution.figures import figure_period, reporting_window
             from resolver.hazard_resolution.rulebook import load_rulebook
-            from resolver.hazard_resolution.sources import parse_date
 
             rulebook = load_rulebook()
         except Exception as exc:  # noqa: BLE001
             return self._check(name, "SKIP", "", "", f"rulebook unavailable: {exc}")
-        with open(ledger, encoding="utf-8", newline="") as handle:
-            body = "".join(line for line in handle if not line.startswith("#"))
         offenders: list[str] = []
-        accepted = 0
         undated = 0
-        for record in csv.DictReader(io.StringIO(body)):
-            if str(record.get("outcome")) != "accepted":
-                continue
-            accepted += 1
-            about = None
-            for field in ("figure_date", "doc_date_original", "doc_date"):
-                about = parse_date(record.get(field) or "")
-                if about is not None:
-                    break
+        by_field: Counter = Counter()
+        for record in accepted_rows:
+            figure = SimpleNamespace(
+                date=record.get("figure_date") or "",
+                quote=record.get("quote") or "",
+                doc_date_original=record.get("doc_date_original") or "",
+                doc_date=record.get("doc_date") or "",
+            )
+            about, _end, field, _evidence = figure_period(figure)
             if about is None:
                 undated += 1
                 continue
+            by_field[field] += 1
             ym = str(record.get("ym") or "")
             try:
                 start, end = reporting_window(ym, rulebook)
@@ -3779,7 +3795,7 @@ class BundleBuilder:
             if not (start <= about <= end):
                 offenders.append(
                     f"{record.get('iso3')}/{record.get('hazard')}/{ym} doc {record.get('doc_id')} "
-                    f"about {about.isoformat()} (window {start}..{end})"
+                    f"about {about.isoformat()} by {field} (window {start}..{end})"
                 )
             primary = str(record.get("doc_primary_country") or "").upper()
             if primary and primary != str(record.get("iso3") or "").upper():
@@ -3787,15 +3803,127 @@ class BundleBuilder:
                     f"{record.get('iso3')}/{record.get('hazard')}/{ym} doc {record.get('doc_id')} "
                     f"is about {primary}"
                 )
-        if not accepted:
+        if not accepted_rows:
             return self._check(name, "SKIP", "", "", "no accepted figures in the ledger")
+        dated_by = ", ".join(f"{k} {v}" for k, v in sorted(by_field.items())) or "none"
         self._check(
             name, "FAIL" if offenders else "PASS",
-            f"{len(offenders)} of {accepted} accepted figures ({undated} undated, not tested)",
+            f"{len(offenders)} of {len(accepted_rows)} accepted figures ({undated} undated, not tested)",
             "0",
+            ("; ".join(offenders[:10]) + " | " if offenders else
+             "Every accepted figure with a date is about a date inside its cell's "
+             "reporting window, and about the cell's own country. ")
+            + f"Dated by: {dated_by}.",
+        )
+
+    def _check_accepted_figures_name_no_earlier_year(self) -> None:
+        """No accepted figure's quote names only years before its cell's year."""
+
+        name = "no_accepted_figure_quotes_only_earlier_years"
+        accepted_rows = self._accepted_ledger_figures()
+        if accepted_rows is None:
+            return self._check(name, "SKIP", "", "", "no figures ledger")
+        if not accepted_rows:
+            return self._check(name, "SKIP", "", "", "no accepted figures in the ledger")
+        from resolver.hazard_resolution.figures import names_only_earlier_years
+
+        offenders: list[str] = []
+        for record in accepted_rows:
+            ym = str(record.get("ym") or "")
+            try:
+                year = int(ym.split("-")[0])
+            except ValueError:
+                continue
+            years = names_only_earlier_years(record.get("quote") or "", year)
+            if years:
+                offenders.append(
+                    f"{record.get('iso3')}/{record.get('hazard')}/{ym} doc "
+                    f"{record.get('doc_id')} names {years}"
+                )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {len(accepted_rows)} accepted figures", "0",
             "; ".join(offenders[:10])
-            or "Every accepted figure with a date is about a date inside its cell's "
-            "reporting window, and about the cell's own country.",
+            or "No accepted figure's quote names only years before its cell's year.",
+        )
+
+    def _check_no_household_conversion_beside_stated_people(self) -> None:
+        """No accepted households figure whose own quote states the people count."""
+
+        name = "no_household_conversion_where_people_were_stated"
+        accepted_rows = self._accepted_ledger_figures()
+        if accepted_rows is None:
+            return self._check(name, "SKIP", "", "", "no figures ledger")
+        if not accepted_rows:
+            return self._check(name, "SKIP", "", "", "no accepted figures in the ledger")
+        from resolver.hazard_resolution.figures import stated_people_counts
+
+        offenders: list[str] = []
+        households = 0
+        for record in accepted_rows:
+            unit = str(record.get("stated_unit") or record.get("unit") or "").lower()
+            if unit != "households":
+                continue
+            households += 1
+            try:
+                stated = float(record.get("stated_value") or 0)
+            except ValueError:
+                stated = 0.0
+            counts = [c for c in stated_people_counts(record.get("quote") or "") if c >= stated]
+            if counts:
+                offenders.append(
+                    f"{record.get('iso3')}/{record.get('hazard')}/{record.get('ym')} doc "
+                    f"{record.get('doc_id')}: {stated:,.0f} households beside "
+                    f"{counts[0]:,.0f} people"
+                )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {households} accepted household figures", "0",
+            "; ".join(offenders[:10])
+            or "No accepted household figure's quote states a people count for the group.",
+        )
+
+    def _check_no_figure_resolves_flood_and_cyclone(self) -> None:
+        """No ReliefWeb figure wins both an FL and a TC cell in one country-month.
+
+        Scoped to rows not yet frozen: the August 2026 rows for Laos and
+        the Philippines froze before the rule existed and can never move,
+        so they are counted apart rather than failing every run forever.
+        """
+
+        name = "no_figure_resolves_both_flood_and_cyclone"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions absent")
+        result = self.query(
+            """
+            WITH winners AS (
+                SELECT iso3, year, month, hazard,
+                       json_extract_string(provenance_json, '$.source_record_ids[0]') AS ref,
+                       frozen_at
+                FROM haz_resolutions
+                WHERE hazard IN ('FL', 'TC') AND status = 'RESOLVED_VALUE'
+                  AND rule_fired LIKE '%reliefweb_extracted%'
+            )
+            SELECT f.iso3, f.year, f.month, f.ref,
+                   (f.frozen_at < CURRENT_DATE OR t.frozen_at < CURRENT_DATE) AS frozen
+            FROM winners f JOIN winners t
+              ON f.iso3 = t.iso3 AND f.year = t.year AND f.month = t.month
+             AND f.ref = t.ref AND f.hazard = 'FL' AND t.hazard = 'TC'
+            ORDER BY f.year, f.month, f.iso3
+            """
+        )
+        if result is None:
+            return self._check(name, "SKIP", "", "", "query failed")
+        live = [r for r in result[1] if not r[4]]
+        frozen = [r for r in result[1] if r[4]]
+        self._check(
+            name, "FAIL" if live else "PASS",
+            f"{len(live)} unfrozen cell pair(s)", "0",
+            ("; ".join(f"{r[0]} {r[1]}-{int(r[2]):02d} {r[3]}" for r in live[:10]) + ". "
+             if live else "No unfrozen figure resolves both a flood and a cyclone cell. ")
+            + f"Frozen history before the rule: {len(frozen)} pair(s)"
+            + (f" ({', '.join(f'{r[0]} {r[1]}-{int(r[2]):02d}' for r in frozen[:10])})" if frozen else "")
+            + ".",
         )
 
     def _check_conflict_displacement_inside_its_month(self) -> None:

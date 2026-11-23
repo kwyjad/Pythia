@@ -362,6 +362,58 @@ quote verifier checks against the text that was sent.
    **not** discarded: an unattributed figure in an OCHA sitrep is still
    the best evidence in the room when nothing else is available.
 
+**Attribution: is the figure about this cell? (Nov 2026).** Before the
+ceiling, `figures.apply_attribution` asks whether each figure belongs to the
+cell at all, and the November 2026 resolver review (run 42999258374) showed
+that "about this month" had been answered from the publication date alone:
+"The 2022 floods ... affecting 33 million people" resolved PAK / FL /
+2026-10 because the document was published on 2 October 2026.
+
+* **How a figure is dated**, in order: the figure's own date or period
+  (`sources.parse_period` reads `YYYY`, `YYYY-MM` and a full date; the
+  first two used to fail to parse and fall through to the document's date);
+  the period its verbatim quote names (`figures.quote_period`: years from
+  1990 to 2099 including a citation year such as "2025a", "As of 6
+  October", "From 16 September to 6 October 2026", month names in English,
+  French and Spanish; a bare month takes the document's year, or the year
+  before when that would put it after the document); the document's
+  `date.original`; its `date.created`. When the figure's own date lies
+  inside a longer period the quote names, the quote's start is taken. The
+  ledger row says which field dated it.
+* **The start decides the cell** (`rules.attribution_month`): a figure for
+  16 September to 6 October belongs to September only.
+* **Reasons**, each a rulebook switch (all on):
+  `quote_names_earlier_period` (the quote names years, every one before the
+  cell's year; `reliefweb.documents.enforce_quote_period`, which also gates
+  the quote dating and the partial dates); `outside_reporting_window` (as
+  before, on the new dating); `document_about_earlier_event` (an undated
+  figure in a document whose dated figures were rejected as earlier, or
+  whose title names only earlier years;
+  `reliefweb.documents.reject_undated_in_dated_document`);
+  `cyclone_figure_in_flood_cell` (a figure from a document filed under
+  Tropical Cyclone, or whose title or quote names a cyclone, is admitted to
+  the TC cell only, unless the quote names flooding and the document states
+  a separate cyclone figure; `reliefweb.documents.one_hazard_per_figure`);
+  `household_superseded_by_stated_people` (one quote read both as households
+  and as people: the people reading is kept) and
+  `household_with_stated_people` (a households reading whose quote states
+  the people count; no people figure is made up from the quote;
+  `reliefweb.household_conversion.prefer_stated_people`).
+* **A rejected answer is retracted** while the cell is unfrozen: a PENDING
+  verdict writes nothing, so `impact._retract_unsupported_extracted_row`
+  deletes an unfrozen `RESOLVED_VALUE` the ReliefWeb rung had written when
+  rung 2 was read this run and no figure now supports it. A frozen row is
+  never touched; `compact_resolver_db.yml maintenance=extraction_rule_retract`
+  is the audited, owner-approved route for those.
+* `python -m resolver.hazard_resolution.quote_period_audit --db PATH
+  --months ...` replays every cell's cached extractions under the old and
+  the new rules (no network, no model call, read-only) and lists what
+  changes and why.
+
+The switches sit under the shared `reliefweb` section, so they move the
+flood and cyclone fingerprints (both re-walk); drought reads no ReliefWeb
+figure and `Rulebook._KEYS_NOT_READ_BY_HAZARD` keeps them out of its digest.
+
 Survivors are written to `haz_impact_candidates` with the quote, the
 document URL, the extraction model, and a `preference_rank` — 0 being the
 figure the rulebook prefers. The reconciler reads that rank instead of

@@ -2248,7 +2248,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 bucket_index INTEGER,
                 centroid DOUBLE,
                 as_of_month TEXT,
-                schema_version TEXT
+                schema_version TEXT,
+                prior_centroid DOUBLE,
+                prior_as_of_month TEXT
             );
             """,
             {
@@ -2258,6 +2260,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "centroid": "DOUBLE",
                 "as_of_month": "TEXT",
                 "schema_version": "TEXT",
+                # The value an EMA row replaced, so a second run in the same
+                # month blends from it rather than from its own output
+                # (Nov 2026; compute_bucket_centroids.update_bucket_centroids_ema).
+                "prior_centroid": "DOUBLE",
+                "prior_as_of_month": "TEXT",
             },
         )
 

@@ -86,7 +86,7 @@ name: Compact Resolver DB
         default: false
         type: boolean
       maintenance:
-        description: "What to do: compact (the raw-cache compaction), conflict_resolution_reset (ACE/FATALITIES audit + relabel + centroid reset), conflict_displacement_reset (ACE/PA audit + delete + re-resolve) or sweep_era_rewalk (FL/TC pre-2026-09-17 sweep-era NO_DATA audit + retract + re-walk)"
+        description: "What to do: compact (the raw-cache compaction), conflict_resolution_reset (ACE/FATALITIES audit + relabel + centroid reset), conflict_displacement_reset (ACE/PA audit + delete + re-resolve), sweep_era_rewalk (FL/TC pre-2026-09-17 sweep-era NO_DATA audit + retract + re-walk) or extraction_rule_retract (frozen FL/TC ReliefWeb answers the Nov 2026 figure rules reject: audit + retract + re-walk)"
         required: false
         default: compact
         type: choice
@@ -95,6 +95,7 @@ name: Compact Resolver DB
           - conflict_resolution_reset
           - conflict_displacement_reset
           - sweep_era_rewalk
+          - extraction_rule_retract
       db_run_id:
         description: "Optional: force canonical DB from an Actions run ID. Blank = latest successful producer."
         required: false
@@ -112,7 +113,7 @@ jobs:
     # A scheduled compaction, and an applied sweep-era re-walk: the re-walk
     # retracts rows a mid-pipeline canonical upload would otherwise carry or
     # discard, so it waits for the staged pipeline like the scheduled run.
-    if: ${{ github.event_name == 'schedule' || (inputs.maintenance == 'sweep_era_rewalk' && (inputs.apply == true || inputs.apply == 'true')) }}
+    if: ${{ github.event_name == 'schedule' || ((inputs.maintenance == 'sweep_era_rewalk' || inputs.maintenance == 'extraction_rule_retract') && (inputs.apply == true || inputs.apply == 'true')) }}
     runs-on: ubuntu-latest
     outputs:
       proceed: ${{ steps.gate.outputs.proceed }}
@@ -467,6 +468,56 @@ jobs:
             echo ""
             echo "The nightly backcast re-walks the freed months and refreshes"
             echo "haz-base-rates and haz-acceptance itself."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- maintenance=extraction_rule_retract ---------------------------
+      # Nov 2026: the frozen FL/TC ReliefWeb answers the current figure
+      # rules reject (a figure about an earlier event, a household
+      # conversion beside a stated people count, a cyclone figure in a flood
+      # cell), on cells a question resolves from. Same shape as the
+      # sweep-era re-walk: plan + audit copy on every run, the write only on
+      # apply, an integrity check that exits 1 before the upload. Owner
+      # decides whether to apply.
+      - name: "Extraction-rule retract: plan and audit copy"
+        if: env.MODE == 'extraction_rule_retract'
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m resolver.hazard_resolution.extraction_rule_retract \
+            --db data/resolver.duckdb --audit-only \
+            --audit-dir audit/extraction_rule_rows \
+            --json-out diagnostics/extraction_rule_plan.json \
+            --md-out diagnostics/extraction_rule_plan.md
+          {
+            echo "#### Extraction-rule retract plan (frozen rows that would be retracted)"
+            echo ""
+            cat diagnostics/extraction_rule_plan.md
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Extraction-rule retract: upload the audit copy"
+        if: env.MODE == 'extraction_rule_retract'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-audit-extraction-rule-rows
+          path: audit/extraction_rule_rows/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: "Extraction-rule retract: retract the rows and free the ledger months"
+        if: env.APPLY == 'true' && env.MODE == 'extraction_rule_retract'
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.extraction_rule_retract \
+            --db data/resolver.duckdb --apply \
+            --json-out diagnostics/extraction_rule_applied.json \
+            --md-out diagnostics/extraction_rule_applied.md
+          {
+            echo "#### Extraction-rule retract applied"
+            echo ""
+            cat diagnostics/extraction_rule_applied.md
+            echo ""
+            echo "The nightly backcast re-walks the freed months once."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The proof that the resume ledger and the verdicts survived. A

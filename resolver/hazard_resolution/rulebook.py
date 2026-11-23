@@ -281,6 +281,23 @@ class Rulebook:
         "raw_cache.compaction",
     })
 
+    #: Keys in a SHARED section that a hazard never reads, per hazard. The
+    #: November 2026 figure-rule switches live under ``reliefweb``, which is
+    #: shared so a change there re-walks flood and cyclone. Drought reads no
+    #: ReliefWeb figure at all (no ladder, no extraction), so these keys
+    #: cannot move a drought answer, and without this entry they would have
+    #: re-walked drought's 114 backcast months for nothing. Listed by name,
+    #: never by prefix: a key added beside them decides drought until
+    #: somebody says otherwise.
+    _KEYS_NOT_READ_BY_HAZARD: dict[str, frozenset[str]] = {
+        "drought": frozenset({
+            "reliefweb.documents.enforce_quote_period",
+            "reliefweb.documents.reject_undated_in_dated_document",
+            "reliefweb.documents.one_hazard_per_figure",
+            "reliefweb.household_conversion.prefer_stated_people",
+        }),
+    }
+
     def hazard_fingerprint(self, hazard: str) -> str:
         """A stable digest of every rulebook value that decides ``hazard``.
 
@@ -317,7 +334,9 @@ class Rulebook:
 
         return self._fingerprint(hazard, prune=False)
 
-    def _prune_non_deciding(self, node: Any, path: str) -> Any:
+    def _prune_non_deciding(
+        self, node: Any, path: str, extra: frozenset[str] = frozenset()
+    ) -> Any:
         """Drop the keys that decide nothing, wherever in the tree they sit."""
 
         if not isinstance(node, Mapping):
@@ -325,18 +344,20 @@ class Rulebook:
         out: dict[Any, Any] = {}
         for key, value in node.items():
             dotted = f"{path}.{key}" if path else str(key)
-            if dotted in self._NON_DECIDING_KEYS:
+            if dotted in self._NON_DECIDING_KEYS or dotted in extra:
                 continue
-            out[key] = self._prune_non_deciding(value, dotted)
+            out[key] = self._prune_non_deciding(value, dotted, extra)
         return out
 
     def _fingerprint(self, hazard: str, *, prune: bool) -> str:
         import hashlib
         import json as _json
 
+        blind = self._KEYS_NOT_READ_BY_HAZARD.get(hazard, frozenset())
+
         def _section(key: str) -> Any:
             value = self.get(key, None)
-            return self._prune_non_deciding(value, key) if prune else value
+            return self._prune_non_deciding(value, key, blind) if prune else value
 
         extra = self._EXTRA_SECTIONS_BY_HAZARD.get(hazard, ())
         payload: dict[str, Any] = {
@@ -561,6 +582,10 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_int_in("reliefweb.documents.publication_pad_days", 0, 90)
     _require_bool("reliefweb.documents.require_primary_country")
     _require_bool("reliefweb.documents.enforce_reporting_window")
+    _require_bool("reliefweb.documents.enforce_quote_period")
+    _require_bool("reliefweb.documents.reject_undated_in_dated_document")
+    _require_bool("reliefweb.documents.one_hazard_per_figure")
+    _require_bool("reliefweb.household_conversion.prefer_stated_people")
     _require_str_list("reliefweb.documents.source_priority")
     _require_int_in("reliefweb.documents.body_char_limit", 500, 500_000)
     _require_positive_number("reliefweb.documents.request_timeout_sec")

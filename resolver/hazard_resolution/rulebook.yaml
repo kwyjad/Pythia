@@ -829,6 +829,34 @@ reliefweb:
     # publication_pad_days. A figure with no parseable date at all is kept.
     require_primary_country: true
     enforce_reporting_window: true
+    # Date a figure by what it SAYS (Nov 2026). The window test above used
+    # the figure's own date, else the document's, and never read the quote:
+    # "The 2022 floods ... affecting 33 million people" resolved PAK / FL /
+    # 2026-10 at 33,000,000 because the figure carried no date and the
+    # document was published on 2 October 2026. With this on, a quote's
+    # own time references date the figure ("As of 6 October", "From 16
+    # September to 6 October 2026", "(OCHA, 2025a)"), a period's START
+    # decides the cell (so Thailand's 16 Sep to 6 Oct figure is September's
+    # alone, not both months'), and a quote naming only years before the
+    # cell's year is rejected as quote_names_earlier_period (Somalia's
+    # "2023 Deyr floods" 2,500,000 and Cuba's "(OCHA, 2025a)" 2,200,000 in
+    # SOM and CUB / FL / 2026-09).
+    enforce_quote_period: true
+    # A document shown to be about an earlier event takes its undated
+    # figures with it (Nov 2026): once a figure in the document is rejected
+    # as dated before the window, or the title names only earlier years, an
+    # undated figure beside it is rejected as document_about_earlier_event.
+    # Cuba's 645,000 people, from a document about Hurricane Melissa
+    # (October 2025), resolved CUB / FL and TC / 2026-10.
+    reject_undated_in_dated_document: true
+    # One figure, one hazard (Nov 2026). A figure from a document filed
+    # under Tropical Cyclone, or whose title or quote names a cyclone (the
+    # cyclone block's reliefweb_sweep.keywords, or a named storm), belongs
+    # to the TC cell; the FL cell rejects it as cyclone_figure_in_flood_cell
+    # unless the quote names flooding and the document states a separate
+    # cyclone figure. LAO 2026-09 resolved 403,133 people under BOTH flood
+    # and cyclone from one document.
+    one_hazard_per_figure: true
     # Publication window: month start .. month end + publication_pad_days
     # (a report about a late-month flood publishes into the next month).
     publication_pad_days: 14
@@ -895,6 +923,14 @@ reliefweb:
   # partial: extend it for any country where the default is a poor fit.
   # -------------------------------------------------------------------------
   household_conversion:
+    # A stated people count beats a household conversion (Nov 2026). When
+    # one quote gives both ("1,474,981 households (4,188,452 people)"), the
+    # people reading is kept and the households one dropped as
+    # household_superseded_by_stated_people; a households reading whose
+    # quote states a people count the extraction did not return is rejected
+    # as household_with_stated_people. Thailand's households reading times
+    # five gave 7,374,905 for THA / FL / 2026-09 and 2026-10.
+    prefer_stated_people: true
     default_multiplier: 5.0
     by_iso3:
       BGD: 4.1

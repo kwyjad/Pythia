@@ -1,0 +1,24 @@
+# The centroid each 2026-11 EMA row replaced, from the November 2026
+# calibration chain's centroid_ema_updates.csv (calibration run 43008755005).
+# Applied once, by compute_bucket_centroids.backfill_november_2026_priors,
+# to rows where as_of_month = '2026-11' and prior_centroid IS NULL, so a
+# second EMA run in November blends from these values instead of from the
+# value the first run wrote.
+hazard_code,metric,bucket_index,old
+ACE,FATALITIES,1,0.0
+ACE,FATALITIES,3,15.0
+ACE,FATALITIES,4,59.965161290322584
+ACE,FATALITIES,5,265.24378525054306
+ACE,FATALITIES,6,747.8677777777777
+ACE,FATALITIES,7,1500.0
+DR,PHASE3PLUS_IN_NEED,3,500000.0
+DR,PHASE3PLUS_IN_NEED,4,2352750.0
+DR,PHASE3PLUS_IN_NEED,5,10000000.0
+DR,PHASE3PLUS_IN_NEED,6,20000000.0
+FL,PA,1,0.0
+FL,PA,2,4769.12
+FL,PA,3,30000.0
+FL,PA,4,150000.0
+FL,PA,6,837934.24
+TC,PA,1,0.0
+TC,PA,2,5000.0

@@ -353,3 +353,41 @@ def parse_date(value: Any) -> dt.date | None:
         except ValueError:
             continue
     return None
+
+
+def parse_period(value: Any) -> tuple[dt.date, dt.date] | None:
+    """Parse a stated date into the PERIOD it names, or None.
+
+    ``YYYY`` is the whole year, ``YYYY-MM`` the whole month and a full date
+    that one day. :func:`parse_date` answers None for the first two, and
+    that is how a figure the extractor dated "2025" (Pakistan's 2025
+    Punjab floods, 3.9 million people) or "2025-09" (Yemen, September 2025)
+    fell back to its document's date and landed in a 2026 cell in the
+    November 2026 review. A day is still a period: its start and end are
+    the same date.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, (dt.date, dt.datetime)):
+        day = parse_date(value)
+        return (day, day) if day is not None else None
+    text = str(value).strip()
+    if not text:
+        return None
+    import re as _re
+
+    year_only = _re.fullmatch(r"(\d{4})", text)
+    if year_only:
+        year = int(year_only.group(1))
+        if 1900 <= year <= 2100:
+            return dt.date(year, 1, 1), dt.date(year, 12, 31)
+        return None
+    year_month = _re.fullmatch(r"(\d{4})[-/](\d{1,2})", text)
+    if year_month:
+        year, month = int(year_month.group(1)), int(year_month.group(2))
+        if 1900 <= year <= 2100 and 1 <= month <= 12:
+            return month_bounds(f"{year:04d}-{month:02d}")
+        return None
+    day = parse_date(text)
+    return (day, day) if day is not None else None

@@ -215,6 +215,30 @@ def deduplicate(
 
     dropped: list[dict[str, Any]] = []
 
+    if _switch(rulebook, "reliefweb.household_conversion.prefer_stated_people"):
+        # A stated people count beats a household conversion of the same
+        # sentence, BEFORE preference ordering decides: grouped by quote,
+        # the ordering would otherwise pick whichever reading it ranked
+        # first, and for Thailand in November 2026 that was the households
+        # reading times five.
+        people_quotes = {
+            _normalise(f.quote) for f, _v in figures if f.unit == UNIT_PEOPLE
+        }
+        survivors: list[tuple[ExtractedFigure, float]] = []
+        for figure, value in figures:
+            if figure.unit == UNIT_HOUSEHOLDS and _normalise(figure.quote) in people_quotes:
+                dropped.append({
+                    "reason": REASON_HOUSEHOLD_SUPERSEDED,
+                    "doc_id": figure.doc_id,
+                    "value": figure.value,
+                    "unit": figure.unit,
+                    "quote": figure.quote,
+                    "superseded_by_doc_id": figure.doc_id,
+                })
+                continue
+            survivors.append((figure, value))
+        figures = survivors
+
     def _collapse(
         items: list[tuple[ExtractedFigure, float]],
         key,
@@ -254,28 +278,327 @@ def deduplicate(
 
 REASON_PRIMARY_COUNTRY_MISMATCH = "document_primary_country_mismatch"
 REASON_OUTSIDE_WINDOW = "outside_reporting_window"
+#: The quote names years, and every one of them is before the cell's year.
+REASON_QUOTE_EARLIER_PERIOD = "quote_names_earlier_period"
+#: An undated figure in a document whose dated figures (or title) are about
+#: an earlier event.
+REASON_DOCUMENT_EARLIER_EVENT = "document_about_earlier_event"
+REASON_HOUSEHOLD_SUPERSEDED = "household_superseded_by_stated_people"
+REASON_HOUSEHOLD_WITH_PEOPLE = "household_with_stated_people"
+REASON_CYCLONE_IN_FLOOD = "cyclone_figure_in_flood_cell"
+
+#: Which field dated a figure. The first three are the figure's own
+#: evidence; the last two are the document's, and a figure dated by them
+#: is "undated" for :data:`REASON_DOCUMENT_EARLIER_EVENT`.
+FIELD_FIGURE_DATE = "figure_date"
+FIELD_FIGURE_AND_QUOTE = "figure_date+quote"
+FIELD_QUOTE = "quote"
+FIELD_DOC_ORIGINAL = "doc_date_original"
+FIELD_DOC_CREATED = "doc_date"
+_FIGURE_OWN_FIELDS = frozenset({FIELD_FIGURE_DATE, FIELD_FIGURE_AND_QUOTE, FIELD_QUOTE})
 
 
-def figure_window_date(figure: ExtractedFigure) -> tuple["dt.date | None", str]:
-    """The date a figure is about, and which field supplied it.
+# ---------------------------------------------------------------------------
+# Reading the time a quote names
+# ---------------------------------------------------------------------------
 
-    The figure's own stated date first (the extractor asks for "the date
-    the figure refers to"); failing that the document's ``date.original``
-    (when its source published it); failing that ``date.created`` (when
-    ReliefWeb filed it). Returns (None, "") when none parses.
+_EN_MONTHS = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11,
+    "December": 12, "Sept": 9,
+}
+_FR_MONTHS = {
+    "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5,
+    "juin": 6, "juillet": 7, "août": 8, "aout": 8, "septembre": 9,
+    "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}
+_ES_MONTHS = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+
+def _month_number(name: str) -> int | None:
+    if name in _EN_MONTHS:
+        return _EN_MONTHS[name]
+    if name.upper() == name and name.title() in _EN_MONTHS:
+        return _EN_MONTHS[name.title()]
+    lowered = name.lower()
+    return _FR_MONTHS.get(lowered) or _ES_MONTHS.get(lowered)
+
+
+# English month names are matched only capitalised (or in capitals): "may"
+# in lower case is a verb, and "The affected people may need shelter" is not
+# a date. French and Spanish month names are written in lower case, so they
+# are matched in any case.
+_EN_ALTS = sorted(
+    set(_EN_MONTHS) | {m.upper() for m in _EN_MONTHS}, key=len, reverse=True
+)
+_FRES_ALTS = sorted(set(_FR_MONTHS) | set(_ES_MONTHS), key=len, reverse=True)
+_MONTH = (
+    r"(?:" + "|".join(re.escape(m) for m in _EN_ALTS)
+    + r"|(?i:" + "|".join(re.escape(m) for m in _FRES_ALTS) + r"))"
+)
+_YEAR = r"(?:19[9]\d|20\d\d)"
+_DAY = r"(?:[0-3]?\d)(?:st|nd|rd|th|er)?"
+_OF = r"(?:\s+(?:de|del))?"
+
+_DATE_RE = re.compile(
+    r"(?<![\w-])(?:"
+    # [3 au] 16 September [2026] / 16 de septiembre [de 2026] / 1er octobre
+    rf"(?:(?P<d0>{_DAY})\s*(?:-|–|au|al|a|to|y|et|and)\s*)?"
+    rf"(?P<d1>{_DAY})\s+(?:de\s+)?(?P<m1>{_MONTH})(?:{_OF}\s*,?\s+(?P<y1>{_YEAR}))?"
+    r"|"
+    # September 16[,] [2026]
+    rf"(?P<m2>{_MONTH})\s+(?P<d2>{_DAY})(?![\d])(?:,?\s+(?P<y2>{_YEAR}))?"
+    r"|"
+    # September 2026 / septiembre de 2026 / September
+    rf"(?P<m3>{_MONTH})(?:{_OF}\s*,?\s+(?P<y3>{_YEAR}))?"
+    r"|"
+    # 2025, 2025a (a citation year), but not 2025 people
+    rf"(?P<y4>{_YEAR})[a-z]?"
+    r")(?![\w])"
+)
+
+#: What may stand between two dates that form a range, so the second
+#: date's year belongs to the first ("from 16 September to 6 October 2026",
+#: "in July and August", "du 3 au 5 mars 2026").
+_RANGE_GAP_RE = re.compile(
+    r"\s*(?:to|until|till|through|and|-|–|—|au|à|et|al|a|y|hasta)\s*$", re.I
+)
+#: A four-digit number followed by a unit is a count, not a year.
+_COUNT_AFTER_RE = re.compile(
+    r"\s*(?:people|persons|individuals|households|families|homes|houses|"
+    r"personnes|personas|familias|familles|ménages|hogares)\b",
+    re.I,
+)
+#: "the worst floods since 1998" compares, it does not date.
+_COMPARISON_BEFORE_RE = re.compile(r"(?:since|depuis|desde)\s*$", re.I)
+
+
+def _valid_day(year: int, month: int, day: int) -> dt.date | None:
+    try:
+        return dt.date(year, month, day)
+    except ValueError:
+        return None
+
+
+def quote_period(
+    quote: str, *, reference_date: "dt.date | None"
+) -> tuple["dt.date", "dt.date", list[str]] | None:
+    """The period a verbatim quote names, as (start, end, evidence), or None.
+
+    Reads explicit time references only: four-digit years from 1990 to 2099
+    (a citation year such as "2025a" included), "As of 6 October",
+    "From 16 September to 6 October 2026", and month names in English,
+    French and Spanish, alone or with a year. A month with no year takes
+    the year of a range partner that carries one, else the year of
+    ``reference_date`` (the document's date), stepping back a year when
+    that would put the month after the document's own month. ``evidence``
+    lists the matched spans, for the ledger.
+
+    The figure's date is the EARLIEST start and LATEST end any reference
+    names; the caller applies the start-month rule to the start. A quote
+    that names no time returns None.
     """
 
+    text = str(quote or "")
+    if not text.strip():
+        return None
+    mentions: list[dict[str, Any]] = []
+    for match in _DATE_RE.finditer(text):
+        groups = match.groupdict()
+        if groups.get("y4"):
+            after = text[match.end():match.end() + 20]
+            before = text[max(0, match.start() - 12):match.start()]
+            if _COUNT_AFTER_RE.match(after) or _COMPARISON_BEFORE_RE.search(before):
+                continue
+            # A year preceded by a digit-comma is part of a count ("1,2025").
+            if match.start() >= 2 and text[match.start() - 1] in ",." and text[match.start() - 2].isdigit():
+                continue
+            mentions.append({
+                "span": match.span(), "text": match.group(0),
+                "year": int(groups["y4"]), "month": None, "day": None,
+                "named_year": True,
+            })
+            continue
+        for m_key, d_key, y_key in (("m1", "d1", "y1"), ("m2", "d2", "y2"), ("m3", None, "y3")):
+            if groups.get(m_key):
+                month = _month_number(groups[m_key])
+                if month is None:
+                    break
+                day_text = groups.get(d_key) if d_key else None
+                day = int(re.match(r"\d+", day_text).group(0)) if day_text else None
+                year = int(groups[y_key]) if groups.get(y_key) else None
+                first_day = (
+                    int(re.match(r"\d+", groups["d0"]).group(0))
+                    if m_key == "m1" and groups.get("d0") else None
+                )
+                mentions.append({
+                    "span": match.span(), "text": match.group(0),
+                    "year": year, "month": month, "day": day,
+                    "first_day": first_day,
+                    "named_year": year is not None,
+                })
+                break
+    if not mentions:
+        return None
+
+    # Borrow a year from the right across a range connector, right to left
+    # so a chain of yearless dates inherits from the one that has a year.
+    for index in range(len(mentions) - 2, -1, -1):
+        current, nxt = mentions[index], mentions[index + 1]
+        if current["year"] is not None or current["month"] is None:
+            continue
+        if nxt["year"] is None or nxt["month"] is None:
+            continue
+        gap = text[current["span"][1]:nxt["span"][0]]
+        if not _RANGE_GAP_RE.match(gap):
+            continue
+        year = nxt["year"]
+        if current["month"] > nxt["month"]:
+            year -= 1
+        current["year"] = year
+
+    starts: list[dt.date] = []
+    ends: list[dt.date] = []
+    evidence: list[str] = []
+    for mention in mentions:
+        year, month, day = mention["year"], mention["month"], mention["day"]
+        if month is not None and year is None:
+            if reference_date is None:
+                continue
+            year = reference_date.year
+            if month > reference_date.month:
+                year -= 1
+        if month is None:
+            start, end = dt.date(year, 1, 1), dt.date(year, 12, 31)
+        elif day is not None:
+            point = _valid_day(year, month, day)
+            if point is None:
+                from resolver.hazard_resolution.sources import month_bounds
+
+                start, end = month_bounds(f"{year:04d}-{month:02d}")
+            else:
+                start = end = point
+                first = mention.get("first_day")
+                if first is not None and first <= day:
+                    start = _valid_day(year, month, first) or point
+        else:
+            from resolver.hazard_resolution.sources import month_bounds
+
+            start, end = month_bounds(f"{year:04d}-{month:02d}")
+        starts.append(start)
+        ends.append(end)
+        evidence.append(mention["text"])
+    if not starts:
+        return None
+    return min(starts), max(ends), evidence
+
+
+def quote_named_years(quote: str) -> list[int]:
+    """The years a quote NAMES outright (not ones inferred for a bare month)."""
+
+    found = quote_period_mentions(quote)
+    return sorted({m["year"] for m in found if m["named_year"]})
+
+
+def quote_period_mentions(quote: str) -> list[dict[str, Any]]:
+    """Every explicit-year mention in ``quote`` (used by the year test)."""
+
+    text = str(quote or "")
+    out: list[dict[str, Any]] = []
+    for match in _DATE_RE.finditer(text):
+        groups = match.groupdict()
+        year_text = groups.get("y4") or groups.get("y1") or groups.get("y2") or groups.get("y3")
+        if not year_text:
+            continue
+        if groups.get("y4"):
+            after = text[match.end():match.end() + 20]
+            before = text[max(0, match.start() - 12):match.start()]
+            if _COUNT_AFTER_RE.match(after) or _COMPARISON_BEFORE_RE.search(before):
+                continue
+            if match.start() >= 2 and text[match.start() - 1] in ",." and text[match.start() - 2].isdigit():
+                continue
+        out.append({"text": match.group(0), "year": int(year_text), "named_year": True})
+    return out
+
+
+def names_only_earlier_years(text: str, cell_year: int) -> list[int]:
+    """The years ``text`` names when EVERY one of them is before ``cell_year``.
+
+    Empty when the text names no year, or names this year or a later one.
+    """
+
+    years = quote_named_years(text)
+    if years and all(year < cell_year for year in years):
+        return years
+    return []
+
+
+def _reference_date(figure: ExtractedFigure) -> "dt.date | None":
     from resolver.hazard_resolution.sources import parse_date
 
+    return parse_date(figure.doc_date_original) or parse_date(figure.doc_date)
+
+
+def figure_period(
+    figure: ExtractedFigure, *, read_quote: bool = True
+) -> tuple["dt.date | None", "dt.date | None", str, list[str]]:
+    """``(start, end, field, evidence)`` for the period a figure is about.
+
+    In order: the figure's own date or period (``YYYY``, ``YYYY-MM`` and a
+    full date all parse); the period its verbatim quote names; the
+    document's ``date.original``; the document's ``date.created``. Where the
+    figure's own date lies inside a longer period the quote names ("From
+    16 September to 6 October 2026" beside a figure dated 6 October), the
+    quote's start is taken, because the start-month rule attributes a
+    figure to the month its event STARTED. Returns (None, None, "", [])
+    when nothing dates it.
+    """
+
+    from resolver.hazard_resolution.sources import parse_date, parse_period
+
+    if read_quote:
+        own = parse_period(figure.date)
+    else:
+        # The pre-November rule, kept whole behind the switch: a figure's
+        # own date counted only when it was a full date.
+        day = parse_date(figure.date)
+        own = (day, day) if day is not None else None
+    quoted = (
+        quote_period(figure.quote, reference_date=_reference_date(figure))
+        if read_quote else None
+    )
+    if own is not None:
+        if quoted is not None and quoted[0] < own[0] <= quoted[1]:
+            return quoted[0], max(own[1], quoted[1]), FIELD_FIGURE_AND_QUOTE, quoted[2]
+        return own[0], own[1], FIELD_FIGURE_DATE, []
+    if quoted is not None:
+        return quoted[0], quoted[1], FIELD_QUOTE, quoted[2]
     for field, raw in (
-        ("figure_date", figure.date),
-        ("doc_date_original", figure.doc_date_original),
-        ("doc_date", figure.doc_date),
+        (FIELD_DOC_ORIGINAL, figure.doc_date_original),
+        (FIELD_DOC_CREATED, figure.doc_date),
     ):
         parsed = parse_date(raw)
         if parsed is not None:
-            return parsed, field
-    return None, ""
+            return parsed, parsed, field, []
+    return None, None, "", []
+
+
+def figure_window_date(
+    figure: ExtractedFigure, *, read_quote: bool = True
+) -> tuple["dt.date | None", str]:
+    """The date that decides a figure's cell, and which field supplied it.
+
+    The START of :func:`figure_period`: a figure belongs to the month its
+    event started (``rules.attribution_month``), so "From 16 September to
+    6 October 2026" is a September figure and only a September figure.
+    """
+
+    start, _end, field, _evidence = figure_period(figure, read_quote=read_quote)
+    return start, field
 
 
 def reporting_window(ym: str, rulebook: Rulebook) -> tuple["dt.date", "dt.date"]:
@@ -293,40 +616,53 @@ def reporting_window(ym: str, rulebook: Rulebook) -> tuple["dt.date", "dt.date"]
     return start, end + dt.timedelta(days=pad)
 
 
+def _switch(rulebook: Rulebook, key: str) -> bool:
+    """A rulebook switch that is ON when absent (a fixture rulebook)."""
+
+    return bool(rulebook.get(key, True))
+
+
 def apply_attribution(
     pairs: list[tuple[ExtractedFigure, float]],
     iso3: str,
     ym: str,
     rulebook: Rulebook,
 ) -> tuple[list[tuple[ExtractedFigure, float]], list[dict[str, Any]]]:
-    """Keep only figures whose document is about THIS country and THIS window.
-
-    Two tests, both from the September 2026 run, where documents 4222929
-    and 4222839 — Spanish and English accounts of floods between March and
-    May affecting 82,000 people — were filed under AFG / FL / 2026-07 and
-    only failed to land because the broken ceiling rejected them:
+    """Keep only figures that are about THIS country and THIS period.
 
     * **country** — the document's ``primary_country`` must be the cell's
-      country. ReliefWeb files a regional round-up under every country it
-      mentions, and the API's ``country.iso3`` filter matches any of them.
-      A document with no recorded primary country (cached before Sept
-      2026) passes this test; the window test still applies.
-    * **window** — the date the figure is about (its own date, else the
-      document's source-publication date, else its ReliefWeb date) must
-      fall inside :func:`reporting_window`. A figure with no parseable date
-      at all is kept: the prompt already confines the model to the period,
-      and rejecting the undated would cost real figures for a guess.
-
-    Both are rulebook switches (``reliefweb.documents.require_primary_country``,
-    ``reliefweb.documents.enforce_reporting_window``), on by default.
+      country (``reliefweb.documents.require_primary_country``). ReliefWeb
+      files a regional round-up under every country it mentions.
+    * **earlier years** — a quote that names years, all of them before the
+      cell's year, is about an earlier event
+      (``reliefweb.documents.enforce_quote_period``): "The 2022 floods ...
+      affecting 33 million people" resolved PAK / FL / 2026-10 in the
+      November 2026 review.
+    * **window** — the START of the period the figure is about
+      (:func:`figure_period`) must fall inside :func:`reporting_window`
+      (``reliefweb.documents.enforce_reporting_window``). The figure's own
+      date comes first, then the time its quote names, then the document's
+      dates. A figure with nothing to date it is kept.
+    * **document about an earlier event** — once a document's dated figures
+      in this cell are rejected as dated BEFORE the window, or its title
+      names only earlier years, its undated figures (those dated only by the
+      document's publication date) are rejected too
+      (``reliefweb.documents.reject_undated_in_dated_document``). Cuba's
+      645,000 people, from a document about Hurricane Melissa (October
+      2025), is the case.
     """
 
     iso3 = iso3.upper()
     require_primary = bool(rulebook.get("reliefweb.documents.require_primary_country"))
     enforce_window = bool(rulebook.get("reliefweb.documents.enforce_reporting_window"))
+    read_quote = _switch(rulebook, "reliefweb.documents.enforce_quote_period")
+    reject_undated = _switch(rulebook, "reliefweb.documents.reject_undated_in_dated_document")
     start, end = reporting_window(ym, rulebook)
-    kept: list[tuple[ExtractedFigure, float]] = []
+    cell_year = int(ym.split("-")[0])
+    kept: list[tuple[ExtractedFigure, float, str]] = []
     rejected: list[dict[str, Any]] = []
+    #: Documents shown to be about an event before this cell's window.
+    earlier_docs: dict[str, str] = {}
     for figure, value in pairs:
         primary = (figure.doc_primary_country or "").upper()
         if require_primary and primary and primary != iso3:
@@ -341,7 +677,21 @@ def apply_attribution(
                 "cell_iso3": iso3,
             })
             continue
-        about, field = figure_window_date(figure)
+        if read_quote:
+            earlier = names_only_earlier_years(figure.quote, cell_year)
+            if earlier:
+                rejected.append({
+                    "doc_id": figure.doc_id,
+                    "reason": REASON_QUOTE_EARLIER_PERIOD,
+                    "value": value,
+                    "unit": figure.unit,
+                    "quote": figure.quote,
+                    "quote_years": earlier,
+                    "cell_ym": ym,
+                })
+                earlier_docs.setdefault(str(figure.doc_id), REASON_QUOTE_EARLIER_PERIOD)
+                continue
+        about, _about_end, field, evidence = figure_period(figure, read_quote=read_quote)
         if enforce_window and about is not None and not (start <= about <= end):
             rejected.append({
                 "doc_id": figure.doc_id,
@@ -351,12 +701,39 @@ def apply_attribution(
                 "quote": figure.quote,
                 "figure_about": about.isoformat(),
                 "figure_about_field": field,
+                "quote_period_evidence": evidence,
                 "window_start": start.isoformat(),
                 "window_end": end.isoformat(),
                 "cell_ym": ym,
             })
+            if about < start and field in _FIGURE_OWN_FIELDS:
+                earlier_docs.setdefault(str(figure.doc_id), REASON_OUTSIDE_WINDOW)
             continue
-        kept.append((figure, value))
+        kept.append((figure, value, field))
+
+    out: list[tuple[ExtractedFigure, float]] = []
+    for figure, value, field in kept:
+        undated = field not in _FIGURE_OWN_FIELDS
+        if reject_undated and undated:
+            doc = str(figure.doc_id)
+            why = earlier_docs.get(doc)
+            title_years = names_only_earlier_years(figure.doc_title, cell_year) if read_quote else []
+            if why or title_years:
+                rejected.append({
+                    "doc_id": figure.doc_id,
+                    "reason": REASON_DOCUMENT_EARLIER_EVENT,
+                    "value": value,
+                    "unit": figure.unit,
+                    "quote": figure.quote,
+                    "figure_about_field": field,
+                    "document_evidence": (
+                        f"a dated figure in this document was rejected ({why})"
+                        if why else f"title names only earlier years {title_years}"
+                    ),
+                    "cell_ym": ym,
+                })
+                continue
+        out.append((figure, value))
     if rejected:
         LOG.info(
             "[figures] %s %s: %d figure(s) rejected as not attributable to this cell "
@@ -364,6 +741,180 @@ def apply_attribution(
             iso3, ym, len(rejected),
             ", ".join(sorted({str(r["reason"]) for r in rejected})),
         )
+    return out, rejected
+
+
+# ---------------------------------------------------------------------------
+# Households against a stated people count
+# ---------------------------------------------------------------------------
+
+_STATED_PEOPLE_RE = re.compile(
+    r"(?P<num>\d{1,3}(?:[,.\s]\d{3})+|\d+(?:[.,]\d+)?)\s*"
+    r"(?P<mult>million|thousand|m\b)?\s*"
+    r"(?:people|persons|individuals|personnes|personas|habitants)\b",
+    re.I,
+)
+
+
+def stated_people_counts(quote: str) -> list[float]:
+    """Every people count the quote states outright ("4,188,452 people")."""
+
+    out: list[float] = []
+    for match in _STATED_PEOPLE_RE.finditer(str(quote or "")):
+        raw, mult = match.group("num"), (match.group("mult") or "").lower()
+        try:
+            if mult:
+                number = float(raw.replace(",", ".")) * (
+                    1_000_000 if mult in ("million", "m") else 1_000
+                )
+            else:
+                number = float(re.sub(r"[,.\s]", "", raw))
+        except ValueError:
+            continue
+        out.append(number)
+    return out
+
+
+def apply_household_rules(
+    pairs: list[tuple[ExtractedFigure, float]], rulebook: Rulebook
+) -> tuple[list[tuple[ExtractedFigure, float]], list[dict[str, Any]]]:
+    """A households figure whose own quote states the people count is dropped.
+
+    "1,474,981 households (4,188,452 people)" is a statement of 4,188,452
+    people; multiplying the households by five gave Thailand 7,374,905 in
+    two months of the November 2026 review. When the extraction returned
+    the people reading too, :func:`deduplicate` keeps it
+    (:data:`REASON_HOUSEHOLD_SUPERSEDED`); when it returned only the
+    households reading, the figure is rejected here
+    (:data:`REASON_HOUSEHOLD_WITH_PEOPLE`) and no people figure is made up
+    from the quote, because this module transcribes and never infers. The
+    stated people count must be at least the household count, so "5,000
+    households, including 300 people with disabilities" is not read as the
+    same group. Switch: ``reliefweb.household_conversion.prefer_stated_people``.
+    """
+
+    if not _switch(rulebook, "reliefweb.household_conversion.prefer_stated_people"):
+        return pairs, []
+    people_quotes = {
+        _normalise(figure.quote) for figure, _v in pairs if figure.unit == UNIT_PEOPLE
+    }
+    kept: list[tuple[ExtractedFigure, float]] = []
+    rejected: list[dict[str, Any]] = []
+    for figure, value in pairs:
+        if figure.unit == UNIT_HOUSEHOLDS and _normalise(figure.quote) not in people_quotes:
+            counts = [c for c in stated_people_counts(figure.quote) if c >= float(figure.value)]
+            if counts:
+                rejected.append({
+                    "doc_id": figure.doc_id,
+                    "reason": REASON_HOUSEHOLD_WITH_PEOPLE,
+                    "value": value,
+                    "stated_value": figure.value,
+                    "unit": figure.unit,
+                    "quote": figure.quote,
+                    "stated_people": counts,
+                })
+                continue
+        kept.append((figure, value))
+    return kept, rejected
+
+
+# ---------------------------------------------------------------------------
+# One figure, one hazard
+# ---------------------------------------------------------------------------
+
+_NAMED_STORM_RE = re.compile(
+    r"\b(?:Hurricane|Typhoon|Super Typhoon|Cyclone|Tropical Storm|Tropical Depression|"
+    r"Huracán|Huracan|Ouragan|Tifón|Tifon|Tormenta Tropical|Tempête tropicale)\s+[A-Z][a-zà-ÿ]+"
+)
+_FLOOD_NAMED_RE = re.compile(
+    r"\b(?:flood(?:s|ing|ed)?|flash[- ]floods?|inundations?|inondations?|inundaciones)\b",
+    re.I,
+)
+
+
+def _cyclone_keywords(rulebook: Rulebook) -> list[str]:
+    return [
+        str(k).strip().lower()
+        for k in (rulebook.get("cyclone.reliefweb_sweep.keywords", []) or [])
+        if str(k).strip()
+    ]
+
+
+def names_a_cyclone(text: str, keywords: list[str]) -> bool:
+    """True when ``text`` names a cyclone by keyword or by a storm's name."""
+
+    lowered = str(text or "").lower()
+    for keyword in keywords:
+        if re.search(rf"(?<![\w-]){re.escape(keyword)}s?(?![\w])", lowered):
+            return True
+    return bool(_NAMED_STORM_RE.search(str(text or "")))
+
+
+def is_cyclone_figure(figure: ExtractedFigure, keywords: list[str]) -> bool:
+    """A figure belongs to the cyclone cell when its document is about a cyclone.
+
+    The document's ReliefWeb disaster types say so ("Tropical Cyclone"),
+    or its title or the quote names one. Documents cached before disaster
+    types were kept fall back to the keyword test alone.
+    """
+
+    types = {str(t).strip().lower() for t in (figure.doc_disaster_types or ())}
+    if "tropical cyclone" in types:
+        return True
+    return names_a_cyclone(figure.doc_title, keywords) or names_a_cyclone(
+        figure.quote, keywords
+    )
+
+
+def apply_one_hazard(
+    pairs: list[tuple[ExtractedFigure, float]],
+    hazard: str,
+    rulebook: Rulebook,
+    all_figures: list[ExtractedFigure] | None = None,
+) -> tuple[list[tuple[ExtractedFigure, float]], list[dict[str, Any]]]:
+    """Keep a cyclone document's figures out of the flood cell.
+
+    In the November 2026 review one document filed under both Flood and
+    Tropical Cyclone resolved both hazards (Laos 403,133 people; Cuba
+    645,000; Viet Nam 100,000), so the same people were counted twice. A
+    cyclone figure is admitted to the TC cell only. The exception: the
+    quote attributes the figure to flooding by name and the same document
+    states a separate figure for the cyclone; then the flood figure is a
+    flood figure. Switch: ``reliefweb.documents.one_hazard_per_figure``.
+    """
+
+    if str(hazard).upper() != "FL" or not _switch(
+        rulebook, "reliefweb.documents.one_hazard_per_figure"
+    ):
+        return pairs, []
+    keywords = _cyclone_keywords(rulebook)
+    pool = list(all_figures if all_figures is not None else [f for f, _ in pairs])
+    kept: list[tuple[ExtractedFigure, float]] = []
+    rejected: list[dict[str, Any]] = []
+    for figure, value in pairs:
+        if not is_cyclone_figure(figure, keywords):
+            kept.append((figure, value))
+            continue
+        if _FLOOD_NAMED_RE.search(figure.quote or "") and not names_a_cyclone(
+            figure.quote, keywords
+        ):
+            separate = any(
+                str(other.doc_id) == str(figure.doc_id)
+                and float(other.value) != float(figure.value)
+                and names_a_cyclone(other.quote, keywords)
+                for other in pool
+            )
+            if separate:
+                kept.append((figure, value))
+                continue
+        rejected.append({
+            "doc_id": figure.doc_id,
+            "reason": REASON_CYCLONE_IN_FLOOD,
+            "value": value,
+            "unit": figure.unit,
+            "quote": figure.quote,
+            "doc_disaster_types": list(figure.doc_disaster_types or ()),
+        })
     return kept, rejected
 
 
@@ -467,6 +1018,14 @@ def build_candidates(
 
     pairs, attribution_rejects = apply_attribution(pairs, iso3, ym, rulebook)
     rejected.extend(attribution_rejects)
+
+    pairs, hazard_rejects = apply_one_hazard(
+        pairs, hazard, rulebook, all_figures=list(extraction.figures)
+    )
+    rejected.extend(hazard_rejects)
+
+    pairs, household_rejects = apply_household_rules(pairs, rulebook)
+    rejected.extend(household_rejects)
 
     pairs, ceiling_rejects = apply_ceiling(
         pairs, exposure_ceiling, rulebook, ceiling_basis
