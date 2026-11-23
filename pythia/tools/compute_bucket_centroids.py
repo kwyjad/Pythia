@@ -270,6 +270,44 @@ def backfill_november_2026_priors(conn, path: Path | None = None) -> int:
     return filled
 
 
+def _restore_unqualified(conn, metric: str, as_of_month: str, qualifying: set) -> list[dict]:
+    """Return this month's moved rows that no longer qualify to their prior."""
+
+    restored: list[dict] = []
+    stale = conn.execute(
+        """
+        SELECT hazard_code, bucket_index, centroid, prior_centroid
+        FROM bucket_centroids
+        WHERE upper(metric) = ? AND as_of_month = ? AND prior_centroid IS NOT NULL
+          AND hazard_code <> '*' AND centroid <> prior_centroid
+        """,
+        [metric.upper(), as_of_month],
+    ).fetchall()
+    for hazard_code, bucket_index, centroid, prior in stale:
+        if (str(hazard_code).upper(), int(bucket_index)) in qualifying:
+            continue
+        conn.execute(
+            """
+            UPDATE bucket_centroids SET centroid = prior_centroid
+            WHERE upper(hazard_code) = ? AND upper(metric) = ? AND bucket_index = ?
+              AND as_of_month = ?
+            """,
+            [str(hazard_code).upper(), metric.upper(), int(bucket_index), as_of_month],
+        )
+        LOGGER.warning(
+            "EMA centroid update: %s/%s bucket %d no longer has %d resolutions; "
+            "restored this month's step %.1f -> %.1f (the value the month started from)",
+            hazard_code, metric, bucket_index, MIN_RESOLUTIONS_PER_BUCKET, centroid, prior,
+        )
+        restored.append({
+            "hazard_code": str(hazard_code).upper(), "metric": metric,
+            "bucket_index": int(bucket_index), "old": float(centroid), "new": float(prior),
+            "empirical": None, "n_resolutions": None, "as_of_month": as_of_month,
+            "restored_to_prior": True,
+        })
+    return restored
+
+
 def update_bucket_centroids_ema(
     db_url: str,
     metric: str = "PA",
@@ -355,6 +393,16 @@ def update_bucket_centroids_ema(
         """
 
         rows = conn.execute(empirical_sql, [metric.upper()]).fetchall()
+
+        # A bucket that moved earlier THIS month and no longer has enough
+        # resolutions goes back to the value the month started from: the
+        # step it took was learned from resolutions that have since been
+        # withdrawn, and "one step a month from the month's start" means no
+        # step when the bucket does not qualify. FL/PA bucket 6 on 23 Nov
+        # 2026: the 11 Nov step (837,934 to 1,238,385) rested on eight
+        # resolutions the figure rules later withdrew, leaving seven.
+        qualifying = {(str(h).upper(), int(b)) for h, b, _n, _m in rows}
+        updates.extend(_restore_unqualified(conn, metric, as_of_month, qualifying))
 
         if not rows:
             LOGGER.info(

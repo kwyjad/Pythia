@@ -91,6 +91,36 @@ def test_a_second_run_with_new_resolutions_is_one_step_from_the_months_start(tmp
     assert month == "2026-11"
 
 
+def test_a_bucket_that_no_longer_qualifies_returns_to_the_months_start(tmp_path):
+    """FL/PA bucket 6, 23 Nov 2026: withdrawn resolutions left 7 of the 10 needed."""
+
+    db_path = tmp_path / "r.duckdb"
+    url = _centroid_db(db_path, value=3000.0)
+    cbc.update_bucket_centroids_ema(db_url=url, metric="PA", as_of=date(2026, 11, 11))
+    ((_, _, _, moved, _, prior, _),) = _rows(db_path)
+    assert moved != prior
+    con = duckdb.connect(str(db_path))
+    con.execute("DELETE FROM resolutions WHERE question_id IN ('q0', 'q1', 'q2')")
+    con.close()
+    updates = cbc.update_bucket_centroids_ema(db_url=url, metric="PA", as_of=date(2026, 11, 28))
+    ((_, _, _, now, month, prior2, _),) = _rows(db_path)
+    assert (now, month, prior2) == (prior, "2026-11", prior)
+    assert updates and updates[0]["restored_to_prior"] is True
+
+
+def test_an_earlier_months_row_is_never_restored(tmp_path):
+    db_path = tmp_path / "e.duckdb"
+    url = _centroid_db(db_path, value=3000.0)
+    cbc.update_bucket_centroids_ema(db_url=url, metric="PA", as_of=date(2026, 10, 11))
+    ((_, _, _, october, _, _, _),) = _rows(db_path)
+    con = duckdb.connect(str(db_path))
+    con.execute("DELETE FROM resolutions WHERE question_id IN ('q0', 'q1', 'q2')")
+    con.close()
+    cbc.update_bucket_centroids_ema(db_url=url, metric="PA", as_of=date(2026, 11, 11))
+    ((_, _, _, now, month, _, _),) = _rows(db_path)
+    assert (now, month) == (october, "2026-10")
+
+
 def test_a_new_month_stores_the_last_months_value_as_the_prior(tmp_path):
     db_path = tmp_path / "m.duckdb"
     url = _centroid_db(db_path)
