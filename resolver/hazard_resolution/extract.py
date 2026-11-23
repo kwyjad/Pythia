@@ -190,6 +190,12 @@ class ExtractedFigure:
     #: 33946954189 carried "(unattributed)" for want of this. Empty for a
     #: cached document written before Sept 2026.
     doc_publisher: str = ""
+    #: The document's ReliefWeb disaster types ("Flood", "Tropical
+    #: Cyclone", ...). Read by the one-hazard-per-figure rule in figures.py:
+    #: a figure from a document filed under Tropical Cyclone belongs to the
+    #: cyclone cell, not the flood cell. Empty for a cached document written
+    #: before the field was cached; the rule then falls back to keywords.
+    doc_disaster_types: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -209,6 +215,7 @@ class ExtractedFigure:
             "doc_country_iso3s": list(self.doc_country_iso3s),
             "doc_source_rank": self.doc_source_rank,
             "doc_publisher": self.doc_publisher,
+            "doc_disaster_types": list(self.doc_disaster_types),
             "model": self.model,
         }
 
@@ -1324,6 +1331,7 @@ _DOCUMENT_DERIVED_FIELDS = (
     "doc_country_iso3s",
     "doc_source_rank",
     "doc_publisher",
+    "doc_disaster_types",
 )
 
 
@@ -1348,6 +1356,10 @@ def _document_fields(document: dict[str, Any]) -> dict[str, Any]:
             str(source).strip()
             for source in (document.get("sources") or [])
             if str(source).strip()
+        ),
+        "doc_disaster_types": tuple(
+            str(t).strip() for t in (document.get("disaster_types") or [])
+            if str(t).strip()
         ),
     }
 

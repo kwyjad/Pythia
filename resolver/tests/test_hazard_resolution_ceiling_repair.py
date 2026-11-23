@@ -263,7 +263,10 @@ class TestHonestLedger:
         class _Extraction:
             figures = [
                 _figure(value=15_600.0, unit="households",
-                        quote="15,600 households (75,000 people)",
+                        # No people count in the quote: since Nov 2026 a
+                        # households reading beside a stated people count is
+                        # rejected (household_with_stated_people).
+                        quote="15,600 households were affected",
                         doc_primary_country="BGD", date="2026-07-05"),
             ]
             rejected: list = []

@@ -587,6 +587,20 @@ def resolve_triggered_cells(
             if outcome == res_mod.WRITE_FROZEN_SKIP:
                 run.frozen_skipped += 1
             if outcome == res_mod.WRITE_PENDING:
+                # A PENDING verdict writes nothing, so an unfrozen row an
+                # earlier run wrote from a ReliefWeb figure the current rules
+                # reject would otherwise stand (PAK / FL / 2026-10 at
+                # 33,000,000 from "The 2022 floods ..."). Retracted here, but
+                # only when rung 2 was actually read this run: documents a
+                # budget stop left UNREAD are not evidence against the row.
+                stats = (extraction_provenance.get("extraction") or {})
+                read = int(stats.get("docs_read") or 0) + int(stats.get("docs_cached") or 0)
+                if read and not stats.get("budget_capped"):
+                    retracted = _retract_unsupported_extracted_row(
+                        con, iso3=iso3, ym=ym, hazard=hazard, rulebook=rulebook,
+                        today=today,
+                    )
+                    run.retracted += int(retracted == RETRACT_DELETED)
                 # No row before the freeze deadline: say so on the trigger row.
                 detect_mod.record_no_row_reason(
                     con, hazard=hazard, iso3=iso3, ym=ym,
@@ -790,6 +804,51 @@ def reconsider_rejected_cells(
 RETRACT_NONE = "no_row_to_retract"
 RETRACT_DELETED = "deleted"
 RETRACT_RETAINED = "retained_frozen"
+
+
+def _retract_unsupported_extracted_row(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    rulebook: Rulebook,
+    today: dt.date | None = None,
+) -> str:
+    """Delete an unfrozen rung-2 row the ladder no longer supports.
+
+    Narrow on purpose: only a ``RESOLVED_VALUE`` whose rule names the
+    ReliefWeb rung, and only before its freeze deadline. A row another rung
+    answered is left alone, because this run saying nothing about it is not
+    a statement that it was wrong. A frozen row is never touched (hard rule
+    4). Added November 2026, when the figure rules began rejecting figures
+    about earlier events and the PENDING verdict that followed left the old
+    answers standing.
+    """
+
+    year, month = detect_mod.ym_to_year_month(ym)
+    existing = con.execute(
+        """
+        SELECT status, rule_fired FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [iso3, year, month, hazard],
+    ).fetchone()
+    if existing is None:
+        return RETRACT_NONE
+    status, rule_fired = existing
+    if status != "RESOLVED_VALUE" or "reliefweb_extracted" not in str(rule_fired or ""):
+        return RETRACT_NONE
+    outcome = _retract_unconfirmed_row(
+        con, iso3=iso3, ym=ym, hazard=hazard, rulebook=rulebook, today=today
+    )
+    if outcome == RETRACT_DELETED:
+        LOG.warning(
+            "[impact] %s/%s/%s: retracted an unfrozen ReliefWeb answer the current "
+            "figure rules no longer support",
+            iso3, hazard, ym,
+        )
+    return outcome
 
 
 def _retract_unconfirmed_row(

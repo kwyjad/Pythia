@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import logging
 from datetime import date
+from pathlib import Path
 
 from resolver.db import duckdb_io
 
@@ -211,6 +212,64 @@ EMA_LEARNING_RATE = 0.1
 MIN_RESOLUTIONS_PER_BUCKET = 10  # auto-activation threshold
 
 
+NOVEMBER_2026_PRIORS = Path(__file__).with_name("data") / "centroid_priors_2026_11.csv"
+NOVEMBER_2026_BACKFILL_MARK = "pre-2026-11 (backfill)"
+
+
+def backfill_november_2026_priors(conn, path: Path | None = None) -> int:
+    """Fill ``prior_centroid`` on the 2026-11 rows, once. Returns rows filled.
+
+    The 11 November 2026 calibration chain moved these centroids before the
+    column existed, so the value each row replaced is known only from that
+    chain's ``centroid_ema_updates.csv``, committed as
+    ``data/centroid_priors_2026_11.csv``. Applied only where
+    ``as_of_month = '2026-11'`` and ``prior_centroid`` is still NULL, so a
+    second call changes nothing.
+    """
+
+    import csv
+
+    path = path or NOVEMBER_2026_PRIORS
+    if not path.is_file():
+        return 0
+    filled = 0
+    with path.open(encoding="utf-8") as handle:
+        rows = [line for line in handle if not line.startswith("#")]
+    for record in csv.DictReader(rows):
+        params = [
+            float(record["old"]), NOVEMBER_2026_BACKFILL_MARK,
+            str(record["hazard_code"]).upper(), str(record["metric"]).upper(),
+            int(record["bucket_index"]),
+        ]
+        hit = conn.execute(
+            """
+            SELECT COUNT(*) FROM bucket_centroids
+            WHERE as_of_month = '2026-11' AND prior_centroid IS NULL
+              AND upper(hazard_code) = ? AND upper(metric) = ? AND bucket_index = ?
+            """,
+            params[2:],
+        ).fetchone()[0]
+        if not hit:
+            continue
+        conn.execute(
+            """
+            UPDATE bucket_centroids SET prior_centroid = ?, prior_as_of_month = ?
+            WHERE as_of_month = '2026-11' AND prior_centroid IS NULL
+              AND upper(hazard_code) = ? AND upper(metric) = ? AND bucket_index = ?
+            """,
+            params,
+        )
+        filled += int(hit)
+        LOGGER.info(
+            "EMA centroid backfill: %s/%s bucket %s prior_centroid = %s (from the "
+            "November 2026 calibration chain)",
+            record["hazard_code"], record["metric"], record["bucket_index"], record["old"],
+        )
+    if filled:
+        LOGGER.info("EMA centroid backfill: filled prior_centroid on %d 2026-11 row(s)", filled)
+    return filled
+
+
 def update_bucket_centroids_ema(
     db_url: str,
     metric: str = "PA",
@@ -248,6 +307,11 @@ def update_bucket_centroids_ema(
             conn.execute("ALTER TABLE bucket_centroids ADD COLUMN as_of_month TEXT")
         if "schema_version" not in cols:
             conn.execute("ALTER TABLE bucket_centroids ADD COLUMN schema_version TEXT")
+        if "prior_centroid" not in cols:
+            conn.execute("ALTER TABLE bucket_centroids ADD COLUMN prior_centroid DOUBLE")
+        if "prior_as_of_month" not in cols:
+            conn.execute("ALTER TABLE bucket_centroids ADD COLUMN prior_as_of_month TEXT")
+        backfill_november_2026_priors(conn)
 
         specs = list(get_bucket_specs(metric))
         if not specs:
@@ -305,7 +369,8 @@ def update_bucket_centroids_ema(
             # Load current centroid (newest as_of_month, or seed/default)
             current_row = conn.execute(
                 """
-                SELECT centroid FROM bucket_centroids
+                SELECT centroid, as_of_month, prior_centroid, prior_as_of_month
+                FROM bucket_centroids
                 WHERE upper(hazard_code) = ? AND upper(metric) = ? AND bucket_index = ?
                 ORDER BY as_of_month DESC NULLS LAST
                 LIMIT 1
@@ -313,11 +378,31 @@ def update_bucket_centroids_ema(
                 [hazard_code.upper(), metric.upper(), int(bucket_index)],
             ).fetchone()
 
+            # One EMA step per month, however many times calibration runs in
+            # it. The newest row may be THIS month's own output; blending
+            # from it again is a second step, and the DELETE below would then
+            # also lose the value the month started from. So a row written
+            # this month blends from the value it replaced (prior_centroid),
+            # and a row from an earlier month becomes the prior.
+            prior_centroid: float | None
+            prior_month: str | None
             if current_row is None:
                 spec = next((s for s in specs if s.idx == bucket_index), None)
                 current_centroid = float(spec.centroid) if spec else float(empirical_mean)
+                prior_centroid, prior_month = current_centroid, None
+            elif current_row[1] == as_of_month and current_row[2] is not None:
+                current_centroid = float(current_row[2])
+                prior_centroid, prior_month = float(current_row[2]), current_row[3]
             else:
+                if current_row[1] == as_of_month:
+                    LOGGER.warning(
+                        "EMA centroid update: %s/%s bucket %d already moved in %s and "
+                        "carries no prior_centroid; blending from its current value "
+                        "(a second step this month)",
+                        hazard_code, metric, bucket_index, as_of_month,
+                    )
                 current_centroid = float(current_row[0])
+                prior_centroid, prior_month = current_centroid, current_row[1]
 
             new_centroid = (
                 (1.0 - EMA_LEARNING_RATE) * current_centroid
@@ -342,11 +427,12 @@ def update_bucket_centroids_ema(
                 """
                 INSERT INTO bucket_centroids
                     (hazard_code, metric, bucket_index, centroid, as_of_month,
-                     schema_version)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     schema_version, prior_centroid, prior_as_of_month)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [hazard_code.upper(), metric.upper(), int(bucket_index),
-                 new_centroid, as_of_month, bucket_schema_version(metric)],
+                 new_centroid, as_of_month, bucket_schema_version(metric),
+                 prior_centroid, prior_month],
             )
 
             LOGGER.info(

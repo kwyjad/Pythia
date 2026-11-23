@@ -301,7 +301,11 @@ SWEPT_AWAY_BY_LADDER_CONFIRMATION = "a1779b6326ffe0e5"
 
 #: Today's pre-narrowing digest. Pinned for the same reason the values above
 #: were: an accidental move should fail here, loudly, with a diff to read.
-CURRENT_LEGACY_CYCLONE_DIGEST = "66c76f4fb6949d2f"
+#: Nov 2026: the figure-rule switches under ``reliefweb`` (quote period,
+#: undated-in-dated-document, one hazard per figure, stated people) decide
+#: flood and cyclone cells, so both digests moved and both re-walk.
+SWEPT_AWAY_BY_THE_FIGURE_RULES = "66c76f4fb6949d2f"
+CURRENT_LEGACY_CYCLONE_DIGEST = "8007de51abec0627"
 
 
 def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
@@ -323,6 +327,7 @@ def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
         rb.legacy_hazard_fingerprint("cyclone")
         != SWEPT_AWAY_BY_LADDER_CONFIRMATION
     )
+    assert rb.legacy_hazard_fingerprint("cyclone") != SWEPT_AWAY_BY_THE_FIGURE_RULES
 
 
 def test_months_decided_under_this_rulebook_are_re_stamped_not_re_walked(con):
@@ -410,5 +415,7 @@ def test_the_ladder_confirmation_change_leaves_drought_untouched():
 
 def test_the_nmme_switch_moves_drought_alone():
     rb = load_rulebook()
-    assert rb.hazard_fingerprint("flood") == "d122bfec246bc090"
-    assert rb.hazard_fingerprint("cyclone") == "a4e2cabf5b573378"
+    # Moved in Nov 2026 by the figure-rule switches (they decide flood and
+    # cyclone cells); drought, which reads no ReliefWeb figure, did not.
+    assert rb.hazard_fingerprint("flood") == "15726643bdd733da"
+    assert rb.hazard_fingerprint("cyclone") == "c0674f9f9963771c"
