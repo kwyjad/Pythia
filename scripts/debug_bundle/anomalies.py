@@ -77,7 +77,8 @@ def build(
     # --- the existing health checks, translated ---
     for check in health_checks or []:
         status = str(check.get("status") or "").upper()
-        if status == "OK":
+        # N/A: the subject is off by design (it is not a pass and not a fault).
+        if status in ("OK", "N/A"):
             continue
         out.append(
             _entry(

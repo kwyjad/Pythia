@@ -1,0 +1,19 @@
+{
+  "_note": "Run listings recorded from the Actions API for the 13 Nov 2026 forecast chain (pipeline hs_20261113T035247). Fields trimmed to what the cycle builder reads; actor fields dropped. The poller ticks between 03:53 and 23:59 were about 210 runs at a 5.7-minute cadence; three real ones are kept here and the tests generate the rest at that cadence.",
+  "pipeline_id": "hs_20261113T035247",
+  "stage_runs": [
+    {"id": 43530492374, "display_title": "Pythia Pipeline Stage: hs_20261113T035247 — fc_collect_finalize", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-13T23:54:14Z"},
+    {"id": 43363940081, "display_title": "Pythia Pipeline Stage: hs_20261113T035247 — hs_finalize_fc_submit", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-13T04:12:03Z"},
+    {"id": 43362670678, "display_title": "Pythia Pipeline Stage: hs_20261113T035247 — hs_rc_collect", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-13T04:00:41Z"},
+    {"id": 43361558197, "display_title": "Pythia Pipeline Stage:  — hs_submit (cron)", "event": "schedule", "conclusion": "success", "created_at": "2026-11-13T03:50:08Z"},
+    {"id": 38349905918, "display_title": "Pythia Pipeline Stage: hs_20261013T041422 — fc_collect_finalize", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-10-13T05:08:42Z"},
+    {"id": 38345208458, "display_title": "Pythia Pipeline Stage:  — hs_submit (cron)", "event": "schedule", "conclusion": "success", "created_at": "2026-10-13T04:10:58Z"}
+  ],
+  "sibyl_run": {"id": 43531717339, "display_title": "Sibyl Deep Research", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-14T00:04:56Z"},
+  "poller_runs": [
+    {"id": 43496697699, "display_title": "Poll LLM Batches", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-13T19:55:15Z"},
+    {"id": 43495815919, "display_title": "Poll LLM Batches", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-13T19:49:34Z"},
+    {"id": 43494919365, "display_title": "Poll LLM Batches", "event": "workflow_dispatch", "conclusion": "success", "created_at": "2026-11-13T19:43:47Z"},
+    {"id": 43816443524, "display_title": "Poll LLM Batches", "event": "schedule", "conclusion": "success", "created_at": "2026-11-16T06:23:38Z"}
+  ]
+}

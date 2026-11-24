@@ -60,6 +60,36 @@ ATTRIBUTION_BUNDLE_GLOB = "forecast_attribution__*.zip"
 CURRENT_RUN_BUNDLE_GLOB = "current_run_analysis__*.zip"
 #: Written by the archive job into the staging tree before this module runs.
 WORKFLOW_LOGS_INDEX = "workflow_logs_index.json"
+#: Commits between this run's commit and the previous run's that touched a
+#: prompt file, written by the archive job (``drive_archive.write_prompt_commits``).
+PROMPT_COMMITS = "prompt_commits.json"
+#: Paths whose edits change what the forecaster is shown. A trailing slash is a
+#: directory prefix.
+PROMPT_PATHS = ("forecaster/prompts.py", "forecaster/hazard_prompts.py", "pythia/prompts/",
+                "forecaster/history_loaders.py", "forecaster/binary_prompts.py",
+                "forecaster/gdacs_history.py")
+
+
+def touches_prompts(filenames: Iterable[str]) -> list[str]:
+    """The filenames among ``filenames`` that are prompt files."""
+    hits = []
+    for f in filenames:
+        for p in PROMPT_PATHS:
+            if (p.endswith("/") and f.startswith(p)) or f == p:
+                hits.append(f)
+                break
+    return hits
+
+
+def run_commit(staging: Path) -> str | None:
+    """The commit the forecast ran at: the newest head_sha of a pipeline stage
+    or Sibyl run folder (the debug bundle's own record is read later, by
+    ``section_meta``)."""
+    commit = None
+    for slug, folder in rri._run_folders(staging):
+        if slug in ("pipeline_stage", "sibyl"):
+            commit = (_read_json(folder / "api_run.json") or {}).get("head_sha") or commit
+    return commit
 
 #: Section keys, in the template's order. ``previous_run`` embeds these of the
 #: previous production chain.
@@ -352,7 +382,8 @@ def _stage_name(api: Mapping[str, Any]) -> str | None:
 
 def _poller_summary(src: Sources) -> dict[str, Any]:
     """Ticks, and ticks that found work, from the poller logs the debug bundle
-    holds (or poller run folders in the chain, PR 2)."""
+    holds, and from the chain's own poller run folders (every tick between the
+    first stage and Sibyl, Nov 2026), which outrank the logs."""
     logs: list[Path] = []
     if src.debug is not None and (src.debug / "workflow_logs").is_dir():
         logs = sorted((src.debug / "workflow_logs").glob("poll_llm_batches__*.txt"))
@@ -369,13 +400,32 @@ def _poller_summary(src: Sources) -> dict[str, Any]:
             continue
         if re.search(r"=dispatched|— dispatched|Dispatched |dispatching stage", text):
             with_work += 1
+    folder_work = 0
     for folder in folders:
         d = _read_json(next(iter(sorted(folder.rglob("poll_decision.json"))), None)) or {}
         for p in d.get("pipelines") or []:
             if str(p.get("action") or "").startswith("dispatch"):
-                with_work += 1
+                folder_work += 1
                 break
+    if folders:
+        # The chain's own poller runs (every tick, Nov 2026) outrank the debug
+        # bundle's logs, which stop at 40.
+        with_work = folder_work
+    lifecycle = _read_json(src.dbg("batch_lifecycle")) or {}
+    by_provider: dict[str, list[tuple[Any, Any]]] = defaultdict(list)
+    for b in lifecycle.get("batches") or []:
+        by_provider[str(b.get("provider") or "?")].append(
+            (_ts(b.get("submitted_at")), _ts(b.get("ended_at") or b.get("completed_at"))))
+    submit_to_last_end = {}
+    for prov, pairs in sorted(by_provider.items()):
+        subs = [a for a, _ in pairs if a]
+        ends = [b for _, b in pairs if b]
+        submit_to_last_end[prov] = (round((max(ends) - min(subs)).total_seconds(), 1)
+                                    if subs and ends else None)
     return {"ticks": ticks, "ticks_with_a_dispatch": with_work, "empty_logs": empty_logs,
+            "submit_to_last_batch_ended_s": submit_to_last_end,
+            "submit_to_last_batch_ended_source": "debug bundle batch_lifecycle (first submitted_at to "
+                                                 "last ended_at, per provider)",
             "poller_run_folders": len(folders), "debug_bundle_poller_logs": len(logs),
             "capped_at_40_in_debug_bundle": capped or len(logs) == 40,
             "source": "debug bundle workflow_logs/poll_llm_batches__*.txt"
@@ -810,6 +860,18 @@ def adversarial_sync(*, spd_questions: Mapping[str, Mapping[str, Any]], generate
 _DATA_HEADING = re.compile(r"\([A-Z]{3}\b|\d")
 
 
+def _prompt_commits(src: Sources) -> Any:
+    """Commits between the two runs' commits that touched the prompt files,
+    as the archive job wrote them (``prompt_commits.json``)."""
+    payload = _read_json(src.staging / PROMPT_COMMITS)
+    if not isinstance(payload, dict):
+        return stub_with(f"{PROMPT_COMMITS} not in this chain (written by the archive job)",
+                         "git log between the two runs' commits")
+    if payload.get("commits") is None:
+        return stub_with(str(payload.get("reason") or "commit lookup failed"), PROMPT_COMMITS)
+    return {**payload, "source": PROMPT_COMMITS + " (GitHub compare API)"}
+
+
 def section_evidence(src: Sources, previous: Mapping[str, Any] | None) -> dict[str, Any]:
     qm = {q["question_id"]: q for q in _question_metrics(src)}
     spd = {qid: q for qid, q in qm.items() if q.get("metric") != "EVENT_OCCURRENCE"}
@@ -887,7 +949,7 @@ def section_evidence(src: Sources, previous: Mapping[str, Any] | None) -> dict[s
                                         "listed under likely_data_changes",
                                 "source": "derived: attribution prompts/section_hashes.json against "
                                           "previous_run.evidence.section_hashes; questions from prompts/token_share.csv",
-                                "commits": stub("commit lookup is done by the archive job (PR 2)")}
+                                "commits": _prompt_commits(src)}
     else:
         section_changes = stub("no previous run's section_hashes to compare with")
     cache_rows = read_csv(src.dbg("prompt_cache_report"))
@@ -1139,8 +1201,21 @@ def section_experiments(src: Sources) -> dict[str, Any]:
         return v if v is not None else default
 
     arms_file = _experiment_arms_file(src)
+
+    def live(arm: str) -> bool:
+        a = (arms_file or {}).get(arm)
+        return isinstance(a, dict) and not a.get("off")
+
+    def off_stub(arm: str) -> dict[str, Any] | None:
+        a = (arms_file or {}).get(arm)
+        if isinstance(a, dict) and a.get("off"):
+            return stub_with(f"{arm} arm off on this run: {a.get('reason')}", "experiment_arms__*.json")
+        return None
+
     out: list[dict[str, Any]] = []
-    if arms_file and isinstance(arms_file.get("advice"), dict):
+    if off_stub("advice"):
+        out.append(off_stub("advice"))
+    elif live("advice"):
         a = arms_file["advice"]
         out.append(arm_check("advice", a.get("design_share", share("advice")), a.get("counts") or {},
                              "no_advice", a.get("unstamped"), "experiment_arms__*.json"))
@@ -1163,7 +1238,9 @@ def section_experiments(src: Sources) -> dict[str, Any]:
                              "derived: per question from llm_calls_detail usage_json advice_arm",
                              note=f"{empty} advice-arm question(s) had no advice text (advice_empty)"))
     rc = read_csv(src.att("attribution/rc_shift_arms.csv"))
-    if arms_file and isinstance(arms_file.get("rc_shift"), dict):
+    if off_stub("rc_shift"):
+        out.append(off_stub("rc_shift"))
+    elif live("rc_shift"):
         a = arms_file["rc_shift"]
         out.append(arm_check("rc_shift", a.get("design_share", share("rc_shift")), a.get("counts") or {},
                              "shift", a.get("unstamped"), "experiment_arms__*.json"))
@@ -1175,7 +1252,9 @@ def section_experiments(src: Sources) -> dict[str, Any]:
                              "attribution attribution/rc_shift_arms.csv"))
     else:
         out.append(stub_with("no rc_shift arm data", "attribution rc_shift_arms.csv"))
-    if arms_file and isinstance(arms_file.get("adversarial"), dict):
+    if off_stub("adversarial"):
+        out.append(off_stub("adversarial"))
+    elif live("adversarial"):
         a = arms_file["adversarial"]
         out.append(arm_check("adversarial", a.get("design_share", share("adversarial")),
                              {k: v for k, v in (a.get("counts") or {}).items() if k in ("shown", "withheld")},

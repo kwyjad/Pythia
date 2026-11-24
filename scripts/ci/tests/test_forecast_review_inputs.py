@@ -247,3 +247,57 @@ def test_the_cli_writes_the_file_and_never_fails(tmp_path, capsys):
     assert payload["meta"]["fc_run_id"] == FC
     assert fri.main(["--staging", str(tmp_path / "nowhere"), "--out", str(tmp_path / "y.json"),
                      "--work-dir", str(tmp_path / "w2")]) == 0
+
+
+# ---------------------------------------------------------------------------
+# PR 2 inputs: arms switched off, prompt commits, the chain's own poller runs
+# ---------------------------------------------------------------------------
+
+
+def test_an_arm_the_writer_marked_off_is_a_stub_with_its_reason(tmp_path):
+    arms = {"adversarial": {"off": True, "reason": "no adversarial_arm column or the share is 0"},
+            "advice": {"design_share": 0.5, "counts": {"advice": 30, "no_advice": 33}, "unstamped": 0}}
+    p = build(tmp_path, arms=arms)
+    exps = p["experiments"]["experiments"]
+    off = next(e for e in exps if e.get("stub") and "adversarial" in e.get("reason", ""))
+    assert "share is 0" in off["reason"]
+    assert any(e.get("experiment") == "advice" for e in exps)
+
+
+def test_prompt_commits_written_by_the_archive_job_are_read(tmp_path):
+    staging = build_chain(tmp_path)
+    (staging / fri.PROMPT_COMMITS).write_text(json.dumps({
+        "base": "aaa", "head": "bbb", "n_commits_between": 4,
+        "commits": [{"sha": "c1", "subject": "Tighten the RC block", "files": ["forecaster/prompts.py"]}]}))
+    previous = build(tmp_path / "prev")
+    p = fri.build_inputs(fri.locate(staging, tmp_path / "w2"), previous=previous)
+    commits = p["evidence"]["prompt_section_changes"]["commits"]
+    assert commits["commits"][0]["sha"] == "c1" and "GitHub compare API" in commits["source"]
+
+
+def test_a_failed_commit_lookup_is_a_stub_with_its_reason(tmp_path):
+    staging = build_chain(tmp_path)
+    (staging / fri.PROMPT_COMMITS).write_text(json.dumps({"commits": None, "reason": "compare API failed: 404"}))
+    previous = build(tmp_path / "prev")
+    p = fri.build_inputs(fri.locate(staging, tmp_path / "w2"), previous=previous)
+    commits = p["evidence"]["prompt_section_changes"]["commits"]
+    assert commits["stub"] and "404" in commits["reason"]
+
+
+def test_prompt_files_are_recognised():
+    assert fri.touches_prompts(["forecaster/prompts.py", "pythia/prompts/x.md", "README.md",
+                                "forecaster/history_loaders.py"]) == [
+        "forecaster/prompts.py", "pythia/prompts/x.md", "forecaster/history_loaders.py"]
+    assert fri.run_commit(Path(FIXTURE / "chain")) == "a1186a087340ed5b2255dbf5824abf65ed88b928"
+
+
+def test_the_chains_own_poller_runs_count_ticks_with_work(tmp_path):
+    staging = build_chain(tmp_path)
+    for i, action in enumerate(["waiting", "dispatched hs_rc_collect", "waiting"], start=20):
+        d = staging / f"{i}_poll_llm_batches__{900 + i}" / "pythia-poller-decisions"
+        d.mkdir(parents=True)
+        (d / "poll_decision.json").write_text(json.dumps({"pipelines": [{"action": action}]}))
+    p = fri.build_inputs(fri.locate(staging, tmp_path / "w"))
+    poller = p["chain"]["poller"]
+    assert poller["poller_run_folders"] == 3 and poller["ticks_with_a_dispatch"] == 1
+    assert set(poller["submit_to_last_batch_ended_s"]) >= {"google"}

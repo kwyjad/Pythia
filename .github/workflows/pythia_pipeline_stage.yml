@@ -320,6 +320,13 @@ jobs:
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
 
+      # The stage's own before-signature for its chain diagnostics (all
+      # tables, so "did work" can be read off the deltas).
+      - name: Chain diagnostics (before)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow pipeline_stage --db data/resolver.duckdb
+
       # The final stage uploads canonical days later from a staged copy;
       # it reads this row to ask whether another run uploaded a newer
       # canonical DB in between (scripts/ci/canonical_guard.py).
@@ -490,6 +497,7 @@ jobs:
             --out diagnostics/stage_health__hs_submit.json
           exit 0
 
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -506,6 +514,33 @@ jobs:
           # always expected to produce, and a silently-missing diagnostics
           # upload inside a green run is exactly the blind spot being closed.
           if-no-files-found: error
+
+      # Chain diagnostics for this stage: did it work (tables changed
+      # between its before and after signatures), its issues, and its own
+      # section (RC and triage counts, member completeness). Read by the
+      # cycle zip and the forecast review. Never fails the stage.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_STAGE: hs_submit
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id || inputs.db_run_id }}
+          CHAIN_PIPELINE_ID: ${{ inputs.pipeline_id }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow pipeline_stage \
+            --db data/resolver.duckdb --started-at "${STAGE_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-pipeline_stage-${{ github.run_id }}
+          path: diagnostics/pipeline_stage
+          retention-days: 14
+          if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -582,6 +617,13 @@ jobs:
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
+
+      # The stage's own before-signature for its chain diagnostics (all
+      # tables, so "did work" can be read off the deltas).
+      - name: Chain diagnostics (before)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow pipeline_stage --db data/resolver.duckdb
 
       - name: Run Horizon Scanner — stage hs_rc_collect
         env:
@@ -708,6 +750,41 @@ jobs:
             --out diagnostics/stage_health__hs_rc_collect.json
           exit 0
 
+      # Every stage ships its context (DB signatures, environment), not only
+      # fc_collect_finalize: the forecast review reads each stage's lineage.
+      # A name of its own per stage; fc_collect_finalize keeps the plain name
+      # the Sibyl-terminus bundle reads.
+      - name: Write stage context
+        if: always()
+        continue-on-error: true
+        env:
+          PIPELINE_ID: ${{ inputs.pipeline_id }}
+          STAGE_CONCLUSION: ${{ job.status }}
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.write_stage_context \
+            --out diagnostics/stage_context.json \
+            --pipeline-id "${PIPELINE_ID}" \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --conclusion "${STAGE_CONCLUSION}" \
+            --signature-before diagnostics/db_signature_before.json \
+            --signature-after diagnostics/db_signature_after.json
+          exit 0
+
+      - name: Upload stage context
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-context-hs_rc_collect
+          path: |
+            diagnostics/stage_context.json
+            diagnostics/db_signature_before.json
+            diagnostics/db_signature_after.json
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -724,6 +801,33 @@ jobs:
           # always expected to produce, and a silently-missing diagnostics
           # upload inside a green run is exactly the blind spot being closed.
           if-no-files-found: error
+
+      # Chain diagnostics for this stage: did it work (tables changed
+      # between its before and after signatures), its issues, and its own
+      # section (RC and triage counts, member completeness). Read by the
+      # cycle zip and the forecast review. Never fails the stage.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_STAGE: hs_rc_collect
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ inputs.db_run_id }}
+          CHAIN_PIPELINE_ID: ${{ inputs.pipeline_id }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow pipeline_stage \
+            --db data/resolver.duckdb --started-at "${STAGE_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-pipeline_stage-${{ github.run_id }}
+          path: diagnostics/pipeline_stage
+          retention-days: 14
+          if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -800,6 +904,13 @@ jobs:
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
+
+      # The stage's own before-signature for its chain diagnostics (all
+      # tables, so "did work" can be read off the deltas).
+      - name: Chain diagnostics (before)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow pipeline_stage --db data/resolver.duckdb
 
       - name: Run Horizon Scanner — stage hs_finalize
         env:
@@ -965,6 +1076,41 @@ jobs:
             --out diagnostics/stage_health__hs_finalize_fc_submit.json
           exit 0
 
+      # Every stage ships its context (DB signatures, environment), not only
+      # fc_collect_finalize: the forecast review reads each stage's lineage.
+      # A name of its own per stage; fc_collect_finalize keeps the plain name
+      # the Sibyl-terminus bundle reads.
+      - name: Write stage context
+        if: always()
+        continue-on-error: true
+        env:
+          PIPELINE_ID: ${{ inputs.pipeline_id }}
+          STAGE_CONCLUSION: ${{ job.status }}
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.write_stage_context \
+            --out diagnostics/stage_context.json \
+            --pipeline-id "${PIPELINE_ID}" \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --conclusion "${STAGE_CONCLUSION}" \
+            --signature-before diagnostics/db_signature_before.json \
+            --signature-after diagnostics/db_signature_after.json
+          exit 0
+
+      - name: Upload stage context
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-context-hs_finalize_fc_submit
+          path: |
+            diagnostics/stage_context.json
+            diagnostics/db_signature_before.json
+            diagnostics/db_signature_after.json
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -983,6 +1129,33 @@ jobs:
           # error, not warn: hs_stdout.txt always exists once the stage ran,
           # so this fires only when the whole diagnostics set went missing.
           if-no-files-found: error
+
+      # Chain diagnostics for this stage: did it work (tables changed
+      # between its before and after signatures), its issues, and its own
+      # section (RC and triage counts, member completeness). Read by the
+      # cycle zip and the forecast review. Never fails the stage.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_STAGE: hs_finalize_fc_submit
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ inputs.db_run_id }}
+          CHAIN_PIPELINE_ID: ${{ inputs.pipeline_id }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow pipeline_stage \
+            --db data/resolver.duckdb --started-at "${STAGE_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-pipeline_stage-${{ github.run_id }}
+          path: diagnostics/pipeline_stage
+          retention-days: 14
+          if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -1066,6 +1239,13 @@ jobs:
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
+
+      # The stage's own before-signature for its chain diagnostics (all
+      # tables, so "did work" can be read off the deltas).
+      - name: Chain diagnostics (before)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow pipeline_stage --db data/resolver.duckdb
 
       # The final stage uploads canonical days later from a staged copy;
       # it reads this row to ask whether another run uploaded a newer
@@ -1259,6 +1439,7 @@ jobs:
             --out diagnostics/stage_health__fc_submit.json
           exit 0
 
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -1277,6 +1458,33 @@ jobs:
           # error, not warn: hs_stdout.txt always exists once the stage ran,
           # so this fires only when the whole diagnostics set went missing.
           if-no-files-found: error
+
+      # Chain diagnostics for this stage: did it work (tables changed
+      # between its before and after signatures), its issues, and its own
+      # section (RC and triage counts, member completeness). Read by the
+      # cycle zip and the forecast review. Never fails the stage.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_STAGE: fc_submit
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id || inputs.db_run_id }}
+          CHAIN_PIPELINE_ID: ${{ inputs.pipeline_id }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow pipeline_stage \
+            --db data/resolver.duckdb --started-at "${STAGE_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-pipeline_stage-${{ github.run_id }}
+          path: diagnostics/pipeline_stage
+          retention-days: 14
+          if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -1355,6 +1563,13 @@ jobs:
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
+
+      # The stage's own before-signature for its chain diagnostics (all
+      # tables, so "did work" can be read off the deltas).
+      - name: Chain diagnostics (before)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow pipeline_stage --db data/resolver.duckdb
 
       - name: Read pipeline context from DB
         env:
@@ -1608,6 +1823,21 @@ jobs:
             --out diagnostics/stage_health__fc_collect_finalize.json
           exit 0
 
+      # The three experiments' arms as data (advice, RC shift, adversarial),
+      # read back from what the forecaster stamped, for the forecast review.
+      - name: Experiment arms
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          RUN="${FORECASTER_RUN_ID:-${FC_RUN_ID:-}}"
+          if [ -n "${RUN}" ]; then
+            python -m scripts.ci.experiment_arms --db data/resolver.duckdb \
+              --fc-run-id "${RUN}" --out "diagnostics/experiment_arms__${RUN}.json"
+          fi
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -1620,10 +1850,12 @@ jobs:
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
             diagnostics/provider_preflight.json
+            diagnostics/experiment_arms__*.json
           # error, not warn: see the HS stages' upload.
           if-no-files-found: error
 
       - name: Refuse to upload over a newer canonical DB
+        id: canonical_guard
         if: success() && steps.signature_after.outputs.signature_ok == 'true'
         uses: ./.github/actions/guard-canonical-upload
         with:
@@ -1631,6 +1863,7 @@ jobs:
           db: data/resolver.duckdb
 
       - name: Upload canonical resolver DB
+        id: canonical_upload
         if: success() && steps.signature_after.outputs.signature_ok == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -1658,6 +1891,35 @@ jobs:
             -f hs_run_id="${HS_RUN_ID:-}" \
             -f forecaster_run_id="${FORECASTER_RUN_ID:-}"
           echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID} pipeline_id=${INPUT_PIPELINE_ID} hs_run_id=${HS_RUN_ID:-} forecaster_run_id=${FORECASTER_RUN_ID:-}"
+
+      # Chain diagnostics for this stage: did it work (tables changed
+      # between its before and after signatures), its issues, and its own
+      # section (RC and triage counts, member completeness). Read by the
+      # cycle zip and the forecast review. Never fails the stage.
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_STAGE: fc_collect_finalize
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ inputs.db_run_id }}
+          CHAIN_PIPELINE_ID: ${{ inputs.pipeline_id }}
+          CHAIN_UPLOAD_OUTCOME: ${{ steps.canonical_upload.outcome }}
+          CHAIN_GUARD_OUTCOME: ${{ steps.canonical_guard.outcome }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow pipeline_stage \
+            --db data/resolver.duckdb --started-at "${STAGE_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-pipeline_stage-${{ github.run_id }}
+          path: diagnostics/pipeline_stage
+          retention-days: 14
+          if-no-files-found: warn
 
       # The canonical upload + Sibyl dispatch above are signature-gated;
       # when the gate fires, the whole month's pipeline output goes

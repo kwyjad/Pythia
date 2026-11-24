@@ -82,6 +82,14 @@ DEFAULT_MAX_BYTES = 200 * 1024 * 1024
 UPSTREAM_MAX_GAP_DAYS = 3
 WINDOW_DAYS = 7
 MAX_CHAIN_DEPTH = 12
+#: Poller ticks kept when the zip has a size ceiling (Publish's own zip). The
+#: full (archive) mode keeps every tick between the first stage and Sibyl.
+MAX_POLLER_RUNS = 40
+#: How long before a pipeline's first named stage its cron-started hs_submit
+#: (whose run name carries no pipeline id) may have been created.
+CRON_SUBMIT_LEAD_HOURS = 3
+#: A stage run name with no pipeline id: the cron entry.
+_CRON_TITLE = re.compile(r"Pipeline Stage:\s*\u2014")
 
 #: Where each workflow's chain continues when it carries no lineage record.
 EXPECTED_UPSTREAM: dict[str, tuple[str, ...]] = {
@@ -105,7 +113,8 @@ ARTIFACT_PATTERNS: dict[str, tuple[str, ...]] = {
         "pythia-current-run-bundle", "pythia-forecast-attribution-bundle",
         "pythia-stage-diagnostics*", "pythia-interpreter-report",
     ),
-    "Pythia Pipeline Stage": ("pythia-stage-diagnostics", "pythia-stage-context"),
+    "Pythia Pipeline Stage": ("pythia-stage-diagnostics", "pythia-stage-context*"),
+    "Poll LLM Batches": ("pythia-poller-decisions",),
     "Ingest Structured Data": ("ingest-diagnostics",),
     "Refresh CrisisWatch Data": ("crisiswatch-data-*",),
     "Publish Latest Data (Release)": ("resolver-inspect",),
@@ -305,6 +314,31 @@ class Collector:
             return []
         return [r for r in listing.get("workflow_runs") or [] if trusted(r, self.repo)]
 
+    def workflow_runs_between(self, workflow_name: str, lo: dt.datetime,
+                              hi: dt.datetime, max_pages: int = 20) -> list[dict[str, Any]]:
+        """Every trusted run of a workflow created between ``lo`` and ``hi``,
+        paged through the API's ``created`` filter (the poller makes about 200
+        runs a pipeline, more than one page holds)."""
+        file = WORKFLOWS.get(workflow_name, ("", ""))[1]
+        if not file:
+            return []
+        rng = f"{lo.strftime('%Y-%m-%dT%H:%M:%SZ')}..{hi.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        out: list[dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            try:
+                listing = self.gh.api(f"repos/{self.repo}/actions/workflows/{file}/runs"
+                                      f"?per_page=100&page={page}&created={rng}") or {}
+            except Exception as exc:  # noqa: BLE001
+                self.notes.append(f"could not list {workflow_name} runs (page {page}): {exc}")
+                break
+            batch = list(listing.get("workflow_runs") or [])
+            out += [r for r in batch if trusted(r, self.repo)]
+            if len(batch) < 100:
+                break
+        else:
+            self.notes.append(f"{workflow_name}: stopped after {max_pages} pages")
+        return out
+
     # -- lineage ---------------------------------------------------------------
 
     def lineage_of(self, run_id: str, info: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -412,9 +446,59 @@ class Collector:
             if not m:
                 continue
             pid = m.group(1)
-            for r in self.workflow_runs("Pythia Pipeline Stage", per_page=100):
+            stage_runs = self.workflow_runs("Pythia Pipeline Stage", per_page=100)
+            for r in stage_runs:
                 if pid in str(r.get("display_title") or ""):
                     self.add(str(r.get("id")), f"stage of pipeline {pid}", r)
+            self._add_cron_submit(pid, stage_runs)
+
+    def _add_cron_submit(self, pid: str, stage_runs: list[dict[str, Any]]) -> None:
+        """The cron-started hs_submit of a pipeline. Its run name carries no
+        pipeline id ("Pythia Pipeline Stage:  — hs_submit (cron)"), so it is
+        taken as the newest such run created at most
+        ``CRON_SUBMIT_LEAD_HOURS`` before the pipeline's first named stage."""
+        mine = [_ts(r.created_at) for r in self.runs.values()
+                if r.workflow == "Pythia Pipeline Stage" and pid in str(r.info.get("display_title") or "")]
+        mine = [t for t in mine if t is not None]
+        if not mine:
+            return
+        first = min(mine)
+        best: tuple[dt.datetime, dict[str, Any]] | None = None
+        for r in stage_runs:
+            title = str(r.get("display_title") or "")
+            if "hs_submit" not in title or _CRON_TITLE.search(title) is None:
+                continue
+            t = _ts(r.get("created_at"))
+            if t is None or t > first or (first - t).total_seconds() > CRON_SUBMIT_LEAD_HOURS * 3600:
+                continue
+            if best is None or t > best[0]:
+                best = (t, r)
+        if best is not None:
+            self.add(str(best[1].get("id")), f"stage of pipeline {pid} (cron hs_submit)", best[1])
+
+    def add_pollers(self, *, full: bool) -> None:
+        """Poll LLM Batches runs between the pipeline's first stage and Sibyl.
+
+        Every one in full (archive) mode; at most ``MAX_POLLER_RUNS`` spread
+        evenly through the window otherwise, the first and last always kept."""
+        stages = [t for t in (_ts(r.created_at) for r in self.runs.values()
+                              if r.workflow == "Pythia Pipeline Stage") if t]
+        sibyl = [t for t in (_ts(r.created_at) for r in self.runs.values()
+                             if r.workflow == "Sibyl Deep Research") if t]
+        if not stages or not sibyl:
+            return
+        lo, hi = min(stages), max(sibyl)
+        if hi <= lo:
+            return
+        runs = sorted(self.workflow_runs_between("Poll LLM Batches", lo, hi),
+                      key=lambda r: str(r.get("created_at") or ""))
+        if not full and len(runs) > MAX_POLLER_RUNS:
+            step = (len(runs) - 1) / (MAX_POLLER_RUNS - 1)
+            keep = sorted({round(i * step) for i in range(MAX_POLLER_RUNS)})
+            self.notes.append(f"Poll LLM Batches: kept {len(keep)} of {len(runs)} ticks (size ceiling)")
+            runs = [runs[i] for i in keep]
+        for r in runs:
+            self.add(str(r.get("id")), "poller tick between the first stage and Sibyl", r)
 
     def add_window(self, start: dt.datetime | None, end: dt.datetime | None,
                    window_days: int = WINDOW_DAYS) -> None:
@@ -484,7 +568,7 @@ class Collector:
 #: Workflows that write chain diagnostics (an absent artifact is worth a line).
 _WRITERS = frozenset({
     "compute_resolutions", "compute_scores", "compute_calibration", "ingest_structured_data",
-    "refresh_crisiswatch", "publish_latest_data",
+    "refresh_crisiswatch", "publish_latest_data", "pipeline_stage", "sibyl",
 })
 
 
@@ -576,7 +660,7 @@ def cycle_summary(ordered: list[RunRecord], staging: Path, repo: str) -> tuple[s
         url = rec.info.get("html_url") or f"https://github.com/{repo}/actions/runs/{rec.run_id}"
         lines.append(
             f"| {_cell(rec.workflow)} | [{rec.run_id}]({url}) | {_cell(rec.info.get('conclusion') or rec.info.get('status'))} "
-            f"| {_cell(chain_run.get('trigger_did_work'))} | {_cell(lineage.get('canonical_db_run_downloaded'))} "
+            f"| {_cell(chain_run.get('did_work') or chain_run.get('trigger_did_work'))} | {_cell(lineage.get('canonical_db_run_downloaded'))} "
             f"| {uploaded} | {_cell((worst or {}).get('severity', '') + ': ' + (worst or {}).get('title', '') if worst else '')} |"
         )
     merged = merge_issues(per_run)
@@ -744,16 +828,18 @@ def manifest_files(staging: Path, folder_runs: Mapping[str, RunRecord]) -> list[
 
 
 #: Reasons that put a run in the chain itself, rather than beside it.
-_CHAIN_REASONS = ("source", "trigger", "upstream", "stage of pipeline")
+_CHAIN_REASONS = ("source", "trigger", "upstream", "stage of pipeline", "poller tick")
 
 
 def _stage_context(staging: Path) -> dict[str, Any]:
     """The forecaster stage's ``stage_context.json``, wherever the zip holds one."""
+    found: list[dict[str, Any]] = []
     for path in sorted(staging.rglob("stage_context*.json")):
         payload = _read_json(path)
         if isinstance(payload, dict) and ("forecaster_run_id" in payload or "hs_run_id" in payload):
-            return payload
-    return {}
+            found.append(payload)
+    # Three stages upload a context since Nov 2026; the forecaster's names the run.
+    return next((p for p in found if p.get("forecaster_run_id")), found[0] if found else {})
 
 
 def _truthy(raw: Any) -> bool:
@@ -821,6 +907,7 @@ def build(*, gh: Any, repo: str, source_run_id: str, publish_run_id: str, out_di
     collector = Collector(gh, repo, tmp, wait_sec=wait_sec, sleep=sleep, full=full)
     chain = collector.walk_chain(source_run_id)
     collector.add_pipeline_stages()
+    collector.add_pollers(full=full)
     root = chain[-1] if chain else None
     publish_info = collector.run_info(publish_run_id) if publish_run_id else None
     end = _ts((publish_info or {}).get("created_at")) or dt.datetime.now(dt.timezone.utc)

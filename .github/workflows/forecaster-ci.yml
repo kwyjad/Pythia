@@ -154,6 +154,10 @@ on:
       - "scripts/ci/chain_diagnostics.py"
       - "scripts/ci/build_cycle_diagnostics.py"
       - "scripts/ci/tests/test_cycle_diagnostics.py"
+      - "scripts/ci/tests/test_cycle_stages_and_pollers.py"
+      - "scripts/ci/tests/test_stage_chain_diagnostics.py"
+      - "scripts/ci/tests/fixtures/cycle_runs_2026_11_13.json"
+      - "scripts/ci/experiment_arms.py"
       - "scripts/ci/drive_archive.py"
       - "scripts/ci/check_drive_archive.py"
       - "scripts/ci/tests/test_drive_archive.py"
@@ -483,6 +487,8 @@ jobs:
             scripts/ci/tests/test_db_table_sizes.py \
             scripts/ci/tests/test_db_growth.py \
             scripts/ci/tests/test_cycle_diagnostics.py \
+            scripts/ci/tests/test_cycle_stages_and_pollers.py \
+            scripts/ci/tests/test_stage_chain_diagnostics.py \
             scripts/ci/tests/test_drive_archive.py \
             scripts/ci/tests/test_resolver_review_inputs.py \
             scripts/ci/tests/test_forecast_review_inputs.py \
@@ -689,6 +695,7 @@ jobs:
             forecaster/tests/test_debug_bundle_defects.py \
             forecaster/tests/test_debug_bundle_operational.py \
             forecaster/tests/test_debug_bundle_costs.py \
+            forecaster/tests/test_debug_bundle_health_extra.py \
             scripts/ci/tests/test_stage_context.py
 
       - name: Run resolver/tests suites that guard forecaster + pythia code

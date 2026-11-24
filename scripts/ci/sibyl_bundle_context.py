@@ -46,6 +46,10 @@ from pathlib import Path
 from typing import Any
 
 STAGE_CONTEXT_ARTIFACT = "pythia-stage-context"
+#: The two HS-side stages that upload a context of their own (Nov 2026), each
+#: under ``pythia-stage-context-<stage>``. fc_collect_finalize keeps the plain
+#: name above. The bundle carries them in ``stage_context/<stage>/``.
+EARLIER_STAGES = ("hs_rc_collect", "hs_finalize_fc_submit")
 
 
 def _db_path(db: str) -> str:
@@ -226,6 +230,90 @@ def fetch_stage_context(
     return {"downloaded": True, "run_id": run_id, "files": sorted(files)}
 
 
+def _gh_json(args: list[str]) -> Any:
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout).strip()[-300:])
+    return json.loads(proc.stdout or "null")
+
+
+def stage_runs_of_pipeline(pipeline_id: str, runs: list[dict[str, Any]]) -> dict[str, str]:
+    """stage -> newest successful run id, among Pythia Pipeline Stage runs
+    whose run name carries ``pipeline_id`` (the run name is
+    "Pythia Pipeline Stage: <pipeline_id> — <stage>")."""
+    out: dict[str, tuple[str, str]] = {}
+    for r in runs:
+        title = str(r.get("display_title") or "")
+        if pipeline_id not in title or "—" not in title:
+            continue
+        stage = title.rsplit("—", 1)[1].strip()
+        if stage not in EARLIER_STAGES:
+            continue
+        created = str(r.get("created_at") or "")
+        if r.get("conclusion") == "success" and created >= out.get(stage, ("", ""))[0]:
+            out[stage] = (created, str(r.get("id")))
+    return {k: v[1] for k, v in out.items()}
+
+
+def fetch_earlier_stage_contexts(
+    *,
+    pipeline_id: str | None,
+    target: Path,
+    repo: str | None,
+    list_runs=None,
+    runner=None,
+) -> dict[str, Any]:
+    """Download each HS-side stage's ``pythia-stage-context-<stage>`` into
+    ``target/<stage>/``; a stub where one cannot be had. Never raises."""
+    pipeline_id = (pipeline_id or "").strip()
+    result: dict[str, Any] = {}
+    if not pipeline_id:
+        for stage in EARLIER_STAGES:
+            _write_stub(target / stage, "no pipeline id: the stage run could not be found")
+        return {"downloaded": [], "reason": "no pipeline id"}
+    try:
+        if list_runs is None:
+            if not repo:
+                raise RuntimeError("no GITHUB_REPOSITORY")
+            listing = _gh_json(["api", f"repos/{repo}/actions/workflows/pythia_pipeline_stage.yml/runs?per_page=100"])
+            runs = list((listing or {}).get("workflow_runs") or [])
+        else:
+            runs = list_runs()
+        found = stage_runs_of_pipeline(pipeline_id, runs)
+    except Exception as exc:  # noqa: BLE001
+        found = {}
+        result["listing_error"] = f"{type(exc).__name__}: {exc}"
+    if runner is None and shutil.which("gh") is not None:
+        def runner(cmd: list[str]) -> tuple[int, str]:  # type: ignore[misc]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            return proc.returncode, (proc.stdout + proc.stderr)[-2000:]
+    for stage in EARLIER_STAGES:
+        dest = target / stage
+        run_id = found.get(stage)
+        name = f"{STAGE_CONTEXT_ARTIFACT}-{stage}"
+        if not run_id or runner is None:
+            _write_stub(dest, f"no successful {stage} run found for pipeline {pipeline_id}"
+                        if not run_id else "gh CLI not available in this job",
+                        artifact_name=name)
+            result[stage] = {"downloaded": False}
+            continue
+        cmd = ["gh", "run", "download", run_id, "-n", name, "-D", str(dest)]
+        if repo:
+            cmd += ["-R", repo]
+        try:
+            rc, output = runner(cmd)
+        except Exception as exc:  # noqa: BLE001
+            rc, output = 1, f"{type(exc).__name__}: {exc}"
+        files = [p.name for p in dest.glob("*")] if dest.exists() else []
+        if rc != 0 or not any(f != "MISSING.json" for f in files):
+            _write_stub(dest, f"artifact {name} not downloadable from run {run_id}",
+                        run_id=run_id, gh_output=output.strip(), artifact_name=name)
+            result[stage] = {"downloaded": False, "run_id": run_id}
+        else:
+            result[stage] = {"downloaded": True, "run_id": run_id}
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", required=True)
@@ -277,6 +365,12 @@ def main(argv: list[str] | None = None) -> int:
             repo=os.getenv("GITHUB_REPOSITORY") or None,
         )
         print("stage context: " + json.dumps(result, default=str))
+        earlier = fetch_earlier_stage_contexts(
+            pipeline_id=resolved.get("pipeline_id"),
+            target=Path(args.stage_context_dir),
+            repo=os.getenv("GITHUB_REPOSITORY") or None,
+        )
+        print("earlier stage contexts: " + json.dumps(earlier, default=str))
     return 0
 
 

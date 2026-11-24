@@ -82,6 +82,8 @@ WORKFLOWS: dict[str, tuple[str, str]] = {
     "Pythia Pipeline Stage": ("pipeline_stage", "pythia_pipeline_stage.yml"),
     "Horizon Scanner Triage": ("horizon_scanner", "run_horizon_scanner.yml"),
     "Archive Run to Drive": ("archive_to_drive", "archive_to_drive.yml"),
+    # Writes no chain diagnostics; named so the cycle zip can file its runs.
+    "Poll LLM Batches": ("poll_llm_batches", "poll_llm_batches.yml"),
 }
 SLUG_TO_NAME = {slug: name for name, (slug, _file) in WORKFLOWS.items()}
 ARTIFACT_PREFIX = "chain-diagnostics"
@@ -295,6 +297,8 @@ class Writer:
                 "source": self.chain.get("download_source", "") or None,
             },
             "trigger_did_work": self.chain.get("did_work", "") or None,
+            "stage": self.chain.get("stage", "") or None,
+            "pipeline_id": self.chain.get("pipeline_id", "") or None,
             "job_status": self.chain.get("job_status", "") or None,
             "started_at": self.started_at or None,
             "ended_at": _now(),
@@ -734,6 +738,145 @@ class Writer:
                        evidence=f"free {st.get('free_bytes')} bytes, used {st.get('used_fraction')}",
                        owner="pythia", recovers_on_rerun=False)
 
+    def did_work(self) -> None:
+        """For a pipeline stage or Sibyl: did this run change any table?
+
+        Read off ``table_counts.csv`` (before at job start, after now) and
+        written into ``run.json`` as ``did_work``, which the cycle summary's
+        "did work" column prints. A stage that should write and changed no
+        table is the thing rule A4.5 of the forecast review looks for."""
+        path = self.out / "table_counts.csv"
+        if not path.is_file():
+            raise RuntimeError("no table_counts.csv: did_work not decided")
+        with path.open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        changed = []
+        for r in rows:
+            try:
+                d = int(r.get("delta") or 0)
+            except ValueError:
+                continue
+            if d:
+                changed.append(f"{r.get('table')} {d:+d}")
+        run = read_json(self.out / "run.json") or {}
+        run["did_work"] = (f"yes ({len(changed)} table(s) changed)" if changed else "no")
+        run["tables_changed"] = changed[:40]
+        write_json(self.out / "run.json", run)
+        self.summary.append(f"- Did work: {run['did_work']}"
+                            + (f": {', '.join(changed[:8])}" if changed else "") + ".")
+        if not changed and (self.chain.get("job_status") or "") == "success":
+            self.issue("stage_wrote_nothing", "degraded",
+                       "The run succeeded and changed no table in the DB it downloaded",
+                       evidence="table_counts.csv")
+
+    def _stage_health(self, stage: str) -> dict[str, Any]:
+        for d in (self.diagnostics_dir, self.diagnostics_dir / "diagnostics"):
+            payload = read_json(d / f"stage_health__{stage}.json")
+            if isinstance(payload, dict):
+                return payload
+        return {}
+
+    def pipeline_stage(self) -> None:
+        """One Pythia Pipeline Stage run: its stage's own counts and failures."""
+        stage = (self.chain.get("stage") or "").strip()
+        if not stage:
+            raise RuntimeError("CHAIN_STAGE not set")
+        sh = self._stage_health(stage)
+        section: dict[str, Any] = {"stage": stage, "stage_health_file": f"stage_health__{stage}.json"
+                                   if sh else None}
+        rc = sh.get("rc_levels") or {}
+        g = sh.get("grounding") or {}
+        if rc:
+            section["rc_levels"] = {k: rc.get(k) for k in ("n_rows", "n_assessed", "n_not_assessed",
+                                                            "by_level_assessed", "by_track")}
+        if g:
+            section["grounding"] = {k: {"n_calls": (g.get(k) or {}).get("n_calls"),
+                                        "n_no_backend": (g.get(k) or {}).get("n_no_backend")}
+                                    for k in ("rc", "triage")}
+            for k in ("rc", "triage"):
+                n = int((g.get(k) or {}).get("n_no_backend") or 0)
+                if n:
+                    self.issue(f"{k}_grounding_no_backend", "degraded",
+                               f"{n} {k} grounding call(s) found no backend (no sources)",
+                               evidence=f"stage_health__{stage}.json", cost=n, cost_unit="calls")
+        cost = (sh.get("cost") or {}).get("stage_total") or {}
+        if cost:
+            section["stage_cost"] = cost
+        it = sh.get("is_test") or {}
+        if it and it.get("matches_expected") is False:
+            self.issue("is_test_mismatch", "degraded",
+                       "Rows this stage wrote disagree with PYTHIA_TEST_MODE about is_test",
+                       evidence=f"stage_health__{stage}.json")
+        if stage.startswith("hs_"):
+            fails = sorted(self.diagnostics_dir.glob("hs_triage_failures__*.json"))
+            if fails:
+                payload = read_json(fails[-1])
+                n = len(payload) if isinstance(payload, list) else len((payload or {}).get("failures") or [])
+                section["triage_failures"] = n
+                if n:
+                    self.issue("hs_triage_failures", "degraded", f"{n} HS triage failure(s)",
+                               evidence=fails[-1].name, cost=n, cost_unit="countries")
+        fc = (self.env.get("FORECASTER_RUN_ID") or self.env.get("FC_RUN_ID") or "").strip()
+        if stage == "fc_collect_finalize" and fc and "forecasts_raw" in self.tables():
+            rows = self.q(
+                "SELECT model_name, COUNT(DISTINCT question_id) FROM forecasts_raw "
+                "WHERE run_id = ? AND model_name IS NOT NULL AND COALESCE(status, 'ok') = 'ok' "
+                "GROUP BY model_name ORDER BY model_name", [fc])
+            members = {str(m): int(n) for m, n in rows
+                       if not str(m).startswith(("ensemble_", "track2_", "sibyl"))
+                       and not str(m).endswith(("__raw", "__recal"))}
+            section["member_questions_ok"] = members
+            if members and min(members.values()) < max(members.values()):
+                short = {m: n for m, n in members.items() if n < max(members.values())}
+                self.issue("ensemble_members_short", "degraded",
+                           "Ensemble member(s) forecast fewer questions than the fullest member",
+                           evidence=json.dumps(short), cost=sum(max(members.values()) - n for n in short.values()),
+                           cost_unit="member forecasts")
+            salvaged = self.q(
+                "SELECT COUNT(DISTINCT question_id || '|' || model_name) FROM forecasts_raw "
+                "WHERE run_id = ? AND spd_json LIKE ?", [fc, '%"parse_mode": "salvaged"%'])
+            section["parse_salvaged_member_forecasts"] = int(salvaged[0][0]) if salvaged else 0
+            lost = self.q(
+                "SELECT model_name, COUNT(DISTINCT question_id) FROM forecasts_raw "
+                "WHERE run_id = ? AND status = 'no_forecast' GROUP BY model_name ORDER BY model_name", [fc])
+            section["no_forecast_by_member"] = {str(m): int(n) for m, n in lost}
+            n_lost = sum(section["no_forecast_by_member"].values())
+            if n_lost:
+                self.issue("member_forecasts_lost", "degraded",
+                           f"{n_lost} member forecast(s) stored no_forecast (a call or a parse failed)",
+                           evidence=json.dumps(section["no_forecast_by_member"]), cost=n_lost,
+                           cost_unit="member forecasts")
+        write_json(self.out / "stage_section.json", section)
+        self.summary.append(f"- Stage {stage}: " + ", ".join(
+            f"{k}={v}" for k, v in section.items() if k in ("triage_failures", "parse_salvaged_member_forecasts")
+        ) + ("; members " + ", ".join(f"{m} {n}" for m, n in (section.get("member_questions_ok") or {}).items())
+             if section.get("member_questions_ok") else ""))
+
+    def sibyl(self) -> None:
+        """The Sibyl run: selection, forecasts, caps and cost from its stage health."""
+        sh = self._stage_health("sibyl")
+        sib = sh.get("sibyl") or {}
+        if not sib:
+            raise RuntimeError("no stage_health__sibyl.json sibyl block")
+        keep = ("sibyl_run_id", "model", "k", "n_selected", "n_forecast", "n_skipped", "by_status",
+                "budget_capped", "time_capped", "run_cost_usd", "run_hard_cap_usd", "degraded",
+                "tools", "research_depth")
+        write_json(self.out / "sibyl_section.json", {k: sib.get(k) for k in keep})
+        self.summary.append(
+            f"- Sibyl {sib.get('sibyl_run_id')}: {sib.get('n_forecast')} of {sib.get('n_selected')} "
+            f"forecast, {sib.get('n_skipped')} skipped, ${sib.get('run_cost_usd')} of a "
+            f"${sib.get('run_hard_cap_usd')} cap.")
+        if sib.get("budget_capped"):
+            self.issue("sibyl_budget_capped", "degraded", "Sibyl stopped at its budget cap",
+                       cost=sib.get("n_skipped"), cost_unit="questions skipped")
+        if sib.get("time_capped"):
+            self.issue("sibyl_time_capped", "degraded", "Sibyl stopped at its time cap",
+                       cost=sib.get("n_skipped"), cost_unit="questions skipped")
+        if sib.get("degraded"):
+            self.issue("sibyl_search_degraded", "degraded",
+                       "Sibyl's search failure share passed its limit",
+                       evidence=json.dumps(sib.get("tools") or {}))
+
     # -- outputs ---------------------------------------------------------------
 
     def write_issues(self) -> None:
@@ -890,7 +1033,11 @@ SECTIONS: dict[str, list[str]] = {
     "refresh_crisiswatch": ["crisiswatch"],
     "publish_latest_data": ["publish"],
     "archive_to_drive": ["archive"],
+    "pipeline_stage": ["pipeline_stage"],
+    "sibyl": ["sibyl"],
 }
+#: Workflows whose "did work" is read off their own table deltas.
+DID_WORK_FROM_COUNTS = ("pipeline_stage", "sibyl")
 
 
 def write(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> Path:
@@ -907,6 +1054,8 @@ def write(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> Pat
             w.section(name, getattr(w, name))
         if w.db_path is not None:
             w.section("table_counts", w.table_counts)
+            if args.workflow in DID_WORK_FROM_COUNTS:
+                w.section("did_work", w.did_work)
             w.section("freshness", w.freshness)
         if not args.no_api:
             w.section("step_timings", w.step_timings)
@@ -928,6 +1077,25 @@ def write(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> Pat
     return out
 
 
+def publish_post(cycle_dir: Path, out: Path, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """What the Publish run did after its chain diagnostics were written.
+
+    Publish writes its chain diagnostics BEFORE it gathers the cycle zip (the
+    zip carries them), so the zip's own outcome is recorded here, in a small
+    file beside them, before they are uploaded."""
+    env = os.environ if env is None else env
+    zips = sorted(cycle_dir.glob("cycle_diagnostics__*.zip")) if cycle_dir.is_dir() else []
+    payload: dict[str, Any] = {
+        "cycle_zip_outcome": env.get("CYCLE_ZIP_OUTCOME") or None,
+        "cycle_zip": zips[-1].name if zips else None,
+        "cycle_zip_bytes": zips[-1].stat().st_size if zips else None,
+        "cycle_summary_written": (cycle_dir / "CYCLE_SUMMARY.md").is_file(),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_json(out, payload)
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -942,6 +1110,9 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--include", action="append", default=[],
                            help="a file or directory to copy into included/ (repeatable)")
             p.add_argument("--no-api", action="store_true", help="skip the jobs API")
+    pp = sub.add_parser("publish-post")
+    pp.add_argument("--cycle-dir", default="cycle_out")
+    pp.add_argument("--out", default="diagnostics/publish_latest_data/publish_post.json")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "before":
@@ -949,6 +1120,8 @@ def main(argv: list[str] | None = None) -> int:
             out.mkdir(parents=True, exist_ok=True)
             write_json(out / "db_signature_before.json", signature(_db_path(args.db)))
             print(f"before signature written to {out}")
+        elif args.cmd == "publish-post":
+            print(json.dumps(publish_post(Path(args.cycle_dir), Path(args.out))))
         else:
             write(args)
     except Exception:  # noqa: BLE001 - a diagnostic never fails the job

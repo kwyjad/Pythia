@@ -891,3 +891,50 @@ def dataclasses_asdict(obj):
     import dataclasses
 
     return dataclasses.asdict(obj)
+
+
+class CompareGh:
+    """The compare and commit endpoints, as the archive job reads them."""
+
+    def __init__(self, files_by_sha, fail=False):
+        self.files_by_sha = files_by_sha
+        self.fail = fail
+        self.calls = []
+
+    def api(self, path):
+        self.calls.append(path)
+        if self.fail:
+            raise RuntimeError("HTTP 404")
+        if "/compare/" in path:
+            commits = [{"sha": s, "commit": {"message": f"subject {s}\n\nbody",
+                                             "committer": {"date": "2026-11-20T00:00:00Z"}}}
+                       for s in self.files_by_sha]
+            files = [{"filename": f} for fs in self.files_by_sha.values() for f in fs]
+            return {"total_commits": len(commits), "commits": commits, "files": files}
+        sha = path.rsplit("/", 1)[1]
+        return {"files": [{"filename": f} for f in self.files_by_sha[sha]]}
+
+
+def test_prompt_commits_name_only_the_commits_that_touched_a_prompt_file():
+    gh = CompareGh({"c1": ["README.md"], "c2": ["forecaster/prompts.py", "x.py"],
+                    "c3": ["forecaster/hazard_prompts.py"]})
+    out = da.build_prompt_commits(gh, "o/r", "aaa", "bbb")
+    assert [c["sha"] for c in out["commits"]] == ["c2", "c3"]
+    assert out["commits"][0]["files"] == ["forecaster/prompts.py"]
+    assert out["commits"][0]["subject"] == "subject c2" and out["n_commits_between"] == 3
+
+
+def test_prompt_commits_skip_the_per_commit_reads_when_no_prompt_file_moved():
+    gh = CompareGh({"c1": ["README.md"]})
+    out = da.build_prompt_commits(gh, "o/r", "aaa", "bbb")
+    assert out["commits"] == [] and len(gh.calls) == 1
+
+
+def test_prompt_commits_say_why_when_they_cannot_be_looked_up(tmp_path):
+    assert da.build_prompt_commits(CompareGh({}), "o/r", None, "bbb")["reason"] == "no previous run commit"
+    failed = da.build_prompt_commits(CompareGh({}, fail=True), "o/r", "aaa", "bbb")
+    assert failed["commits"] is None and "404" in failed["reason"]
+    staging = tmp_path / "s"
+    staging.mkdir()
+    da.write_prompt_commits(CompareGh({}), "o/r", staging, {"stub": True, "reason": "none"})
+    assert json.loads((staging / "prompt_commits.json").read_text())["commits"] is None
