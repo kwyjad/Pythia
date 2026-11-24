@@ -151,3 +151,70 @@ def test_unpopulated_trigger_rows_are_stamped_no_population(con):
     assert detect_mod.stamp_unpopulated_territories(
         con, cli_mod.UNPOPULATED_TERRITORIES
     ) == 0
+
+
+# --- 5. conflictforecast.org: no new vintage vs a failure --------------------
+
+
+def test_the_issue_source_maps_no_new_vintage_to_info():
+    from resolver.diagnostics.issue_sources import issues_from_reconciliation
+    from resolver.diagnostics.issues import DEGRADED, INFO
+
+    issues = issues_from_reconciliation([
+        {"connector": "conflictforecast_forecasts", "status": "ok", "agrees": "—",
+         "reason": "no_new_vintage: newest stored issue date 2026-11-01"},
+        {"connector": "views_forecasts", "status": "error", "agrees": "—",
+         "reason": "fetch-returned-empty"},
+    ])
+    by_id = {i.id: i for i in issues}
+    assert by_id["no_new_vintage_conflictforecast_forecasts"].severity == INFO
+    assert by_id["connector_failed_views_forecasts"].severity == DEGRADED
+
+
+def test_an_empty_answer_is_classified_by_the_stored_vintage():
+    from resolver.tools.fetch_conflict_forecasts import classify_empty_answer
+
+    today = dt.date(2026, 11, 11)
+    failed = {"outcome": "download_failed", "errors": ["CERTIFICATE_VERIFY_FAILED"]}
+    # November's vintage is stored: nothing is lost this run.
+    assert classify_empty_answer(failed, dt.date(2026, 11, 1), today) == "no_new_vintage"
+    # October's is still the previous month: no new vintage yet.
+    assert classify_empty_answer(failed, dt.date(2026, 10, 1), today) == "no_new_vintage"
+    # Nothing for the current or previous month: a failure.
+    assert classify_empty_answer(failed, dt.date(2026, 9, 1), today) == "fetch_failed"
+    assert classify_empty_answer(failed, None, today) == "fetch_failed"
+    assert classify_empty_answer({"outcome": "no_new_vintage"}, None, today) == "no_new_vintage"
+
+
+def test_the_connector_skips_the_download_when_the_listing_names_a_stored_vintage(monkeypatch):
+    from resolver.connectors.conflictforecast import ConflictForecastOrgConnector
+
+    connector = ConflictForecastOrgConnector()
+    connector.newest_stored = dt.date(2026, 11, 1)
+    listing = [{"name": "conflictforecast_ons_armedconf_03_11-2026.csv", "publicUrl": "x"}]
+    monkeypatch.setattr(connector, "_get_file_listing", lambda: listing)
+
+    def _boom(url):
+        raise AssertionError("must not download a vintage already stored")
+
+    monkeypatch.setattr(ConflictForecastOrgConnector, "_download_csv", staticmethod(_boom))
+    assert connector.fetch_forecasts().empty
+    assert connector.summary["outcome"] == "no_new_vintage"
+    assert connector.summary["listing_issue_date"] == "2026-11-01"
+
+
+def test_a_failed_download_is_recorded_with_its_error(monkeypatch):
+    from resolver.connectors.conflictforecast import ConflictForecastOrgConnector
+
+    connector = ConflictForecastOrgConnector()
+    connector.newest_stored = dt.date(2026, 10, 1)
+    listing = [{"name": "conflictforecast_ons_armedconf_03_11-2026.csv", "publicUrl": "x"}]
+    monkeypatch.setattr(connector, "_get_file_listing", lambda: listing)
+
+    def _tls(url):
+        raise OSError("CERTIFICATE_VERIFY_FAILED")
+
+    monkeypatch.setattr(ConflictForecastOrgConnector, "_download_csv", staticmethod(_tls))
+    assert connector.fetch_forecasts().empty
+    assert connector.summary["outcome"] == "download_failed"
+    assert any("CERTIFICATE_VERIFY_FAILED" in e for e in connector.summary["errors"])
