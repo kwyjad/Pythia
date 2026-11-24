@@ -21,6 +21,7 @@ from fastapi import APIRouter, Header, Query
 from pythia.api.core import (
     _DUCKDB_MEMORY_LIMIT,
     _DUCKDB_THREADS,
+    _blocked_hazard_filter,
     _HEAVY_REQUEST_SEMAPHORE,
     _con,
     _count_distinct_active_questions,
@@ -367,9 +368,7 @@ def resolution_rates(
     # permanently-unresolvable tiles for hazards we don't forecast anymore.
     blocked_filter = ""
     if not include_blocked:
-        blocked_filter = (
-            "AND UPPER(q.hazard_code) NOT IN ('DI', 'HW', 'CU', 'ACO')"
-        )
+        blocked_filter = _blocked_hazard_filter("q")
 
     # The resolution pipeline's calendar cutoff is the previous complete
     # month (see pythia/tools/compute_resolutions.py). A question's earliest

@@ -77,6 +77,20 @@ def _test_filter(include_test: bool, alias: str = "") -> str:
     return f" AND COALESCE({prefix}is_test, FALSE) = FALSE"
 
 
+#: Hazards Fred no longer forecasts (see BLOCKED_HAZARDS in
+#: horizon_scanner/db_writer.py, which the API must not import). Their legacy
+#: questions can never resolve, so every dashboard reader of coverage or
+#: scores leaves them out.
+BLOCKED_HAZARD_CODES = ("DI", "HW", "CU", "ACO")
+
+
+def _blocked_hazard_filter(alias: str = "q") -> str:
+    """`` AND`` clause excluding blocked hazards on a questions alias."""
+    prefix = f"{alias}." if alias else ""
+    codes = ", ".join(f"'{c}'" for c in BLOCKED_HAZARD_CODES)
+    return f" AND UPPER(COALESCE({prefix}hazard_code, '')) NOT IN ({codes})"
+
+
 def _test_filter_for(
     con: duckdb.DuckDBPyConnection,
     table: str,

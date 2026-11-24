@@ -294,3 +294,46 @@ def voting_ensemble_model_ids() -> List[str]:
             continue
         out.append(entry["model_id"])
     return out
+
+
+#: The stable ``model_name`` under which the Track 2 single-model forecast is
+#: stored in forecasts_ensemble / forecasts_raw / scores, whatever model backs
+#: the ``track2_spd`` role (forecaster/cli.py writes this literal).
+TRACK2_MODEL_NAME = "track2_flash"
+
+
+def stored_model_name(model_id: str, display_name: Optional[str] = None) -> str:
+    """The ``model_name`` an ensemble member's rows carry in scores.
+
+    Mirrors ``forecaster.providers._provider_display_name`` (an explicit
+    ``display_name`` in config wins, else the model id with ``/`` replaced),
+    which the API process must not import. A test holds the two together.
+    """
+    if isinstance(display_name, str) and display_name.strip():
+        return display_name.strip()
+    return str(model_id or "").replace("/", "-")
+
+
+def active_scored_models() -> List[Dict[str, str]]:
+    """The models the current profile forecasts with, as scores names them.
+
+    One entry per voting ensemble member (role ``ensemble``) and one for the
+    Track 2 model (role ``track2``, stored as :data:`TRACK2_MODEL_NAME`).
+    Each entry: ``{"model_id", "model_name", "role"}``.
+    """
+    out: List[Dict[str, str]] = []
+    voting = set(voting_ensemble_model_ids())
+    for entry in get_ensemble_resolved():
+        mid = entry.get("model_id") or ""
+        if mid not in voting:
+            continue
+        out.append({
+            "model_id": mid,
+            "model_name": stored_model_name(mid, entry.get("display_name")),
+            "role": "ensemble",
+        })
+    t2 = get_role_model("track2_spd")
+    if t2:
+        _, t2_id = split_model_ref(t2)
+        out.append({"model_id": t2_id, "model_name": TRACK2_MODEL_NAME, "role": "track2"})
+    return out
