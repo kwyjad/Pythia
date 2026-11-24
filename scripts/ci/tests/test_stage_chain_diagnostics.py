@@ -131,12 +131,18 @@ def test_a_missing_stage_health_is_a_named_gap_not_a_crash(tmp_path):
 def test_publish_post_records_the_cycle_zip(tmp_path):
     cyc = tmp_path / "cycle_out"
     cyc.mkdir()
-    (cyc / "cycle_diagnostics__2026-11-14__1.zip").write_bytes(b"PK" + b"x" * 98)
+    import zipfile
+
+    zpath = cyc / "cycle_diagnostics__2026-11-14__1.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("CYCLE_SUMMARY.md", "# Cycle summary\n")
     out = tmp_path / "d" / "publish_post.json"
     cd.main(["publish-post", "--cycle-dir", str(cyc), "--out", str(out)])
     payload = json.loads(out.read_text())
     assert payload["cycle_zip"] == "cycle_diagnostics__2026-11-14__1.zip"
-    assert payload["cycle_zip_bytes"] == 100
+    assert payload["cycle_zip_bytes"] == zpath.stat().st_size
+    # The summary is inside the zip, never beside it (24 Nov 2026 read false).
+    assert payload["cycle_summary_written"] is True
 
 
 # ---------------------------------------------------------------------------
