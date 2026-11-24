@@ -1,0 +1,444 @@
+{
+  "stage": "sibyl",
+  "hs_run_id": "hs_20261113T035247",
+  "fc_run_id": "",
+  "since": "2026-11-14 00:06:28",
+  "grounding": {
+    "available": true,
+    "rc": {
+      "n_calls": 0,
+      "by_model": {},
+      "n_no_backend": 0,
+      "no_backend_by_reason": {},
+      "no_backend_pct": 0.0
+    },
+    "triage": {
+      "n_calls": 0,
+      "by_model": {},
+      "n_no_backend": 0,
+      "no_backend_by_reason": {},
+      "no_backend_pct": 0.0
+    }
+  },
+  "rc_levels": {
+    "available": true,
+    "n_rows": 480,
+    "n_not_assessed": 132,
+    "n_assessed": 348,
+    "by_level": {
+      "0": 406,
+      "1": 37,
+      "2": 34,
+      "3": 3
+    },
+    "by_level_assessed": {
+      "0": 274,
+      "1": 37,
+      "2": 34,
+      "3": 3
+    },
+    "by_track": {
+      "(null)": 379,
+      "1": 74,
+      "2": 27
+    }
+  },
+  "is_test": {
+    "scoped": true,
+    "per_table": {
+      "hs_runs": {
+        "false": 1
+      },
+      "hs_triage": {
+        "false": 480
+      },
+      "llm_calls": {
+        "false": 2958
+      },
+      "hs_hazard_tail_packs": {
+        "false": 578
+      },
+      "hs_adversarial_checks": {
+        "false": 73
+      }
+    },
+    "distinct_values": [
+      "false"
+    ],
+    "consistent": true,
+    "expected": null,
+    "matches_expected": null
+  },
+  "cost": {
+    "available": true,
+    "since": "2026-11-14 00:06:28",
+    "run_scoped": true,
+    "run_total": {
+      "n_calls": 2958,
+      "cost_usd": 46.5299,
+      "tokens": 18600575
+    },
+    "stage_total": {
+      "n_calls": 781,
+      "cost_usd": 25.7647,
+      "tokens": 7081802
+    },
+    "run_by_phase": [
+      {
+        "key": "sibyl",
+        "n_calls": 780,
+        "cost_usd": 23.6913,
+        "tokens": 6642238
+      },
+      {
+        "key": "spd_v2",
+        "n_calls": 328,
+        "cost_usd": 9.1855,
+        "tokens": 4735880
+      },
+      {
+        "key": "hs_triage",
+        "n_calls": 1448,
+        "cost_usd": 8.0949,
+        "tokens": 5349993
+      },
+      {
+        "key": "binary_v2",
+        "n_calls": 286,
+        "cost_usd": 2.5041,
+        "tokens": 963738
+      },
+      {
+        "key": "interpreter",
+        "n_calls": 1,
+        "cost_usd": 2.0733,
+        "tokens": 439564
+      },
+      {
+        "key": "scenario_v2",
+        "n_calls": 115,
+        "cost_usd": 0.9807,
+        "tokens": 469162
+      }
+    ],
+    "stage_by_phase": [
+      {
+        "key": "sibyl",
+        "n_calls": 780,
+        "cost_usd": 23.6913,
+        "tokens": 6642238
+      },
+      {
+        "key": "interpreter",
+        "n_calls": 1,
+        "cost_usd": 2.0733,
+        "tokens": 439564
+      }
+    ],
+    "stage_by_call_type": [
+      {
+        "key": "interpreter_combined",
+        "n_calls": 1,
+        "cost_usd": 2.0733,
+        "tokens": 439564
+      },
+      {
+        "key": "sibyl_trial0_step4",
+        "n_calls": 15,
+        "cost_usd": 1.3545,
+        "tokens": 345448
+      },
+      {
+        "key": "sibyl_trial0_step6",
+        "n_calls": 15,
+        "cost_usd": 1.3185,
+        "tokens": 415928
+      },
+      {
+        "key": "sibyl_trial0_step2",
+        "n_calls": 15,
+        "cost_usd": 1.2966,
+        "tokens": 282783
+      },
+      {
+        "key": "sibyl_trial0_step5",
+        "n_calls": 15,
+        "cost_usd": 1.2753,
+        "tokens": 366666
+      },
+      {
+        "key": "sibyl_trial1_step4",
+        "n_calls": 13,
+        "cost_usd": 1.2593,
+        "tokens": 291984
+      },
+      {
+        "key": "sibyl_trial1_step7",
+        "n_calls": 14,
+        "cost_usd": 1.2369,
+        "tokens": 409448
+      },
+      {
+        "key": "sibyl_trial0_step7",
+        "n_calls": 14,
+        "cost_usd": 1.1884,
+        "tokens": 419903
+      },
+      {
+        "key": "sibyl_trial0_step3",
+        "n_calls": 15,
+        "cost_usd": 1.1783,
+        "tokens": 267906
+      },
+      {
+        "key": "sibyl_trial1_step6",
+        "n_calls": 13,
+        "cost_usd": 1.143,
+        "tokens": 337627
+      },
+      {
+        "key": "sibyl_trial1_step3",
+        "n_calls": 13,
+        "cost_usd": 1.1243,
+        "tokens": 231443
+      },
+      {
+        "key": "sibyl_trial1_step2",
+        "n_calls": 13,
+        "cost_usd": 1.1184,
+        "tokens": 223099
+      },
+      {
+        "key": "sibyl_trial1_step5",
+        "n_calls": 13,
+        "cost_usd": 1.0487,
+        "tokens": 287807
+      },
+      {
+        "key": "sibyl_trial0_step1",
+        "n_calls": 15,
+        "cost_usd": 0.8543,
+        "tokens": 120152
+      },
+      {
+        "key": "sibyl_trial0_search",
+        "n_calls": 160,
+        "cost_usd": 0.8,
+        "tokens": 0
+      },
+      {
+        "key": "sibyl_trial1_search",
+        "n_calls": 146,
+        "cost_usd": 0.73,
+        "tokens": 0
+      },
+      {
+        "key": "sibyl_trial1_step8",
+        "n_calls": 9,
+        "cost_usd": 0.7291,
+        "tokens": 270601
+      },
+      {
+        "key": "sibyl_trial0_step8",
+        "n_calls": 7,
+        "cost_usd": 0.6014,
+        "tokens": 225564
+      },
+      {
+        "key": "sibyl_trial1_step1",
+        "n_calls": 13,
+        "cost_usd": 0.6008,
+        "tokens": 79747
+      },
+      {
+        "key": "sibyl_trial2_search",
+        "n_calls": 79,
+        "cost_usd": 0.395,
+        "tokens": 0
+      },
+      {
+        "key": "sibyl_trial2_step11",
+        "n_calls": 5,
+        "cost_usd": 0.3253,
+        "tokens": 123940
+      },
+      {
+        "key": "sibyl_trial2_step8",
+        "n_calls": 6,
+        "cost_usd": 0.3201,
+        "tokens": 122894
+      },
+      {
+        "key": "sibyl_trial2_step12",
+        "n_calls": 5,
+        "cost_usd": 0.3164,
+        "tokens": 130607
+      },
+      {
+        "key": "sibyl_trial2_step10",
+        "n_calls": 5,
+        "cost_usd": 0.3068,
+        "tokens": 120166
+      },
+      {
+        "key": "sibyl_trial2_step7",
+        "n_calls": 6,
+        "cost_usd": 0.3041,
+        "tokens": 108414
+      },
+      {
+        "key": "sibyl_trial0_extract",
+        "n_calls": 44,
+        "cost_usd": 0.3036,
+        "tokens": 251058
+      },
+      {
+        "key": "sibyl_trial2_step9",
+        "n_calls": 5,
+        "cost_usd": 0.2848,
+        "tokens": 114165
+      },
+      {
+        "key": "sibyl_trial2_step6",
+        "n_calls": 6,
+        "cost_usd": 0.2773,
+        "tokens": 104593
+      },
+      {
+        "key": "sibyl_trial1_extract",
+        "n_calls": 33,
+        "cost_usd": 0.2672,
+        "tokens": 225799
+      },
+      {
+        "key": "sibyl_trial2_extract",
+        "n_calls": 32,
+        "cost_usd": 0.2625,
+        "tokens": 220133
+      },
+      {
+        "key": "sibyl_trial2_step5",
+        "n_calls": 6,
+        "cost_usd": 0.2524,
+        "tokens": 89201
+      },
+      {
+        "key": "sibyl_trial2_step4",
+        "n_calls": 6,
+        "cost_usd": 0.2302,
+        "tokens": 82932
+      },
+      {
+        "key": "sibyl_trial2_step3",
+        "n_calls": 6,
+        "cost_usd": 0.2195,
+        "tokens": 65060
+      },
+      {
+        "key": "sibyl_trial1_step9",
+        "n_calls": 3,
+        "cost_usd": 0.2195,
+        "tokens": 93362
+      },
+      {
+        "key": "sibyl_trial2_step2",
+        "n_calls": 6,
+        "cost_usd": 0.207,
+        "tokens": 71050
+      },
+      {
+        "key": "sibyl_trial2_step1",
+        "n_calls": 6,
+        "cost_usd": 0.1154,
+        "tokens": 35922
+      },
+      {
+        "key": "sibyl_trial1_step10",
+        "n_calls": 1,
+        "cost_usd": 0.0866,
+        "tokens": 37324
+      },
+      {
+        "key": "sibyl_trial0_step9",
+        "n_calls": 1,
+        "cost_usd": 0.0748,
+        "tokens": 34294
+      },
+      {
+        "key": "sibyl_trial0_step10",
+        "n_calls": 1,
+        "cost_usd": 0.0649,
+        "tokens": 35218
+      }
+    ],
+    "stage_by_model": [
+      {
+        "key": "claude-opus-5-5",
+        "n_calls": 219,
+        "cost_usd": 19.8471,
+        "tokens": 5215868
+      },
+      {
+        "key": "gpt-6-sol",
+        "n_calls": 68,
+        "cost_usd": 3.1593,
+        "tokens": 1168944
+      },
+      {
+        "key": "brave-web-search",
+        "n_calls": 385,
+        "cost_usd": 1.925,
+        "tokens": 0
+      },
+      {
+        "key": "claude-haiku-4-5-20251001",
+        "n_calls": 109,
+        "cost_usd": 0.8333,
+        "tokens": 696990
+      }
+    ]
+  },
+  "sibyl": {
+    "available": true,
+    "sibyl_run_id": "sibyl_1794614792427",
+    "model": "claude-opus-5-5",
+    "k": 2,
+    "aggregation": "linear_pool",
+    "run_hard_cap_usd": 25.0,
+    "budget_capped": false,
+    "run_cost_usd": 23.6913,
+    "opus_cost_usd": 17.7737,
+    "brave_cost_usd": 1.53,
+    "n_selected": 15,
+    "n_forecast": 15,
+    "n_skipped": 0,
+    "time_capped": false,
+    "by_status": {
+      "ok": 15
+    },
+    "evidence_table": {
+      "run_rows": 732,
+      "run_chars": 5967243,
+      "table_rows": 1476,
+      "table_chars": 13956968
+    },
+    "tools": {
+      "n_search_calls": 351,
+      "n_search_failed": 13,
+      "n_breaker_trips": 0,
+      "n_docs_read": 149,
+      "search_fail_share": 0.037,
+      "degraded_limit": 0.2
+    },
+    "degraded": false,
+    "research_depth": {
+      "median_docs_per_trial": 5.0,
+      "share_docs_wikipedia": 0.0738255033557047,
+      "share_trials_under_doc_gate": 0.0,
+      "steps_per_trial": 7.75,
+      "tool_calls_per_trial": 19.142857142857142,
+      "n_submit_gate_unmet": 0
+    },
+    "depth_warnings": []
+  }
+}

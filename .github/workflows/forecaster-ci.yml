@@ -159,6 +159,9 @@ on:
       - "scripts/ci/tests/test_drive_archive.py"
       - "scripts/ci/resolver_review_inputs.py"
       - "scripts/ci/tests/test_resolver_review_inputs.py"
+      - "scripts/ci/forecast_review_inputs.py"
+      - "scripts/ci/tests/test_forecast_review_inputs.py"
+      - "scripts/ci/tests/fixtures/forecast_review/**"
       - ".github/workflows/archive_to_drive.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
       - ".github/actions/download-canonical-db/**"
@@ -482,6 +485,7 @@ jobs:
             scripts/ci/tests/test_cycle_diagnostics.py \
             scripts/ci/tests/test_drive_archive.py \
             scripts/ci/tests/test_resolver_review_inputs.py \
+            scripts/ci/tests/test_forecast_review_inputs.py \
             pythia/tests/test_secret_scrub.py \
             forecaster/tests/test_gemini_key_header.py
 

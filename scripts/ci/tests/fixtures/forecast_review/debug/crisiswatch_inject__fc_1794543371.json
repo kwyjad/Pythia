@@ -1,0 +1,286 @@
+{
+  "available": true,
+  "n_rows": 1008,
+  "editions_present": [
+    {
+      "edition": "2025-09",
+      "n_countries": 80
+    },
+    {
+      "edition": "2025-10",
+      "n_countries": 78
+    },
+    {
+      "edition": "2025-11",
+      "n_countries": 72
+    },
+    {
+      "edition": "2025-12",
+      "n_countries": 74
+    },
+    {
+      "edition": "2026-01",
+      "n_countries": 75
+    },
+    {
+      "edition": "2026-02",
+      "n_countries": 75
+    },
+    {
+      "edition": "2026-03",
+      "n_countries": 80
+    },
+    {
+      "edition": "2026-04",
+      "n_countries": 79
+    },
+    {
+      "edition": "2026-06",
+      "n_countries": 79
+    },
+    {
+      "edition": "2026-07",
+      "n_countries": 80
+    },
+    {
+      "edition": "2026-08",
+      "n_countries": 79
+    },
+    {
+      "edition": "2026-09",
+      "n_countries": 82
+    },
+    {
+      "edition": "2026-10",
+      "n_countries": 75
+    }
+  ],
+  "n_editions": 13,
+  "latest_edition": "2026-10",
+  "latest_edition_age_months": 1,
+  "edition_span": "2025-09 .. 2026-10",
+  "expected_edition": "2026-10",
+  "expected_edition_held": true,
+  "editions_missing_last_12": [],
+  "editions_known_gaps": [
+    "2026-05"
+  ],
+  "arrow_counts": {
+    "unchanged": 864,
+    "deteriorated": 121,
+    "improved": 23
+  },
+  "n_countries_with_arrow": 1008,
+  "n_countries_without_arrow": 0,
+  "n_alerts": 106,
+  "alert_counts": {
+    "conflict_risk": 95,
+    "resolution_opportunity": 11
+  },
+  "ace_countries_forecast": 39,
+  "ace_countries_without_crisiswatch_row": 0,
+  "ace_countries_missing_iso3s": [],
+  "ace_country_editions": [
+    {
+      "iso3": "AFG",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "BFA",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "BRA",
+      "edition": "2026-09",
+      "older_than_expected": true
+    },
+    {
+      "iso3": "CAF",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "CMR",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "COD",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "COL",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "DZA",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "ECU",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "ERI",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "ETH",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "GTM",
+      "edition": "2026-02",
+      "older_than_expected": true
+    },
+    {
+      "iso3": "HTI",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "IND",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "IRN",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "IRQ",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "ISR",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "JOR",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "KEN",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "LBN",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "LBY",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "MAR",
+      "edition": "2025-10",
+      "older_than_expected": true
+    },
+    {
+      "iso3": "MEX",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "MLI",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "MMR",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "MOZ",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "NER",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "NGA",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "PAK",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "PSE",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "RUS",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "SDN",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "SOM",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "SSD",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "SYR",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "TCD",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "UKR",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "VEN",
+      "edition": "2026-10",
+      "older_than_expected": false
+    },
+    {
+      "iso3": "YEM",
+      "edition": "2026-10",
+      "older_than_expected": false
+    }
+  ],
+  "ace_countries_older_than_expected": [
+    "BRA (2026-09)",
+    "GTM (2026-02)",
+    "MAR (2025-10)"
+  ],
+  "n_ace_questions_without_crisiswatch": 0
+}

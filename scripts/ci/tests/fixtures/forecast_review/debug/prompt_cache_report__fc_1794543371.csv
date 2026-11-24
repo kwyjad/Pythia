@@ -1,0 +1,19 @@
+phase,provider,model_id,n_calls,n_batched_calls,prompt_tokens,cache_read_input_tokens,cache_creation_input_tokens,cached_tokens,cache_hit_rate_pct,estimated_saved_usd,prompt_v3_order,prompt_cache_enabled,batch_prompt_cache,flags_source,note
+sibyl,anthropic,claude-opus-5-5,218,0,4326952,2407037,625623,0,55.6,9.146741,1,1,1,stage_context,
+hs_triage,google,gemini-3.6-flash,651,578,4248731,0,0,0,0.0,0.0,1,1,1,stage_context,Gemini batch mode is not eligible for implicit caching — zero reads expected
+sibyl,openai,gpt-6-sol,68,0,1066270,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+spd_v2,google,gemini-3.6-flash,92,92,827531,0,0,0,0.0,0.0,1,1,1,stage_context,Gemini batch mode is not eligible for implicit caching — zero reads expected
+spd_v2,anthropic,claude-opus-5-5,59,59,795783,228416,58569,0,28.7,0.867981,1,1,1,stage_context,
+sibyl,anthropic,claude-haiku-4-5-20251001,109,0,662907,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+spd_v2,google,gemini-3.1-pro-preview,59,59,557946,0,0,0,0.0,0.0,1,1,1,stage_context,Gemini batch mode is not eligible for implicit caching — zero reads expected
+spd_v2,openai,gpt-6-luna,59,59,503089,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+spd_v2,openai,gpt-6-sol,59,59,503065,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+interpreter,anthropic,claude-opus-5-5,1,0,419872,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+scenario_v2,google,gemini-3.6-flash,115,0,259552,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+binary_v2,anthropic,claude-opus-5-5,56,56,145426,60113,3451,0,41.3,0.228429,1,1,1,stage_context,
+binary_v2,google,gemini-3.6-flash,62,62,111315,0,0,0,0.0,0.0,1,1,1,stage_context,Gemini batch mode is not eligible for implicit caching — zero reads expected
+binary_v2,google,gemini-3.1-pro-preview,56,56,101270,0,0,0,0.0,0.0,1,1,1,stage_context,Gemini batch mode is not eligible for implicit caching — zero reads expected
+binary_v2,openai,gpt-6-sol,56,56,91536,0,0,0,0.0,0.0,1,1,1,stage_context,no cache reads — a flag being on is not evidence the cache worked
+binary_v2,openai,gpt-6-luna,56,56,91536,0,0,1585,1.7,0.000143,1,1,1,stage_context,
+hs_triage,brave,brave-web-search,797,0,0,0,0,0,0.0,0.0,1,1,1,stage_context,
+sibyl,brave,brave-web-search,385,0,0,0,0,0,0.0,0.0,1,1,1,stage_context,

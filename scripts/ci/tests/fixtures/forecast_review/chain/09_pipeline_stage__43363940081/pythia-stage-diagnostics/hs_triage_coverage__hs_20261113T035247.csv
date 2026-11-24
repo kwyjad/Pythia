@@ -1,0 +1,4 @@
+iso3,rc_status,triage_status,primary_model_id,fallback_model_id,final_status
+AFG,ok,ok,gemini-3.6-flash,gpt-6-sol,ok
+PER,ok,ok,gemini-3.6-flash,gpt-6-sol,ok
+SDN,ok,ok,gemini-3.6-flash,gpt-6-sol,ok

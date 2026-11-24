@@ -1,0 +1,115 @@
+{
+  "hs_run_id": "hs_20261113T035247",
+  "forecaster_run_id": "fc_1794543371",
+  "generated_at": "2026-11-14 01:00:27 UTC",
+  "models": {
+    "spd_track1_ensemble": [
+      "claude-opus-5-5",
+      "gemini-3.1-pro-preview",
+      "gemini-3.6-flash",
+      "gpt-6-luna",
+      "gpt-6-sol"
+    ]
+  },
+  "env_vars": {
+    "PYTHIA_HS_FALLBACK_MODEL_SPECS": "<unset>",
+    "PYTHIA_WEB_RESEARCH_MODEL_ID": "<unset>",
+    "PYTHIA_RETRIEVER_ENABLED": "<unset>",
+    "PYTHIA_SPD_WEB_SEARCH_ENABLED": "<unset>",
+    "PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED": "<unset>",
+    "PYTHIA_SPD_V2_USE_BAYESMC": "<unset>",
+    "PYTHIA_SPD_V2_WRITE_BOTH": "<unset>",
+    "PYTHIA_SPD_V2_DUAL_RUN": "<unset>",
+    "PYTHIA_CONFIG_PROFILE": "<unset>",
+    "PYTHIA_ADVERSARIAL_CHECK_ENABLED": "<unset>",
+    "PYTHIA_HS_ADVERSARIAL_MAX_PER_COUNTRY": "<unset>",
+    "PYTHIA_FORECASTER_SELF_SEARCH": "<unset>",
+    "PYTHIA_MODEL_SELF_SEARCH_ENABLED": "<unset>"
+  },
+  "actual_models_used": {
+    "binary_v2": [
+      {
+        "provider": "anthropic",
+        "model_id": "claude-opus-5-5"
+      },
+      {
+        "provider": "google",
+        "model_id": "gemini-3.1-pro-preview"
+      },
+      {
+        "provider": "google",
+        "model_id": "gemini-3.6-flash"
+      },
+      {
+        "provider": "openai",
+        "model_id": "gpt-6-luna"
+      },
+      {
+        "provider": "openai",
+        "model_id": "gpt-6-sol"
+      }
+    ],
+    "hs_triage": [
+      {
+        "provider": "brave",
+        "model_id": "brave-web-search"
+      },
+      {
+        "provider": "google",
+        "model_id": "gemini-3.6-flash"
+      }
+    ],
+    "interpreter": [
+      {
+        "provider": "anthropic",
+        "model_id": "claude-opus-5-5"
+      }
+    ],
+    "scenario_v2": [
+      {
+        "provider": "google",
+        "model_id": "gemini-3.6-flash"
+      }
+    ],
+    "sibyl": [
+      {
+        "provider": "anthropic",
+        "model_id": "claude-haiku-4-5-20251001"
+      },
+      {
+        "provider": "anthropic",
+        "model_id": "claude-opus-5-5"
+      },
+      {
+        "provider": "brave",
+        "model_id": "brave-web-search"
+      },
+      {
+        "provider": "openai",
+        "model_id": "gpt-6-sol"
+      }
+    ],
+    "spd_v2": [
+      {
+        "provider": "anthropic",
+        "model_id": "claude-opus-5-5"
+      },
+      {
+        "provider": "google",
+        "model_id": "gemini-3.1-pro-preview"
+      },
+      {
+        "provider": "google",
+        "model_id": "gemini-3.6-flash"
+      },
+      {
+        "provider": "openai",
+        "model_id": "gpt-6-luna"
+      },
+      {
+        "provider": "openai",
+        "model_id": "gpt-6-sol"
+      }
+    ]
+  }
+}

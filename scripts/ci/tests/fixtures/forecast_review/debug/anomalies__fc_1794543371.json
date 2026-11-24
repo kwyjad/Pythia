@@ -1,0 +1,48 @@
+{
+  "hs_run_id": "hs_20261113T035247",
+  "forecaster_run_id": "fc_1794543371",
+  "counts": {
+    "fail": 0,
+    "warn": 3,
+    "info": 3
+  },
+  "anomalies": [
+    {
+      "severity": "warn",
+      "subsystem": "LLM Calls",
+      "description": "2958 calls, 34 errors (1.1%) [sibyl/brave-web-search: 34]",
+      "evidence_file": "health_report__fc_1794543371.json"
+    },
+    {
+      "severity": "warn",
+      "subsystem": "connector",
+      "description": "Conflict displacement, extracted (ladder rung 2) is 73 days old (warn threshold 60d)",
+      "evidence_file": "connector_freshness__fc_1794543371.csv",
+      "source": "Conflict displacement, extracted (ladder rung 2)"
+    },
+    {
+      "severity": "warn",
+      "subsystem": "crisiswatch",
+      "description": "3 ACE question countries read a CrisisWatch entry older than the 2026-10 edition: BRA (2026-09), GTM (2026-02), MAR (2025-10)",
+      "evidence_file": "crisiswatch_inject__fc_1794543371.json"
+    },
+    {
+      "severity": "info",
+      "subsystem": "bundle",
+      "description": "poller runs capped at 40; older ticks not captured",
+      "evidence_file": "workflow_logs/INDEX.json"
+    },
+    {
+      "severity": "info",
+      "subsystem": "bundle",
+      "description": "workflow log for run 43531717339 could not be fetched: HTTPError: 404 Client Error: Not Found for url: https://api.github.com/repos/kwyjad/Pythia/actions/runs/43531717339/logs",
+      "evidence_file": "workflow_logs/current-run__43531717339.txt"
+    },
+    {
+      "severity": "info",
+      "subsystem": "crisiswatch",
+      "description": "the table holds 13 editions spanning 2025-09 .. 2026-10; per-country rows are a mix of editions; the only gaps are registered: 2026-05",
+      "evidence_file": "connector_freshness__fc_1794543371.csv"
+    }
+  ]
+}

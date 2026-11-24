@@ -1,0 +1,12 @@
+question_id,iso3,hazard_code,metric,window_start_date,target_month,horizon_end_month,triage_tier,spd_status,scenario_status,wall_ms,compute_ms,queue_ms,n_llm_calls,n_batched_calls,cost_usd,n_spd_models_expected,n_spd_models_ok,missing_model_ids,research_grounded,n_verified_sources,n_unverified_sources,triage_score,rc_likelihood,rc_level,rc_direction,track
+AFG_ACE_FATALITIES_2026-12,AFG,ACE,FATALITIES,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,389826,8340,381486,6,5,0.17793504999999998,5,5,[],False,0,0,,0.42,2,up,1
+AFG_DR_EVENT_OCCURRENCE_2026-12,AFG,DR,EVENT_OCCURRENCE,2026-12-01,2026-12,2027-05,priority,ok,skipped_by_design: track_2,0,0,0,1,1,0.0028616249999999996,1,0,"[""gemini-3.6-flash""]",False,0,0,0.72,0.05,,unclear,2
+AFG_DR_PHASE3PLUS_IN_NEED_2026-12,AFG,DR,PHASE3PLUS_IN_NEED,2026-12-01,2026-12,2027-05,priority,ok,skipped_by_design: track_2,0,0,0,1,1,0.00821175,1,0,"[""gemini-3.6-flash""]",False,0,0,0.72,0.05,,unclear,2
+AFG_FL_EVENT_OCCURRENCE_2026-12,AFG,FL,EVENT_OCCURRENCE,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,312841,12437,300404,6,5,0.05231535,5,5,[],False,0,0,,0.15,1,up,1
+AFG_FL_PA_2026-12,AFG,FL,PA,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,391215,9168,382047,6,5,0.16289475,5,5,[],False,0,0,,0.15,1,up,1
+PER_DR_EVENT_OCCURRENCE_2026-12,PER,DR,EVENT_OCCURRENCE,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,246978,11544,235434,6,5,0.0552747,5,5,[],False,0,0,,0.4,2,up,1
+PER_FL_EVENT_OCCURRENCE_2026-12,PER,FL,EVENT_OCCURRENCE,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,254193,15309,238884,6,5,0.055761574999999994,5,5,[],False,0,0,,0.65,3,up,1
+PER_FL_PA_2026-12,PER,FL,PA,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,178142,16229,161913,6,5,0.160015475,5,5,[],False,0,0,,0.65,3,up,1
+SDN_ACE_FATALITIES_2026-12,SDN,ACE,FATALITIES,2026-12-01,2026-12,2027-05,priority,ok,skipped_by_design: track_2,0,0,0,1,1,0.008811,1,0,"[""gemini-3.6-flash""]",False,0,0,0.95,0.1,,up,2
+SDN_DR_EVENT_OCCURRENCE_2026-12,SDN,DR,EVENT_OCCURRENCE,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,237963,11227,226736,6,5,0.057647875,5,5,[],False,0,0,,0.42,2,up,1
+SDN_DR_PHASE3PLUS_IN_NEED_2026-12,SDN,DR,PHASE3PLUS_IN_NEED,2026-12-01,2026-12,2027-05,not_triaged,ok,generated,290101,12953,277148,6,5,0.15228272499999998,5,5,[],False,0,0,,0.42,2,up,1

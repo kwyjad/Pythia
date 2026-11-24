@@ -1,0 +1,13 @@
+{
+  "n_question_months_short": 0,
+  "n_question_months": 552,
+  "n_cells_expected": 2058,
+  "n_cells_missing": 0,
+  "by_model": {},
+  "short_question_months": [],
+  "binary": {
+    "n_cells_expected": 2052,
+    "n_cells_missing": 0,
+    "by_model": {}
+  }
+}

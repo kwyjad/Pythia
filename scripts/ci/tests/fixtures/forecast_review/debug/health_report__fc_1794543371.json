@@ -1,0 +1,327 @@
+{
+ "health_checks": [
+  {
+   "subsystem": "DB Provenance",
+   "status": "OK",
+   "detail": "sha256=dbc8b4cfc4aa6cb7..."
+  },
+  {
+   "subsystem": "HS Triage",
+   "status": "OK",
+   "detail": "480/480 rows"
+  },
+  {
+   "subsystem": "ACE/PA Eligibility",
+   "status": "OK",
+   "detail": "source=rule; asked for 9 ACE countries (HTI, MLI, MMR, MOZ, PSE, RUS, SOM, SSD, UKR), not asked for 30 (displacement not forecast); admitted on IDMC: HTI, MLI, MMR, MOZ, PSE, RUS, SOM, UKR; on extracted OCHA/UN figures: SSD"
+  },
+  {
+   "subsystem": "Phase 3+ Eligibility",
+   "status": "OK",
+   "detail": "source=rule; bound 9 months; asked for 20, dropped 4 whose source stopped publishing: ETH (newest Phase 3+ Current Situation row 2026-01 (FEWS NET) is 11 months before 2026-12, more than 9); GHA (newest Phase 3+ Current Situation row 2025-12 (IPC) is 12 months before 2026-12, more than 9); NAM (newest Phase 3+ Current Situation row 2025-09 (IPC) is 15 months before 2026-12, more than 9); NIC (newest Phase 3+ Current Situation row 2024-11 (FEWS NET) is 25 months before 2026-12, more than 9)"
+  },
+  {
+   "subsystem": "Sibyl",
+   "status": "OK",
+   "detail": "sibyl_1794614792427: 15 of 15 forecast, $23.69; cost gate ok (1.01x the stated $1.40 a question)"
+  },
+  {
+   "subsystem": "Interpreter",
+   "status": "OK",
+   "detail": "combined v1 ok"
+  },
+  {
+   "subsystem": "Question Provenance",
+   "status": "OK",
+   "detail": "every production question names a production scan"
+  },
+  {
+   "subsystem": "CrisisWatch",
+   "status": "OK",
+   "detail": "1008 rows over 13 edition(s); 75 countries in the newest; 121 deteriorated, 23 improved; 106 alerts; latest: 2026-10; editions in table: 2025-09, 2025-10, 2025-11, 2025-12, 2026-01, 2026-02, 2026-03, 2026-04, 2026-06, 2026-07, 2026-08, 2026-09, 2026-10"
+  },
+  {
+   "subsystem": "Food Security",
+   "status": "OK",
+   "detail": "41 FEWS NET + 25 IPC API countries with data"
+  },
+  {
+   "subsystem": "RC Grounding",
+   "status": "OK",
+   "detail": "348 calls, 3480 verified sources"
+  },
+  {
+   "subsystem": "Triage Grounding",
+   "status": "OK",
+   "detail": "230 calls, 2300 verified sources"
+  },
+  {
+   "subsystem": "Adversarial Checks",
+   "status": "OK",
+   "detail": "219 calls, 2190 verified sources"
+  },
+  {
+   "subsystem": "Adversarial Synthesis",
+   "status": "OK",
+   "detail": "73 calls, $0.87"
+  },
+  {
+   "subsystem": "Research Grounding",
+   "status": "OK",
+   "detail": "retriever disabled \u2014 using structured data injection (0/154 legacy grounded)"
+  },
+  {
+   "subsystem": "LLM Calls",
+   "status": "WARN",
+   "detail": "2958 calls, 34 errors (1.1%) [sibyl/brave-web-search: 34]"
+  },
+  {
+   "subsystem": "Batch Economics",
+   "status": "OK",
+   "detail": "13 batches \u00b7 0.0% of 1192 requests fell back to sync \u00b7 $14.9111 of $46.5299 at batch tier (68.0% not batch-eligible: search APIs + synchronous phases)"
+  },
+  {
+   "subsystem": "Family Recalibration",
+   "status": "OK",
+   "detail": "ACE/FATALITIES: shadowed (factors fitted under block=None rc=None) \u00b7 ACE/PA: absent (no factors for this family and group) \u00b7 DR/EVENT_OCCURRENCE: absent (nothing recorded on the member rows) \u00b7 DR/PHASE3PLUS_IN_NEED: applied (factors fitted under block=None rc=None) \u00b7 FL/EVENT_OCCURRENCE: absent (nothing recorded on the member rows) \u00b7 FL/PA: applied (factors fitted under block=None rc=None) \u00b7 TC/EVENT_OCCURRENCE: absent (nothing recorded on the member rows) \u00b7 TC/PA: applied (factors fitted under block=None rc=None)"
+  },
+  {
+   "subsystem": "SPD Ensemble",
+   "status": "OK",
+   "detail": "5/5 models"
+  },
+  {
+   "subsystem": "Scenarios",
+   "status": "OK",
+   "detail": "115 generated, 0 failed parse, 39 skipped, 0 missing"
+  }
+ ],
+ "rc_grounding_health": {
+  "n_calls": 348,
+  "n_errors": 0,
+  "n_verified_sources": 3480,
+  "n_no_backend": 0,
+  "no_backend_by_reason": {},
+  "by_provider_model": [
+   {
+    "provider": "brave",
+    "model_id": "brave-web-search",
+    "n_calls": 348,
+    "n_errors": 0,
+    "n_verified_sources": 3480
+   }
+  ]
+ },
+ "triage_grounding_health": {
+  "n_calls": 230,
+  "n_errors": 0,
+  "n_verified_sources": 2300,
+  "n_no_backend": 0,
+  "no_backend_by_reason": {},
+  "by_provider_model": [
+   {
+    "provider": "brave",
+    "model_id": "brave-web-search",
+    "n_calls": 230,
+    "n_errors": 0,
+    "n_verified_sources": 2300
+   }
+  ]
+ },
+ "llm_health": {
+  "by_phase_provider_model": [
+   {
+    "phase": "binary_v2",
+    "provider": "anthropic",
+    "model_id": "claude-opus-5-5",
+    "n_calls": 56,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "binary_v2",
+    "provider": "google",
+    "model_id": "gemini-3.1-pro-preview",
+    "n_calls": 56,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "binary_v2",
+    "provider": "google",
+    "model_id": "gemini-3.6-flash",
+    "n_calls": 62,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "binary_v2",
+    "provider": "openai",
+    "model_id": "gpt-6-luna",
+    "n_calls": 56,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "binary_v2",
+    "provider": "openai",
+    "model_id": "gpt-6-sol",
+    "n_calls": 56,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "hs_triage",
+    "provider": "brave",
+    "model_id": "brave-web-search",
+    "n_calls": 797,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "hs_triage",
+    "provider": "google",
+    "model_id": "gemini-3.6-flash",
+    "n_calls": 651,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "interpreter",
+    "provider": "anthropic",
+    "model_id": "claude-opus-5-5",
+    "n_calls": 1,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "scenario_v2",
+    "provider": "google",
+    "model_id": "gemini-3.6-flash",
+    "n_calls": 115,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "sibyl",
+    "provider": "anthropic",
+    "model_id": "claude-haiku-4-5-20251001",
+    "n_calls": 109,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "sibyl",
+    "provider": "anthropic",
+    "model_id": "claude-opus-5-5",
+    "n_calls": 218,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "sibyl",
+    "provider": "brave",
+    "model_id": "brave-web-search",
+    "n_calls": 385,
+    "n_errors": 34,
+    "error_rate": 0.0883
+   },
+   {
+    "phase": "sibyl",
+    "provider": "openai",
+    "model_id": "gpt-6-sol",
+    "n_calls": 68,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "spd_v2",
+    "provider": "anthropic",
+    "model_id": "claude-opus-5-5",
+    "n_calls": 59,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "spd_v2",
+    "provider": "google",
+    "model_id": "gemini-3.1-pro-preview",
+    "n_calls": 59,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "spd_v2",
+    "provider": "google",
+    "model_id": "gemini-3.6-flash",
+    "n_calls": 92,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "spd_v2",
+    "provider": "openai",
+    "model_id": "gpt-6-luna",
+    "n_calls": 59,
+    "n_errors": 0,
+    "error_rate": 0.0
+   },
+   {
+    "phase": "spd_v2",
+    "provider": "openai",
+    "model_id": "gpt-6-sol",
+    "n_calls": 59,
+    "n_errors": 0,
+    "error_rate": 0.0
+   }
+  ]
+ },
+ "cost_summary": {
+  "by_phase": {
+   "hs_triage": {
+    "total_tokens": 5349993,
+    "total_cost_usd": 8.0949
+   },
+   "spd_v2": {
+    "total_tokens": 4735880,
+    "total_cost_usd": 9.1855
+   },
+   "binary_v2": {
+    "total_tokens": 963738,
+    "total_cost_usd": 2.5041
+   },
+   "scenario_v2": {
+    "total_tokens": 469162,
+    "total_cost_usd": 0.9807
+   },
+   "sibyl": {
+    "total_tokens": 6642238,
+    "total_cost_usd": 23.6913
+   },
+   "interpreter": {
+    "total_tokens": 439564,
+    "total_cost_usd": 2.0733
+   }
+  },
+  "total_tokens": 18600575,
+  "total_cost_usd": 46.5299
+ },
+ "food_security_health": {
+  "fewsnet_countries": 41,
+  "ipc_countries": 25,
+  "countries_without_food_security": [
+   "BWA",
+   "ERI",
+   "GUY",
+   "IDN",
+   "IND",
+   "KHM",
+   "MDA",
+   "MYS",
+   "PAN",
+   "PER",
+   "SRB",
+   "TUR"
+  ]
+ }
+}

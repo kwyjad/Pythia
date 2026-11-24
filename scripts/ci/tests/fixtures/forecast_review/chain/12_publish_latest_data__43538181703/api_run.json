@@ -1,0 +1,16 @@
+{
+  "id": 43538181703,
+  "name": "Publish Latest Data (Release)",
+  "display_title": "Publish Latest Data (Release)",
+  "event": "workflow_dispatch",
+  "status": "completed",
+  "conclusion": "success",
+  "created_at": "2026-11-14T01:03:13Z",
+  "updated_at": "2026-11-14T01:32:33Z",
+  "run_started_at": "2026-11-14T01:03:13Z",
+  "html_url": "https://github.com/kwyjad/Pythia/actions/runs/43538181703",
+  "head_branch": "main",
+  "head_sha": "a1186a087340ed5b2255dbf5824abf65ed88b928",
+  "run_attempt": 1,
+  "actor": "github-actions[bot]"
+}

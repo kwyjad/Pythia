@@ -1,0 +1,11 @@
+rc_shift_arm,hazard_code,metric,n_questions,n_member_forecasts,mean_delta_expected_bucket,mean_delta_modal_mass,mean_delta_entropy_bits
+control,ACE,FATALITIES,9,108,0.1847,-0.2222,0.2332
+control,ACE,PA,1,7,0.439,-0.2121,0.2009
+control,DR,PHASE3PLUS_IN_NEED,12,144,0.1915,-0.0509,-0.0784
+control,FL,PA,10,120,0.534,-0.403,0.6451
+control,TC,PA,2,24,0.279,-0.2254,0.8692
+shift,ACE,FATALITIES,9,108,0.2954,-0.1129,0.1578
+shift,ACE,PA,2,14,0.1461,-0.0687,0.0813
+shift,DR,PHASE3PLUS_IN_NEED,4,48,0.0889,-0.1932,-0.2471
+shift,FL,PA,6,72,-0.0418,-0.0964,0.1079
+shift,TC,PA,3,36,0.691,-0.3121,1.0104

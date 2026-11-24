@@ -1,0 +1,84 @@
+{
+ "available": true,
+ "caveat": "Sibyl reads the open web; the main system reads structured data feeds. Sibyl has no scored track record yet, so where the two disagree the disagreement is a reason to look again, never a reason to prefer one. It is a second reader, not a tiebreaker.",
+ "summary": {
+  "n_covered": 15,
+  "n_more_alarmed": 1,
+  "n_more_cautious": 3,
+  "n_agrees": 11,
+  "n_unsettled": 0,
+  "n_with_novel_evidence": 4
+ },
+ "rows": [
+  {
+   "question_id": "PER_FL_PA_2026-12",
+   "iso3": "PER",
+   "country_name": "Peru",
+   "hazard_name": "Flood",
+   "metric": "PA",
+   "metric_name": "people affected",
+   "status": "ok",
+   "skip_reason": null,
+   "fred_expected": 94913.79173999162,
+   "sibyl_expected": 41209.08482975392,
+   "js_divergence_vs_standard": 0.1402527288103861,
+   "js_divergence_inter_trial": 0.00774057129559743,
+   "volatility_score": 0.35750000000000004,
+   "cost_usd": 1.5621344,
+   "tag": "second opinion is more cautious",
+   "unsettled": false,
+   "novel_evidence": [
+    "Seg\u00fan el Servicio Nacional de Meteorolog\u00eda e Hidrolog\u00eda (Senamhi), el periodo m\u00e1s intenso se presentar\u00eda entre diciembre de 2026 y enero de 2027, aunque podr\u00eda prolongarse hasta parte de febrero.",
+    "los desbordes e inundaciones dejaron un saldo acumulado de m\u00e1s de 1,26 millones de personas afectadas en todo el pa\u00eds, de las cuales 587.120 perdieron sus viviendas."
+   ],
+   "novel_evidence_scope": "disagreement",
+   "evidence_comparable": true
+  },
+  {
+   "question_id": "AFG_ACE_FATALITIES_2026-12",
+   "iso3": "AFG",
+   "country_name": "Afghanistan",
+   "hazard_name": "Armed conflict",
+   "metric": "FATALITIES",
+   "metric_name": "deaths",
+   "status": "ok",
+   "skip_reason": null,
+   "fred_expected": 382.38253471068157,
+   "sibyl_expected": 205.8900583681257,
+   "js_divergence_vs_standard": 0.09905669210057921,
+   "js_divergence_inter_trial": 0.00038920889455215825,
+   "volatility_score": 0.1596,
+   "cost_usd": 1.6755014,
+   "tag": "second opinion is more cautious",
+   "unsettled": false,
+   "novel_evidence": [
+    "Precedent of a three-month lull, June-September 2026",
+    "US Secretary of State Marco Rubio said that Washington was open to helping address Pakistan's concerns about terrorism originating from Afghanistan, noting that \"if there's a productive role for us to play, we'll play it.\""
+   ],
+   "novel_evidence_scope": "disagreement",
+   "evidence_comparable": true
+  },
+  {
+   "question_id": "SDN_DR_PHASE3PLUS_IN_NEED_2026-12",
+   "iso3": "SDN",
+   "country_name": "Sudan",
+   "hazard_name": "Drought",
+   "metric": "PHASE3PLUS_IN_NEED",
+   "metric_name": "people in crisis-level hunger",
+   "status": "ok",
+   "skip_reason": null,
+   "fred_expected": 18663853.590068053,
+   "sibyl_expected": 17603536.938209087,
+   "js_divergence_vs_standard": 0.004751864903812489,
+   "js_divergence_inter_trial": 0.0,
+   "volatility_score": 0.189,
+   "cost_usd": 1.188695,
+   "tag": "second opinion agrees",
+   "unsettled": false,
+   "novel_evidence": [],
+   "novel_evidence_scope": "disagreement",
+   "evidence_comparable": false
+  }
+ ],
+ "carried_forward": []
+}
