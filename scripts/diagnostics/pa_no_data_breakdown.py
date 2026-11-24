@@ -261,8 +261,20 @@ def replay_levers(con, *, iso3: str, ym: str, hazard: str, rulebook) -> dict[str
         "admitted_now": len(base["rung2"]),
         "rejected": base["rejected"],
         "misses": classify_nearest_miss(base["rejected"], admitted),
-        "levers_that_resolve": sorted(name for name, keys in admitted.items() if keys),
+        "levers_that_resolve": resolving_levers(len(base["rung2"]), admitted),
     }
+
+
+def resolving_levers(admitted_now: int, admitted: dict[str, set]) -> list[str]:
+    """Levers that would turn a cell with no admissible figure into one with one.
+
+    A cell the current rules already answer is not resolved BY a lever: its
+    NO_DATA is the freeze keeping an old answer, which no gate change moves.
+    """
+
+    if admitted_now:
+        return []
+    return sorted(name for name, keys in admitted.items() if keys)
 
 
 # ---------------------------------------------------------------------------

@@ -218,3 +218,9 @@ def test_the_debug_bundle_carries_the_headline(db, tmp_path, monkeypatch):
     assert payload["FL"]["no_data_by_detection"]["gdacs_red"] == 1
     assert payload["FL"]["top_nearest_miss_reasons"] == {"outside_reporting_window": 1}
     assert payload["TC"]["no_data"] == 0
+
+
+def test_a_lever_resolves_only_a_cell_the_current_rules_do_not_answer():
+    admitted = {"window": {("a", "x")}, "primary_country": set()}
+    assert nd.resolving_levers(0, admitted) == ["window"]
+    assert nd.resolving_levers(1, admitted) == []
