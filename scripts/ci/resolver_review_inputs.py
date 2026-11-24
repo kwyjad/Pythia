@@ -372,7 +372,9 @@ def _log_has_traceback(path: Path) -> bool:
         return False
 
 
-_STOP = frozenset({"phase", "the", "of", "and", "a", "to", "in", "for", "from", "run", "step"})
+_STOP = frozenset({"phase", "the", "of", "and", "a", "to", "in", "for", "from", "run", "step",
+                   # every PA-machine log is phase25_haz_<...>; its steps say "machine"
+                   "haz"})
 
 
 def _words(text: str) -> set[str]:
@@ -380,8 +382,11 @@ def _words(text: str) -> set[str]:
 
 
 def match_step_logs(step: str, logs: list[Path]) -> list[Path]:
-    """The logs of a step's phase sharing the most words with its name
-    (a word matches another it is a prefix of: ``extract``/``extraction``)."""
+    """The logs of a step's phase that best fit its name: words the log name
+    shares with the step, less words it carries that the step does not (a word
+    matches another it is a prefix of: ``extract``/``extraction``). The penalty
+    is what keeps ``phase4_enso_backfill.log`` off "Backfill missing
+    CrisisWatch editions": it shares "backfill" and names another source."""
     m = re.search(r"phase\s*(\d+)(?:\.(\d+))?", step, re.I)
     if not m:
         return []
@@ -392,8 +397,9 @@ def match_step_logs(step: str, logs: list[Path]) -> list[Path]:
         if not p.name.lower().startswith(prefix + "_") or p.stat().st_size == 0:
             continue
         stem = _words(p.stem.lower().replace("_", " "))
-        score = sum(1 for w in stem if any(x.startswith(w) or w.startswith(x) for x in words))
-        if score:
+        hits = sum(1 for w in stem if any(x.startswith(w) or w.startswith(x) for x in words))
+        score = hits - (len(stem) - hits)
+        if score > 0:
             scored.append((score, p))
     if not scored:
         return []
