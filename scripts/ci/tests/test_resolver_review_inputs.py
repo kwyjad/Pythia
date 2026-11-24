@@ -629,3 +629,40 @@ def test_the_backfill_refuses_a_chain_not_in_drive_and_one_with_no_resolver(tmp_
     out = da.backfill_resolver_review(spec, rclone=rc, work=tmp_path / "bf2", env={})
     assert out["status"] == "no_resolver_update" and rc.copies == []
     assert not (run_dir / "resolver_review").exists()
+
+
+def test_a_zero_second_step_is_matched_to_its_own_logs_only(tmp_path):
+    """The November step names: each Phase 2.6 step to its own log, a
+    phase-level bookkeeping step to none."""
+    names = ("phase26_conflict_extract.log", "phase26_dtm_conflict.log", "phase25_haz_flood.log",
+             "phase4_crisiswatch.log", "phase4_enso.log")
+    for n in names:
+        _w(tmp_path / n, "x")
+    logs = sorted(tmp_path.iterdir())
+
+    def got(step):
+        return [p.name for p in rri.match_step_logs(step, logs)]
+
+    assert got("Phase 2.6: Conflict displacement, ReliefWeb extraction (trailing months)") == [
+        "phase26_conflict_extract.log"]
+    assert got("Phase 2.6: Conflict displacement, IOM DTM lower bounds") == ["phase26_dtm_conflict.log"]
+    assert got("Phase 2.5: Compute machine months (trailing unfrozen window)") == []
+    assert got("Phase 4: Backfill missing CrisisWatch editions") == ["phase4_crisiswatch.log"]
+    assert got("Set up job") == []
+
+
+def test_a_skipped_step_is_not_a_step_that_did_nothing(tmp_path):
+    st = build_staging(tmp_path)
+    zpath = next(st.rglob("resolver-debug-bundle-*.zip"))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(zpath) as src, zipfile.ZipFile(buf, "w") as dst:
+        for n in src.namelist():
+            body = src.read(n)
+            if n == "run/step_timings.csv":
+                body = body.decode().replace("DTM conflict lower bounds,completed,success",
+                                             "DTM conflict lower bounds,completed,skipped").encode()
+            dst.writestr(n, body)
+    zpath.write_bytes(buf.getvalue())
+    out = rri.write_inputs(st, tmp_path / "o.json", tmp_path / "w")
+    steps = [z["step"] for z in out["chain"]["resolver_update"]["zero_second_steps"]]
+    assert steps == ["Phase 2.6: conflict displacement extraction"]

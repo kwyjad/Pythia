@@ -372,6 +372,35 @@ def _log_has_traceback(path: Path) -> bool:
         return False
 
 
+_STOP = frozenset({"phase", "the", "of", "and", "a", "to", "in", "for", "from", "run", "step"})
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", text.lower()) if len(w) > 2 and w not in _STOP}
+
+
+def match_step_logs(step: str, logs: list[Path]) -> list[Path]:
+    """The logs of a step's phase sharing the most words with its name
+    (a word matches another it is a prefix of: ``extract``/``extraction``)."""
+    m = re.search(r"phase\s*(\d+)(?:\.(\d+))?", step, re.I)
+    if not m:
+        return []
+    prefix = "phase" + m.group(1) + (m.group(2) or "")
+    words = _words(step)
+    scored = []
+    for p in logs:
+        if not p.name.lower().startswith(prefix + "_") or p.stat().st_size == 0:
+            continue
+        stem = _words(p.stem.lower().replace("_", " "))
+        score = sum(1 for w in stem if any(x.startswith(w) or w.startswith(x) for x in words))
+        if score:
+            scored.append((score, p))
+    if not scored:
+        return []
+    best = max(score for score, _ in scored)
+    return [p for score, p in scored if score == best]
+
+
 def section_chain(src: Sources) -> dict[str, Any]:
     manifest = _read_json(src.staging / "manifest.json") or {}
     stages = []
@@ -406,15 +435,10 @@ def section_chain(src: Sources) -> dict[str, Any]:
     zero = []
     for s in steps:
         dur = _num(s.get("duration_sec"))
-        if dur is None or dur > 0 or s.get("status") != "completed":
+        if dur is None or dur > 0 or s.get("status") != "completed" or s.get("conclusion") == "skipped":
             continue
         name = str(s.get("step") or "")
-        m = re.search(r"phase\s*(\d+)(?:\.(\d+))?", name, re.I)
-        matched = []
-        if m:
-            prefix = "phase" + m.group(1) + (m.group(2) or "")
-            matched = [p for p in logs if p.name.lower().startswith(prefix)
-                       and p.stat().st_size > 0]
+        matched = match_step_logs(name, logs)
         zero.append({"step": name, "conclusion": s.get("conclusion"),
                      "logs_with_content": [p.name for p in matched],
                      "logs_with_traceback": [p.name for p in matched if _log_has_traceback(p)]})
@@ -424,7 +448,8 @@ def section_chain(src: Sources) -> dict[str, Any]:
         "zero_second_steps": [z for z in zero if z["logs_with_content"]],
         "zero_second_steps_without_logs": [z["step"] for z in zero if not z["logs_with_content"]],
         "logs_with_traceback": [p.name for p in logs if _log_has_traceback(p)],
-        "note": "a zero-second step is matched to its logs by the phase number in its name",
+        "note": "a zero-second step is matched to the logs of its phase that share the most words "
+                "with its name (a heuristic; read the log to confirm)",
     }
     return out
 
