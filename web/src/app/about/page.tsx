@@ -7,7 +7,9 @@ import {
   extractAllVersionedPrompts,
 } from "../../lib/prompt_extractor";
 import { renderSimpleMarkdown } from "../../lib/simple_markdown";
+import { loadDecks } from "../../lib/decks";
 import AiPromptsSection from "./AiPromptsSection";
+import DecksPanel from "./DecksPanel";
 import OverviewSection from "./OverviewSection";
 
 const ABOUT_MD = `## Welcome!
@@ -47,12 +49,13 @@ export const metadata = {
 };
 
 export default async function AboutPage() {
-  const [overviewMd, prompts, versionedData, versionedOverviewData] =
+  const [overviewMd, prompts, versionedData, versionedOverviewData, decks] =
     await Promise.all([
       loadOverviewMarkdown(),
       extractAllPrompts(),
       extractAllVersionedPrompts(),
       loadAllVersionedOverviews(),
+      loadDecks(),
     ]);
 
   return (
@@ -63,6 +66,7 @@ export default async function AboutPage() {
           About Fred and how the system works.
         </p>
       </header>
+      <DecksPanel decks={decks} />
       <article className="max-w-none">
         {renderSimpleMarkdown(ABOUT_MD)}
         {overviewMd && (

@@ -80,6 +80,30 @@ jobs:
           python scripts/ci/check_test_wiring.py
           pytest -vv --noconftest scripts/ci/tests/test_check_test_wiring.py
 
+      # The slide decks in docs/decks/: the edit tool, the publisher and the
+      # deck-sync check. python-pptx (with lxml) is the only extra install.
+      - name: Slide deck tool tests
+        env:
+          PYTHONPATH: .
+        run: |
+          set -e
+          pip install "python-pptx==1.0.2"
+          pytest -vv --noconftest scripts/decks/tests/
+
+      # A warning only, never a failure: a PR that adds to "Changes in this
+      # Version" in docs/fred_overview.md but touches nothing in docs/decks/
+      # is told which decks the manifest maps to what it changed.
+      - name: Slide decks may need a check (warning only)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          PYTHONPATH: .
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --quiet origin "${BASE_REF}"
+          git fetch --no-tags --quiet --unshallow origin || true
+          python -m scripts.decks.check_deck_sync --base "origin/${BASE_REF}"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

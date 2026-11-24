@@ -1,0 +1,125 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Publish the Fred slide decks (docs/decks/) for the dashboard's About page.
+#
+# Each deck is copied to Fred_archive/decks/<file> in the owner's Drive
+# through rclone (the drive.file scope: rclone sees only what it created, so
+# the owner's own copies elsewhere are untouched). An existing file is
+# updated in place and keeps its Drive id; each is shared as "anyone with
+# the link can view". scripts/decks/publish_decks.py writes decks.json with
+# the links, and this workflow uploads it to the pythia-data-latest release,
+# where the About page reads it.
+#
+# When Drive cannot be used, decks.json offers the decks as direct
+# downloads from this repository instead, and the run warns.
+#
+# Shares the drive-archive concurrency group so two runs never write Drive at
+# once. Outside the pythia-resolver-db group: it never touches the DB.
+
+name: Publish Slide Decks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/decks/**"
+      - "scripts/decks/publish_decks.py"
+      - ".github/workflows/publish_decks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: drive-archive
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install rclone
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rclone >/dev/null && rclone version | head -1
+
+      - name: Write rclone config
+        id: rclone
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RCLONE_CONF_B64:-}" ]; then
+            echo "::warning title=Drive not configured::RCLONE_CONF_B64 is missing; decks are published as direct downloads only. See docs/SECRETS.md, 'Google Drive archive'."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish decks and write decks.json
+        env:
+          CONFIGURED: ${{ steps.rclone.outputs.configured }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [ "${CONFIGURED}" = "true" ]; then
+            python -m scripts.decks.publish_decks --out out/decks.json
+          else
+            python -m scripts.decks.publish_decks --out out/decks.json --no-drive
+          fi
+          {
+            echo "## Slide decks"
+            echo
+            echo '```json'
+            python - <<'PY'
+          import json
+          d = json.load(open("out/decks.json"))
+          print(json.dumps({"drive": d["drive"], "decks": [
+              {k: r.get(k) for k in ("number", "file", "view_url", "download_url",
+                                     "drive_file_id", "signed_out_download_ok")}
+              for r in d["decks"]]}, indent=2))
+          PY
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload decks.json to the data release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view pythia-data-latest >/dev/null 2>&1; then
+            echo "::warning title=No data release::pythia-data-latest does not exist yet; decks.json was not published."
+            exit 0
+          fi
+          gh release upload pythia-data-latest out/decks.json --clobber
+
+      - name: Keep decks.json as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decks-json
+          path: out/decks.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"
