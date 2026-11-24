@@ -340,13 +340,23 @@ export function modelSkill(
   return null;
 }
 
+/** The bar track's half-width in skill units: the largest |skill| shown,
+ *  rounded up to a quarter, never below ±0.25 and never above ±1. */
+export function skillScale(skills: Array<number | null | undefined>): number {
+  const m = Math.max(0, ...skills.filter((x): x is number => x != null && Number.isFinite(x)).map(Math.abs));
+  return Math.min(1, Math.max(0.25, Math.ceil(m * 4) / 4));
+}
+
 /** Bar geometry centred on zero: the bar runs right for a positive skill and
- *  left for a negative one, as a percent of HALF the track, clamped at ±1. */
-export function skillBarGeometry(skill: number): {
-  side: "pos" | "neg" | "zero";
-  widthPct: number;
-} {
-  const c = Math.max(-1, Math.min(1, skill));
-  if (Math.abs(c) < 1e-9) return { side: "zero", widthPct: 0 };
-  return { side: c > 0 ? "pos" : "neg", widthPct: Math.abs(c) * 50 };
+ *  left for a negative one, as a percent of HALF the track, clamped at the
+ *  scale (a skill beyond it fills its half and is marked clipped). */
+export function skillBarGeometry(
+  skill: number,
+  scale = 1,
+): { side: "pos" | "neg" | "zero"; widthPct: number; clipped: boolean } {
+  const sc = scale > 0 ? scale : 1;
+  const clipped = Math.abs(skill) > sc;
+  const c = Math.max(-sc, Math.min(sc, skill));
+  if (Math.abs(c) < 1e-9) return { side: "zero", widthPct: 0, clipped: false };
+  return { side: c > 0 ? "pos" : "neg", widthPct: (Math.abs(c) / sc) * 50, clipped };
 }

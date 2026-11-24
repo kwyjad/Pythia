@@ -230,6 +230,12 @@ def test_scores_carries_paired_blocks_and_active_models(client) -> None:
     assert skill["reference_avg"] == pytest.approx(0.4)
     assert not [r for r in body["skill_rows"] if r["model_name"].startswith("__ext_")]
     assert isinstance(body["active_models"], list)
+    # A true median across hazards, not a median of per-hazard medians.
+    ov = _row(body["overall_rows"], model_name="ensemble_mean_v2",
+              score_type="brier", score_family="spd")
+    # ACE 0.1, 0.2, 0.9; FL 0.6; TC 0.7 -> median 0.6.
+    assert ov["median_value"] == pytest.approx(0.6)
+    assert ov["n_questions"] == 5
     # The blocked hazard no longer reaches the summary either.
     assert "DI" not in {r["hazard_code"] for r in body["summary_rows"]}
 

@@ -14,6 +14,7 @@ import {
   rangeCutoff,
   segmentIsDashed,
   skillBarGeometry,
+  skillScale,
   skillScore,
   yDomain,
 } from "../performance_data";
@@ -148,10 +149,19 @@ describe("skill bar maths", () => {
   });
 
   it("draws right for a gain and left for a loss, from the centre, clamped", () => {
-    expect(skillBarGeometry(0.25)).toEqual({ side: "pos", widthPct: 12.5 });
-    expect(skillBarGeometry(-0.5)).toEqual({ side: "neg", widthPct: 25 });
-    expect(skillBarGeometry(-3)).toEqual({ side: "neg", widthPct: 50 });
-    expect(skillBarGeometry(0)).toEqual({ side: "zero", widthPct: 0 });
+    expect(skillBarGeometry(0.25)).toEqual({ side: "pos", widthPct: 12.5, clipped: false });
+    expect(skillBarGeometry(-0.5)).toEqual({ side: "neg", widthPct: 25, clipped: false });
+    expect(skillBarGeometry(-3)).toEqual({ side: "neg", widthPct: 50, clipped: true });
+    expect(skillBarGeometry(0)).toEqual({ side: "zero", widthPct: 0, clipped: false });
+    // On a ±0.25 track a +15% skill fills 60% of its half.
+    expect(skillBarGeometry(0.15, 0.25).widthPct).toBeCloseTo(30);
+  });
+
+  it("scales the track to the largest skill shown, in quarters", () => {
+    expect(skillScale([0.15, -0.07, null])).toBe(0.25);
+    expect(skillScale([0.3, -0.12])).toBe(0.5);
+    expect(skillScale([-2.4])).toBe(1);
+    expect(skillScale([])).toBe(0.25);
   });
 
   it("is paired per model, prefers SPD, and flags low n", () => {

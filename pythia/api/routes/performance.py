@@ -322,6 +322,26 @@ def performance_scores(
     """
     summary_rows = _rows_from_cursor(_execute(con, sql_summary, params))
 
+    # One row per (family, score type, model) across every hazard: a true
+    # SQL median for the headline and the by-model table, where combining
+    # the per-hazard rows above could only give a median of medians.
+    overall_rows: List[Dict[str, Any]] = []
+    try:
+        overall_rows = _rows_from_cursor(_execute(con, f"""
+            SELECT
+              CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
+              s.score_type,
+              s.model_name,
+              {_agg}
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            WHERE s.model_name IS NOT NULL {metric_filter} {track_filter}{_tf}{_record}
+            GROUP BY 1, s.score_type, s.model_name
+            ORDER BY 1, s.score_type, s.model_name
+        """, params))
+    except Exception:  # noqa: BLE001
+        logger.debug("overall performance rows failed", exc_info=True)
+
     # Query 2 -- per-run rows (all models, including named ensembles)
     # Group by forecaster run (scores.run_id) when available so that scores
     # are attributed to the run that *produced* the forecasts, not the HS run
@@ -430,6 +450,7 @@ def performance_scores(
         "summary_rows": summary_rows,
         "run_rows": run_rows,
         "track_counts": track_counts,
+        "overall_rows": overall_rows,
         "reference_rows": reference_rows,
         "skill_rows": skill_rows,
         "active_models": _active_models(),

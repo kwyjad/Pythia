@@ -33,6 +33,7 @@ import {
   pickBestReference,
   referenceLabel,
   skillBarGeometry,
+  skillScale,
   type HeadlineCell,
   type ScoreType,
   type SkillInfo,
@@ -413,8 +414,8 @@ function ActiveBadge() {
 
 /** Inline skill bar centred on zero: right and green beats climatology, left
  *  and red loses to it, hatched below SKILL_LOW_N paired questions. */
-function SkillBar({ info }: { info: SkillInfo }) {
-  const g = skillBarGeometry(info.skill);
+function SkillBar({ info, scale }: { info: SkillInfo; scale: number }) {
+  const g = skillBarGeometry(info.skill, scale);
   const color = g.side === "neg" ? CHART_COLORS.worse : CHART_COLORS.better;
   const pct = `${info.skill >= 0 ? "+" : "−"}${Math.abs(info.skill * 100).toFixed(0)}%`;
   const fill = info.lowN
@@ -441,7 +442,10 @@ function SkillBar({ info }: { info: SkillInfo }) {
           />
         ) : null}
       </span>
-      <span className="w-10 text-right text-xs tabular-nums text-fred-text">{pct}</span>
+      <span className="w-10 text-right text-xs tabular-nums text-fred-text">
+        {pct}
+        {g.clipped ? "+" : ""}
+      </span>
       <span className="text-[10px] text-fred-muted">
         n={info.n}
         {info.lowN ? " · low n" : ""}
@@ -450,24 +454,29 @@ function SkillBar({ info }: { info: SkillInfo }) {
   );
 }
 
-const SKILL_COLUMN: SortableColumn<PivotedRow> = {
-  key: "skill",
-  label: (
-    <span className="inline-flex items-center gap-1">
-      Skill vs climatology <InfoTooltip text={TOOLTIP_SKILL_BAR} />
-    </span>
-  ),
-  sortValue: (row) => row.skill?.skill ?? null,
-  defaultSortDirection: "desc",
-  render: (row) =>
-    row.skill ? (
-      <SkillBar info={row.skill} />
-    ) : (
-      <span className="text-xs text-fred-muted">
-        {row.status === "retired" ? "retired" : "\u2014"}
+function skillColumn(scale: number): SortableColumn<PivotedRow> {
+  const pct = `${Math.round(scale * 100)}%`;
+  return {
+    key: "skill",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        Skill vs climatology
+        <span className="text-[10px] font-normal text-fred-muted">(−{pct} … +{pct})</span>
+        <InfoTooltip text={TOOLTIP_SKILL_BAR} />
       </span>
     ),
-};
+    sortValue: (row) => row.skill?.skill ?? null,
+    defaultSortDirection: "desc",
+    render: (row) =>
+      row.skill ? (
+        <SkillBar info={row.skill} scale={scale} />
+      ) : (
+        <span className="text-xs text-fred-muted">
+          {row.status === "retired" ? "retired" : "\u2014"}
+        </span>
+      ),
+  };
+}
 
 const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
   {
@@ -979,9 +988,14 @@ export default function PerformancePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, skillMetric]);
 
+  // One scale for every bar in the table, so lengths compare across rows.
+  const skillTrackScale = useMemo(
+    () => skillScale([...totalRows, ...modelRows].map((r) => r.skill?.skill)),
+    [totalRows, modelRows],
+  );
   const modelColumns = useMemo(
-    () => [PIVOTED_COLUMNS[0], SKILL_COLUMN, ...PIVOTED_COLUMNS.slice(1)],
-    [],
+    () => [PIVOTED_COLUMNS[0], skillColumn(skillTrackScale), ...PIVOTED_COLUMNS.slice(1)],
+    [skillTrackScale],
   );
 
   // ---- Render --------------------------------------------------------------

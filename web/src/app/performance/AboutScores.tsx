@@ -340,6 +340,41 @@ export default function AboutScores() {
           </li>
         </ul>
       </section>
+
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+        <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-fred-text">
+          How the dashboard figures are built
+        </h2>
+        <ul className="list-disc space-y-2 pl-5 text-sm text-fred-text">
+          <li>
+            <strong>Median is a true median.</strong> The Median toggle and the
+            &ldquo;Mdn&rdquo; columns in the Total and By&nbsp;Model views take the
+            median over every scored question and horizon, computed in the
+            database. Before November 2026 they combined per-hazard medians, which
+            is not the same number.
+          </li>
+          <li>
+            <strong>Models counts forecasters.</strong> The Models card counts
+            individual LLM forecasters with a scored question. Ensembles, the
+            Track&nbsp;2 aggregate row, Sibyl, external references and
+            recalibration copies are left out.
+          </li>
+          <li>
+            <strong>Comparisons are paired.</strong> The reference line under each
+            headline score, the dashed benchmark on Scores over time and the
+            Skill vs climatology bars compare two forecasters only on the questions
+            and horizons both scored. Models and references cover very different
+            question sets, so an unpaired comparison would mostly measure which
+            questions each one happened to answer.
+          </li>
+          <li>
+            <strong>Forecast month.</strong> Scores over time places each score in
+            the month the forecasting run took place. A recent month moves as more
+            of its six horizons resolve; a hollow point has fewer than 10 scored
+            questions.
+          </li>
+        </ul>
+      </section>
     </div>
   );
 }
