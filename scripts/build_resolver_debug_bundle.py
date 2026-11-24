@@ -2614,6 +2614,7 @@ class BundleBuilder:
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
             self._check_no_flood_or_cyclone_verdict_for_a_month_in_progress,
+            self._check_no_known_issue_is_past_its_review_date,
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
             self._check_ace_fatalities_resolve_from_the_base_rate_series,
@@ -5087,6 +5088,38 @@ class BundleBuilder:
             "0",
             "; ".join(f"{hz} {ym}: {n}" for hz, ym, n in found)
             or "No flood or cyclone row for a month that has not ended.",
+        )
+
+    def _check_no_known_issue_is_past_its_review_date(self) -> None:
+        """Every known-issues entry is inside its review date (tolerance 0).
+
+        Nov 2026: acled_cast_stale_vintage (due 2026-10-15) and
+        views_stale_vintage (due 2026-11-01) were both overdue and nothing in
+        the run said so unless their fault fired. Raised at info: the entry
+        needs a person to look, not a re-run.
+        """
+
+        name = "no_known_issue_is_past_its_review_date"
+        try:
+            from resolver.diagnostics.issues import KnownIssues, _today
+
+            known = KnownIssues.load()
+            overdue = known.overdue_entries(_today())
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"register unreadable: {exc}")
+        self._check(
+            name, "FAIL" if overdue else "PASS",
+            f"{len(overdue)} of {len(known.entries)} entries overdue", "0",
+            "; ".join(f"{key} (review by {due or 'no date'})" for key, due in overdue)
+            or "Every known-issues entry is inside its review date.",
+            issues=[{
+                "id": f"known_issue_review_overdue_{key}",
+                "severity": "info",
+                "title": f"Known issue {key} is past its review date ({due or 'none'}).",
+                "evidence": "resolver/config/known_issues.yml: review the entry, "
+                            "then move its review_by or close it",
+                "recovers_on_rerun": False,
+            } for key, due in overdue] or None,
         )
 
     def _check_no_row_beside_an_unconfirmed_sweep_hit(self) -> None:

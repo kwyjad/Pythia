@@ -218,3 +218,47 @@ def test_a_failed_download_is_recorded_with_its_error(monkeypatch):
     assert connector.fetch_forecasts().empty
     assert connector.summary["outcome"] == "download_failed"
     assert any("CERTIFICATE_VERIFY_FAILED" in e for e in connector.summary["errors"])
+
+
+# --- 6. overdue known-issue reviews ------------------------------------------
+
+
+def test_overdue_entries_are_read_from_the_register(tmp_path):
+    from resolver.diagnostics.issues import KnownIssues
+
+    path = tmp_path / "known.yml"
+    path.write_text(
+        "issues:\n"
+        "  - id: late\n    review_by: 2026-11-01\n"
+        "  - id: fine\n    review_by: 2026-12-15\n"
+        "  - id: forever\n    review_by: never\n    no_review_reason: no expiry\n"
+        "  - id: undated\n"
+    )
+    known = KnownIssues.load(path)
+    assert known.overdue_entries(dt.date(2026, 11, 24)) == [
+        ("late", "2026-11-01"), ("undated", ""),
+    ]
+
+
+def test_the_shipped_register_has_nothing_overdue_today_and_the_moved_dates():
+    from resolver.diagnostics.issues import KnownIssues
+
+    known = KnownIssues.load()
+    assert str(known.entries["acled_cast_stale_vintage"]["review_by"]) == "2027-01-15"
+    assert str(known.entries["views_stale_vintage"]["review_by"]) == "2026-12-15"
+    assert "77 of 120" in known.entries["acled_cast_stale_vintage"]["note"]
+    assert "December 2026 vintage" in known.entries["views_stale_vintage"]["note"]
+    assert known.overdue_entries(dt.date(2026, 11, 24)) == []
+
+
+def test_an_overdue_review_reaches_the_register_at_info():
+    from resolver.diagnostics.issue_sources import issues_from_checks
+    from resolver.diagnostics.issues import INFO
+
+    issues = issues_from_checks([{
+        "name": "no_known_issue_is_past_its_review_date", "verdict": "FAIL",
+        "left": "1 of 5", "right": "0", "detail": "late (review by 2026-11-01)",
+        "issues": [{"id": "known_issue_review_overdue_late", "severity": "info",
+                    "title": "Known issue late is past its review date (2026-11-01)."}],
+    }])
+    assert [(i.id, i.severity) for i in issues] == [("known_issue_review_overdue_late", INFO)]

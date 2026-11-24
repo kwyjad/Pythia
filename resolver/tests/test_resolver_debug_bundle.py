@@ -1729,3 +1729,17 @@ def test_an_inform_score_off_its_scale_is_a_contradiction(tmp_path, full_run):
     con.close()
     check = _checks(tmp_path, db, full_run, "again")["inform_severity_scores_lie_on_the_0_to_10_scale"]
     assert check["verdict"] == "PASS"
+
+
+def test_an_overdue_known_issue_review_fails_the_check(tmp_path, full_run, monkeypatch):
+    """Nov 2026: two known-issues entries sat past their review dates."""
+
+    monkeypatch.setenv("PYTHIA_ISSUES_TODAY", "2099-01-01")
+    check = _checks(tmp_path, full_run["db"], full_run)[
+        "no_known_issue_is_past_its_review_date"]
+    assert check["verdict"] == "FAIL"
+    assert "acled_cast_stale_vintage" in check["detail"]
+    assert all(i["severity"] == "info" for i in check["issues"])
+    monkeypatch.setenv("PYTHIA_ISSUES_TODAY", "2026-11-24")
+    assert _checks(tmp_path, full_run["db"], full_run, "again")[
+        "no_known_issue_is_past_its_review_date"]["verdict"] == "PASS"

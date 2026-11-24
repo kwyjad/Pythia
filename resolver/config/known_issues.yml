@@ -171,11 +171,10 @@ issues:
   - id: acled_cast_stale_vintage
     owner: external
     first_seen: 2026-01-15
-    # Six weeks from the September escalation. The remedy is somebody at
-    # ACLED answering a support request, which is a cycle we do not control
-    # and cannot honestly demand inside a fortnight; longer than six weeks
-    # and nobody is chasing it.
-    review_by: 2026-10-15
+    # Moved on review, Nov 2026 (was 2026-10-15). CAST covers 77 of 120
+    # target countries on a December 2025 vintage; decide at this review
+    # whether to drop it from prompts.
+    review_by: 2027-01-15
     recovers_on_rerun: false
     note: >-
       ACLED CAST has served the 2025-12-01 vintage since the 2026-01 cycle —
@@ -183,7 +182,9 @@ issues:
       succeeds and roughly 9,879 records return, so this is not an outage:
       ACLED is not publishing current CAST through the API. Escalated to
       ACLED (access@acleddata.com). The prompt readers already filter on
-      target month, so no past-dated forecast is served.
+      target month, so no past-dated forecast is served. Nov 2026 review:
+      CAST covers 77 of 120 target countries on a December 2025 vintage;
+      decide at this review whether to drop it from prompts.
     # No log_signatures, deliberately: this fault is found by the vintage
     # contradiction check, which declares the right id itself
     # (issue_sources.VINTAGE_ISSUE_IDS), and a stale vintage is logged as a
@@ -194,10 +195,9 @@ issues:
   - id: views_stale_vintage
     owner: external
     first_seen: 2026-07-01
-    # One more monthly cycle (2026-09-29). The vintage MOVED since the last
-    # review, so VIEWS is publishing; what is left to settle is whether its
-    # release lag simply exceeds our 45-day threshold. Two points so far.
-    review_by: 2026-11-01
+    # Moved on review, Nov 2026 (was 2026-11-01): escalate to VIEWS if the
+    # December 2026 vintage has not arrived by then.
+    review_by: 2026-12-15
     recovers_on_rerun: false
     note: >-
       VIEWS served the 2026-07-01 vintage on 2026-09-09 (69 days) and the
@@ -208,5 +208,7 @@ issues:
       at 55-60 days, the fault is our 45-day threshold measured against a
       release lag it was never reasoned from, and the fix is a per-source
       threshold in STALENESS_THRESHOLD_DAYS rather than an escalation.
+      Nov 2026 review: escalate to VIEWS if the December 2026 vintage has
+      not arrived.
     # Same as ACLED CAST: found by the vintage check, logged as a WARNING,
     # so no log signature can match and none is claimed.

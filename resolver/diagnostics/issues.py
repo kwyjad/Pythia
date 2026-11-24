@@ -268,6 +268,23 @@ class KnownIssues:
     def __contains__(self, issue_id: str) -> bool:
         return str(issue_id) in self.entries
 
+    def overdue_entries(self, today: dt.date | None = None) -> list[tuple[str, str]]:
+        """Every entry past its ``review_by`` (or with none), as (id, review_by).
+
+        Read from the file, not from the issues a run happened to raise: an
+        entry whose fault did not fire this run is still overdue, and until
+        Nov 2026 two entries sat past their dates with nothing to say so.
+        """
+
+        return [
+            (key, str(entry.get("review_by") or ""))
+            for key, entry in sorted(self.entries.items())
+            if self._is_overdue(
+                str(entry.get("review_by") or ""), today,
+                no_review_reason=str(entry.get("no_review_reason") or ""),
+            )
+        ]
+
     def apply(self, issue: Issue, today: dt.date | None = None) -> Issue:
         """Demote a registered issue to `known` and attach its owner and note.
 
