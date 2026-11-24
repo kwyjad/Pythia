@@ -1005,6 +1005,35 @@ def test_no_drought_row_may_exist_for_a_month_still_in_progress(tmp_path, full_r
         "no_drought_resolution_for_a_month_still_in_progress"]["verdict"] == "PASS"
 
 
+def test_no_flood_or_cyclone_row_may_exist_for_a_month_still_in_progress(tmp_path, full_run):
+    """Nov 2026: 14 FL and 3 TC values were written for 2026-11 on the 11th."""
+
+    import datetime as dt
+
+    db = full_run["db"]
+    today = dt.date.today()
+    name = "no_flood_or_cyclone_resolution_for_a_month_still_in_progress"
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_resolutions VALUES ('PHL', ?, ?, 'TC', 'RESOLVED_VALUE', 5.0, '{}', "
+        "'ladder:test', FALSE, TRUE, 'live', NULL, CURRENT_TIMESTAMP)",
+        [today.year, today.month],
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run)[name]
+    assert check["verdict"] == "FAIL"
+    assert f"TC {today:%Y-%m}: 1" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "DELETE FROM haz_resolutions WHERE iso3 = 'PHL' AND hazard = 'TC' "
+        "AND year = ? AND month = ?",
+        [today.year, today.month],
+    )
+    con.close()
+    assert _checks(tmp_path, db, full_run, "again")[name]["verdict"] == "PASS"
+
+
 # --------------------------------------------------------------------------
 # Group E (run 33841370196): EM-DAT lockout, empty tables, future dates
 # --------------------------------------------------------------------------

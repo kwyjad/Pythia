@@ -2601,6 +2601,7 @@ class BundleBuilder:
             self._check_inform_severity_on_its_scale,
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
+            self._check_no_flood_or_cyclone_verdict_for_a_month_in_progress,
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
             self._check_ace_fatalities_resolve_from_the_base_rate_series,
@@ -5043,6 +5044,37 @@ class BundleBuilder:
             "0",
             "; ".join(f"{ym}: {n}" for ym, n in found)
             or "No drought row for a month that has not ended.",
+        )
+
+    def _check_no_flood_or_cyclone_verdict_for_a_month_in_progress(self) -> None:
+        """No flood or cyclone resolution exists for a month that has not ended.
+
+        On 11 November 2026 the machine wrote 14 FL and 3 TC values for
+        2026-11, a month eleven days old, because only drought had the month
+        rule. Compute Resolutions never reads past its calendar cutoff, so no
+        outcome moved; the rows were still answers nothing could support.
+        """
+
+        name = "no_flood_or_cyclone_resolution_for_a_month_still_in_progress"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions absent")
+        today = dt.date.today()
+        rows = self.query(
+            """
+            SELECT hazard, printf('%04d-%02d', year, month) AS ym, COUNT(*)
+            FROM haz_resolutions
+            WHERE hazard IN ('FL', 'TC') AND (year > ? OR (year = ? AND month >= ?))
+            GROUP BY hazard, ym ORDER BY ym, hazard
+            """,
+            [today.year, today.year, today.month],
+        )
+        found = [(str(r[0]), str(r[1]), int(r[2])) for r in (rows[1] if rows else [])]
+        self._check(
+            name, "FAIL" if found else "PASS",
+            f"{sum(n for *_, n in found)} flood/cyclone rows in months at or after {today:%Y-%m}",
+            "0",
+            "; ".join(f"{hz} {ym}: {n}" for hz, ym, n in found)
+            or "No flood or cyclone row for a month that has not ended.",
         )
 
     def _check_no_row_beside_an_unconfirmed_sweep_hit(self) -> None:
