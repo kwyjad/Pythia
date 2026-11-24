@@ -149,3 +149,58 @@ export const ACE_PA_INDICATIVE_NOTE =
 export function isAcePa(hazard: string | null | undefined, metric: string | null | undefined): boolean {
   return (hazard || "").toUpperCase() === "ACE" && (metric || "").toUpperCase() === "PA";
 }
+
+// --- Performance page (Nov 2026 overhaul) ------------------------------------
+// Copy for the headline cards, the time series and the skill bars. Keep the
+// thresholds named here in step with web/src/lib/performance_data.ts.
+
+export const TOOLTIP_LOWER_IS_BETTER =
+  "Brier, Log Loss and CRPS are all lower-is-better: 0 is a perfect forecast.";
+
+export const TOOLTIP_MODELS_KPI =
+  "Individual LLM forecasters with at least one scored question. Not counted: " +
+  "the ensemble aggregates (mean, BayesMC), the Track 2 aggregate row, Sibyl " +
+  "(deep research), the external reference forecasters (climatology, " +
+  "persistence, ViEWS and the rest) and the recalibration copies " +
+  "(uncorrected / shadow).";
+
+export const TOOLTIP_PAIRED_REFERENCE =
+  "The line under each value compares the ensemble with the toughest external " +
+  "reference forecaster for that family, on the questions and horizons BOTH " +
+  "scored (paired), so the two numbers describe the same forecasts. Green: " +
+  "the ensemble scored lower (better). Red: the reference did. The large value " +
+  "above it covers every scored question, so it can differ from the paired one.";
+
+export const NA_BINARY_SCORE_TYPE =
+  "Binary event questions are scored with Brier only; Log Loss and CRPS apply " +
+  "to the multi-bucket (SPD) questions.";
+
+export const NA_BINARY_ENSEMBLE =
+  "Binary event questions are scored under the mean ensemble only. Pick the " +
+  "mean ensemble to see the Binary figure.";
+
+export const NA_NO_SCORES =
+  "No scored questions for this family and score yet. Scores appear once " +
+  "forecasts resolve against ground truth.";
+
+export const TOOLTIP_SCORES_OVER_TIME =
+  "The ensemble's score by forecast month: the month the forecasting run took " +
+  "place, not the month the outcome happened. A month's value moves as more of " +
+  "its six horizons resolve. The dashed benchmark is paired: each month it " +
+  "covers only the questions both the ensemble and the reference scored.";
+
+export const LEGEND_LOW_N =
+  "Hollow point and dashed segment: fewer than 10 scored questions in that " +
+  "month, so the value is still unsettled.";
+
+export const TOOLTIP_SKILL_BAR =
+  "Skill vs climatology = 1 − model score ÷ climatology score, on the questions " +
+  "and horizons the model actually forecast (paired), using the score shown " +
+  "beside the table's selector. Right and green: the model beat the base rate. " +
+  "Left and red: it lost to it. Paired because models cover very different " +
+  "question sets, so their raw scores cannot be compared across rows. A hatched " +
+  "bar rests on fewer than 30 paired questions.";
+
+export const TOOLTIP_ACTIVE_MODEL =
+  "Active: in the current forecasting lineup (a voting ensemble member or the " +
+  "Track 2 model). Rows without the badge are retired models, kept for the record.";

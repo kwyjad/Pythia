@@ -16,10 +16,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
-from pythia.tools.forecast_of_record import record_run_clause
+from pythia.tools.forecast_of_record import record_run_clause, record_run_subquery
 from pythia.tools.scoring_class import has_scoring_class, scored_only_clause, scored_only_sql
 
 from pythia.api.core import (
+    _blocked_hazard_filter,
     _con,
     _execute,
     _rows_from_cursor,
@@ -228,20 +229,12 @@ def performance_scores(
     if not _table_exists(con, "scores") or not _table_exists(con, "questions"):
         return {"summary_rows": [], "run_rows": [], "track_counts": {"track1": 0, "track2": 0}}
 
-    params: dict = {}
-    metric_filter = ""
-    if metric:
-        metric_filter = "AND UPPER(q.metric) = UPPER(:metric)"
-        params["metric"] = metric.upper()
-
-    track_filter = ""
-    q_cols = {r[0] for r in con.execute("DESCRIBE questions").fetchall()}
-    has_track = "track" in q_cols
-    if track and has_track:
-        track_filter = "AND q.track = :track"
-        params["track"] = track
-
-    _tf = _test_filter(include_test, "s")
+    f = _score_filters(con, metric=metric, track=track, include_test=include_test)
+    params: dict = f["params"]
+    metric_filter = f["metric_filter"]
+    track_filter = f["track_filter"]
+    has_track = f["has_track"]
+    _tf = f["test_filter"]
 
     # An indicative ACE/PA month (pythia/tools/scoring_class.py) is a
     # selected sample: it stays out of every average and question count,
@@ -329,6 +322,26 @@ def performance_scores(
     """
     summary_rows = _rows_from_cursor(_execute(con, sql_summary, params))
 
+    # One row per (family, score type, model) across every hazard: a true
+    # SQL median for the headline and the by-model table, where combining
+    # the per-hazard rows above could only give a median of medians.
+    overall_rows: List[Dict[str, Any]] = []
+    try:
+        overall_rows = _rows_from_cursor(_execute(con, f"""
+            SELECT
+              CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
+              s.score_type,
+              s.model_name,
+              {_agg}
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            WHERE s.model_name IS NOT NULL {metric_filter} {track_filter}{_tf}{_record}
+            GROUP BY 1, s.score_type, s.model_name
+            ORDER BY 1, s.score_type, s.model_name
+        """, params))
+    except Exception:  # noqa: BLE001
+        logger.debug("overall performance rows failed", exc_info=True)
+
     # Query 2 -- per-run rows (all models, including named ensembles)
     # Group by forecaster run (scores.run_id) when available so that scores
     # are attributed to the run that *produced* the forecasts, not the HS run
@@ -411,11 +424,259 @@ def performance_scores(
         """
     run_rows = _rows_from_cursor(_execute(con, sql_runs, params))
 
+    # Paired comparisons (Nov 2026): the ensemble aggregates against every
+    # external reference (the headline cards), and every model against
+    # climatology (the Detailed Scores skill bar). Each pair is computed on
+    # the (question, horizon) cells BOTH sides scored, never on two
+    # different question sets.
+    reference_rows: List[Dict[str, Any]] = []
+    skill_rows: List[Dict[str, Any]] = []
+    try:
+        base = _scored_rows_cte(con, f, include_test=include_test, with_month=False)
+        if base:
+            reference_rows = _paired_stats(
+                con, base, f["params"],
+                left_sql=_ENSEMBLE_AGG_SQL, right_sql=_REFERENCE_SQL,
+            )
+            skill_rows = _paired_stats(
+                con, base, f["params"],
+                left_sql="a.model_name NOT LIKE '\\_\\_ext\\_%' ESCAPE '\\'",
+                right_sql=f"b.model_name = '{CLIMATOLOGY_MODEL}'",
+            )
+    except Exception:  # noqa: BLE001 - additive; never fail the page on it
+        logger.debug("paired performance comparisons failed", exc_info=True)
+
     return {
         "summary_rows": summary_rows,
         "run_rows": run_rows,
         "track_counts": track_counts,
+        "overall_rows": overall_rows,
+        "reference_rows": reference_rows,
+        "skill_rows": skill_rows,
+        "active_models": _active_models(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Shared filters, the scored-rows CTE and paired comparisons (Nov 2026)
+# ---------------------------------------------------------------------------
+
+#: The reference every model's skill is measured against.
+CLIMATOLOGY_MODEL = "__ext_climatology"
+
+#: The ensemble aggregates a headline or a time series is drawn for.
+_ENSEMBLE_AGG_SQL = "a.model_name LIKE 'ensemble%'"
+
+#: External references, Sibyl's own scored variants excluded (they are
+#: measurements of Sibyl, shown in its section, not benchmarks).
+_REFERENCE_SQL = (
+    "b.model_name LIKE '\\_\\_ext\\_%' ESCAPE '\\' "
+    "AND b.model_name NOT LIKE '\\_\\_ext\\_sibyl%' ESCAPE '\\'"
+)
+
+
+def _score_filters(con, *, metric: Optional[str], track: Optional[int],
+                   include_test: bool) -> Dict[str, Any]:
+    """The filters every performance reader applies, built once.
+
+    The metric filter, the track filter, the test filter on scores, the
+    blocked-hazard exclusion, the indicative ACE/PA rule and the forecast of
+    record. ``metric_filter`` carries the blocked-hazard exclusion so every
+    query that applies one applies the other.
+    """
+    params: Dict[str, Any] = {}
+    metric_filter = _blocked_hazard_filter("q")
+    if metric:
+        metric_filter += " AND UPPER(q.metric) = UPPER(:metric)"
+        params["metric"] = metric.upper()
+    track_filter = ""
+    has_track = _table_has_columns(con, "questions", ["track"])
+    if track and has_track:
+        track_filter = " AND q.track = :track"
+        params["track"] = track
+    return {
+        "params": params,
+        "metric_filter": metric_filter,
+        "track_filter": track_filter,
+        "has_track": has_track,
+        "test_filter": _test_filter(include_test, "s"),
+        "scored": scored_only_clause(con, "s"),
+        "record": record_run_clause(con, "s", include_test=include_test),
+    }
+
+
+def _forecast_month_sql(con, include_test: bool) -> Optional[str]:
+    """SQL for the forecast month (YYYY-MM) of a score row ``s`` on question ``q``.
+
+    The month of the forecaster run's date, as ``run_rows`` dates a run: the
+    run's HS run via ``run_provenance``, else the question's own HS run. A
+    run-less reference row takes its question's forecast-of-record run.
+    None when ``hs_runs`` is absent (no run can be dated).
+    """
+    if not _table_exists(con, "hs_runs") or not _table_has_columns(con, "hs_runs", ["generated_at"]):
+        return None
+    run_expr = "s.run_id" if _table_has_columns(con, "scores", ["run_id"]) else "NULL"
+    if _table_has_columns(con, "forecasts_ensemble", ["run_id"]):
+        rec = record_run_subquery(con, "q.question_id", include_test=include_test)
+        run_expr = f"COALESCE({run_expr}, {rec})"
+    if _table_exists(con, "run_provenance") and _table_has_columns(
+        con, "run_provenance", ["forecaster_run_id", "hs_run_id"]
+    ):
+        hs_expr = (
+            f"COALESCE((SELECT MAX(_rp.hs_run_id) FROM run_provenance _rp "
+            f"WHERE _rp.forecaster_run_id = {run_expr}), q.hs_run_id)"
+        )
+    else:
+        hs_expr = "q.hs_run_id"
+    return (
+        f"(SELECT STRFTIME(MAX(_h.generated_at), '%Y-%m') FROM hs_runs _h "
+        f"WHERE _h.hs_run_id = {hs_expr})"
+    )
+
+
+def _scored_rows_cte(con, f: Dict[str, Any], *, include_test: bool,
+                     with_month: bool, month_cutoff: bool = False) -> Optional[str]:
+    """``WITH sc AS (...)``: one row per scored (question, horizon, score
+    type, model) after every performance filter, with its family and, when
+    asked, its forecast month. None when no row can carry a month."""
+    month_col = ""
+    if with_month:
+        month_sql = _forecast_month_sql(con, include_test)
+        if month_sql is None or not _table_has_columns(con, "questions", ["hs_run_id"]):
+            return None
+        month_col = f", {month_sql} AS month"
+    cut = (
+        ", sc AS (SELECT * FROM sc_all WHERE month >= :month_cutoff)"
+        if with_month and month_cutoff else ", sc AS (SELECT * FROM sc_all)"
+    )
+    return f"""
+        WITH sc_all AS (
+          SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
+                 CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary'
+                      ELSE 'spd' END AS score_family{month_col}
+          FROM scores s
+          JOIN questions q ON q.question_id = s.question_id
+          WHERE s.value IS NOT NULL AND s.model_name IS NOT NULL
+            {f["metric_filter"]} {f["track_filter"]}{f["test_filter"]}{f["scored"]}{f["record"]}
+        ){cut}
+    """
+
+
+def _paired_stats(con, base: str, params: Dict[str, Any], *, left_sql: str,
+                  right_sql: str, by_month: bool = False) -> List[Dict[str, Any]]:
+    """Left model against right model on the cells both scored.
+
+    One row per (month?, left model, right model, family, score type) with
+    the mean and median of each side over the same pairs (DuckDB MEDIAN in
+    SQL, never a median of medians) and the pair and question counts.
+    """
+    month_sel = "a.month AS month," if by_month else ""
+    month_grp = "a.month," if by_month else ""
+    month_where = "AND a.month IS NOT NULL" if by_month else ""
+    sql = f"""
+        {base}
+        SELECT {month_sel}
+               a.model_name AS model_name, b.model_name AS reference,
+               a.score_family, a.score_type,
+               COUNT(*) AS n_samples,
+               COUNT(DISTINCT a.question_id) AS n_questions,
+               AVG(a.value) AS model_avg, MEDIAN(a.value) AS model_median,
+               AVG(b.value) AS reference_avg, MEDIAN(b.value) AS reference_median
+        FROM sc a
+        JOIN sc b ON b.question_id = a.question_id
+                 AND b.horizon_m = a.horizon_m
+                 AND b.score_type = a.score_type
+        WHERE a.model_name <> b.model_name AND ({left_sql}) AND ({right_sql}) {month_where}
+        GROUP BY {month_grp} a.model_name, b.model_name, a.score_family, a.score_type
+        ORDER BY {month_grp} a.model_name, b.model_name, a.score_family, a.score_type
+    """
+    return _rows_from_cursor(_execute(con, sql, params or None))
+
+
+def _active_models() -> List[Dict[str, str]]:
+    """The current profile's voting members plus the Track 2 model, as the
+    scores table names them (pythia.llm_profiles). Empty on any config
+    failure: an unreadable profile must not take the page down."""
+    try:
+        from pythia.llm_profiles import active_scored_models  # noqa: PLC0415
+
+        return active_scored_models()
+    except Exception:  # noqa: BLE001
+        logger.debug("active model lookup failed", exc_info=True)
+        return []
+
+
+def _month_cutoff(months: int, today: Optional[str] = None) -> str:
+    """The first month (YYYY-MM) of a window of ``months`` ending this month."""
+    import datetime as _dt  # noqa: PLC0415
+
+    d = _dt.date.fromisoformat(today) if today else _dt.date.today()
+    idx = d.year * 12 + (d.month - 1) - (int(months) - 1)
+    return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
+
+
+@router.get("/v1/performance/timeseries")
+def performance_timeseries(
+    metric: Optional[str] = Query(None, description="Question metric filter (PA, FATALITIES, ...)"),
+    track: Optional[int] = Query(None, description="Filter by track (1 or 2)"),
+    include_test: bool = Query(False),
+    months: Optional[int] = Query(None, ge=1, le=240,
+                                  description="Keep the last N forecast months (this month included)"),
+    paired_with: Optional[str] = Query(
+        None, description="Restrict the paired series to this external reference",
+    ),
+):
+    """Scores by forecast month for the ensemble aggregates and the external
+    references, plus the ensembles paired with each reference.
+
+    ``rows``: month x score family x score type x model, unpaired, with the
+    mean and the SQL median of the scored cells and the sample and question
+    counts. ``paired_rows``: per month, each ensemble aggregate and a
+    reference on the cells both scored (``model_avg``/``reference_avg`` and
+    the medians). The month is the forecast month (``month_basis``). Every
+    filter of ``/v1/performance/scores`` applies. An older DB gives empty
+    lists, never an error.
+    """
+    empty: Dict[str, Any] = {"month_basis": "forecast_month", "rows": [], "paired_rows": []}
+    con = _con()
+    if not _table_exists(con, "scores") or not _table_exists(con, "questions"):
+        return empty
+    if paired_with is not None and not paired_with.startswith("__ext_"):
+        paired_with = None  # only an external reference can be paired with
+    f = _score_filters(con, metric=metric, track=track, include_test=include_test)
+    params = dict(f["params"])
+    try:
+        if months:
+            params["month_cutoff"] = _month_cutoff(months)
+        base = _scored_rows_cte(con, f, include_test=include_test, with_month=True,
+                                month_cutoff=bool(months))
+        if base is None:
+            return empty
+        rows = _rows_from_cursor(_execute(con, f"""
+            {base}
+            SELECT a.month, a.score_family, a.score_type, a.model_name,
+                   COUNT(*) AS n_samples,
+                   COUNT(DISTINCT a.question_id) AS n_questions,
+                   AVG(a.value) AS avg_value,
+                   MEDIAN(a.value) AS median_value
+            FROM sc a
+            WHERE a.month IS NOT NULL
+              AND (a.model_name LIKE 'ensemble%' OR a.model_name = 'track2_flash'
+                   OR ({_REFERENCE_SQL.replace("b.", "a.")}))
+            GROUP BY a.month, a.score_family, a.score_type, a.model_name
+            ORDER BY a.month, a.score_family, a.score_type, a.model_name
+        """, params or None))
+        right = _REFERENCE_SQL
+        if paired_with:
+            right += " AND b.model_name = :paired_with"
+            params["paired_with"] = paired_with
+        paired_rows = _paired_stats(
+            con, base, params, left_sql=_ENSEMBLE_AGG_SQL, right_sql=right, by_month=True,
+        )
+    except Exception:  # noqa: BLE001 - an older schema degrades to empty
+        logger.debug("performance timeseries failed", exc_info=True)
+        return empty
+    return {"month_basis": "forecast_month", "rows": rows, "paired_rows": paired_rows}
 
 
 # ---------------------------------------------------------------------------

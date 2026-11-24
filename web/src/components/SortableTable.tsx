@@ -28,6 +28,9 @@ type SortableTableProps<T> = {
   colGroup?: React.ReactNode;
   stickyHeader?: boolean;
   rowClassName?: (row: T) => string | undefined;
+  /** Optional group rank applied before the column sort (lower first), so a
+   *  group such as "active models" stays on top whatever column is sorted. */
+  pinnedOrder?: (row: T) => number;
 };
 
 const compareValues = (
@@ -64,6 +67,7 @@ export default function SortableTable<T>({
   colGroup,
   stickyHeader = false,
   rowClassName,
+  pinnedOrder,
 }: SortableTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | undefined>(initialSortKey);
   const [sortDirection, setSortDirection] =
@@ -75,23 +79,23 @@ export default function SortableTable<T>({
   );
 
   const sortedRows = useMemo(() => {
-    if (!sortKey) {
-      return rows;
-    }
-    const column = columns.find((col) => col.key === sortKey);
-    if (!column || column.sortable === false) {
-      return rows;
+    const pin = (a: T, b: T) => (pinnedOrder ? pinnedOrder(a) - pinnedOrder(b) : 0);
+    const column = sortKey ? columns.find((col) => col.key === sortKey) : undefined;
+    if (!sortKey || !column || column.sortable === false) {
+      return pinnedOrder ? [...rows].sort(pin) : rows;
     }
     const valueFor = (row: T) =>
       column.sortValue ? column.sortValue(row) : (row as Record<string, unknown>)[sortKey];
-    return [...rows].sort((a, b) =>
-      compareValues(
-        valueFor(a) as number | string | null | undefined,
-        valueFor(b) as number | string | null | undefined,
-        sortDirection
-      )
+    return [...rows].sort(
+      (a, b) =>
+        pin(a, b) ||
+        compareValues(
+          valueFor(a) as number | string | null | undefined,
+          valueFor(b) as number | string | null | undefined,
+          sortDirection
+        )
     );
-  }, [columns, rows, sortDirection, sortKey]);
+  }, [columns, rows, sortDirection, sortKey, pinnedOrder]);
 
   const handleSort = (column: SortableColumn<T>) => {
     if (column.sortable === false) {
