@@ -91,9 +91,16 @@ ROLLUP_SPLIT_KEYS = (
     "rc_guidance",
     "rc_shift_arm",
     "advice_arm",
+    "adversarial_arm",
     "recalibration_mode",
     "input_partial_month",
 )
+#: Flags compared against a FIXED reference arm, and the only arms of theirs
+#: compared at all. The adversarial experiment asks whether withholding the
+#: counter-evidence block hurts, so ``withheld`` is read against ``shown``;
+#: ``n/a`` (not eligible) and ``none`` (forecast before the arm existed) are
+#: different populations, not arms.
+EXPERIMENT_FIXED_ARMS = {"adversarial_arm": ("shown", ("withheld",))}
 #: The flags experiments.csv compares, where the data holds more than one value.
 #: ``base_rate_block_group`` pools prompt versions the recalibration treats as
 #: one group (prior_anchor_v1 and _v2), so the pooled arm is compared beside
@@ -594,7 +601,8 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
         "AND model_name NOT LIKE '%\\_\\_recal' ESCAPE '\\'"
     )
     if fr:
-        for col in ("base_rate_block_version", "rc_guidance", "rc_shift_arm", "advice_arm"):
+        for col in ("base_rate_block_version", "rc_guidance", "rc_shift_arm", "advice_arm",
+                    "adversarial_arm"):
             if column_exists(con, "forecasts_raw", col):
                 where = member_where
                 if col == "rc_shift_arm" and table_exists(con, "questions"):
@@ -669,6 +677,9 @@ def build_context(con, bundle_qids: Sequence[str], include_test: bool = False) -
             "rc_guidance": _label((attrs.get("rc_guidance") or {}).get(key), "legacy"),
             "rc_shift_arm": _label((attrs.get("rc_shift_arm") or {}).get(key), "none"),
             "advice_arm": _label((attrs.get("advice_arm") or {}).get(key), "none"),
+            # Questions forecast before the experiment existed read "none",
+            # never "shown": nobody chose to show them the block.
+            "adversarial_arm": _label((attrs.get("adversarial_arm") or {}).get(key), "none"),
             "recalibration_mode": _label((attrs.get("recalibration_mode") or {}).get(key), "off"),
             "rc_level": t.get("regime_change_level"),
             "rc_direction": t.get("regime_change_direction"),
@@ -1393,8 +1404,16 @@ def build_experiments(ctx: Context) -> list[dict[str, Any]]:
                 arms[str(ctx.qmeta[qid].get(flag))][qid] = vals
             if len(arms) < 2:
                 continue
-            ref = max(arms, key=lambda a: (len(arms[a]), a))
-            for arm in sorted(a for a in arms if a != ref):
+            fixed = EXPERIMENT_FIXED_ARMS.get(flag)
+            if fixed:
+                ref, compare = fixed
+                if ref not in arms:
+                    continue
+                arm_list = [a for a in compare if a in arms]
+            else:
+                ref = max(arms, key=lambda a: (len(arms[a]), a))
+                arm_list = sorted(a for a in arms if a != ref)
+            for arm in arm_list:
                 d, lo, hi = _diff_ci(arms[arm], arms[ref])
                 ma = _cluster_mean_ci(arms[arm], n_boot=0)[0]
                 mr = _cluster_mean_ci(arms[ref], n_boot=0)[0]
@@ -2192,6 +2211,7 @@ __all__ = [
     "ACLED_COMPLETE_MONTH_FIX",
     "Context",
     "EXPERIMENT_FLAGS",
+    "EXPERIMENT_FIXED_ARMS",
     "ROLLUP_SPLIT_KEYS",
     "SectionResult",
     "base_rate_shown",

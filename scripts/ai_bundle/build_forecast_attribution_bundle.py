@@ -101,7 +101,7 @@ TAXONOMY_PATH = Path(__file__).resolve().parent / "signal_taxonomy.csv"
 # Bump when a class is added, removed or re-patterned in a way that changes
 # what an existing signal text classifies as. Month-over-month comparison
 # is only meaningful within one version.
-TAXONOMY_VERSION = "2.0"
+TAXONOMY_VERSION = "2.1"
 
 #: Classes that describe bookkeeping on the distribution rather than a
 #: signal: their rows stay in the ledger, but their mass is never counted as

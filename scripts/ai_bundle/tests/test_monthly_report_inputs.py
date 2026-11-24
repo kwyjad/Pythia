@@ -72,6 +72,7 @@ def test_forecast_vintage_counts_flags_and_names_single_value_ones():
     assert runs["fc_1789534892"]["run_date"] == "2026-09-16"
     assert runs["fc_1785557077"]["n_questions"] == 5
     assert runs["fc_1785557077"]["flags"]["input_partial_month"] == {"True": 5}
+    assert "adversarial_arm" in runs["fc_1785557077"]["flags"]
     single = {s["flag"] for s in v["single_value_flags"]}
     assert {"rc_guidance", "advice_arm", "recalibration_mode"} <= single
     assert "lineup_id" not in single

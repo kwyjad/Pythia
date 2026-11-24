@@ -1340,6 +1340,7 @@ from .prompts import (  # noqa: E402
     merge_evidence_packs,
     rc_guidance_version,
     rc_shift_arm,
+    adversarial_arm_applied,
     prior_anchor_block_version,
     advice_arm,
     effective_advice_arm,
@@ -2230,6 +2231,51 @@ def _stamp_rc_shift_arm(run_id: str, question_id: str, question: Optional[dict] 
             con.close()
     except Exception as exc:  # noqa: BLE001
         LOG.warning("RC split arm not stamped for %s: %s", question_id, exc)
+
+
+#: Per-run counts of the adversarial experiment's arms, logged at run end.
+_ADVERSARIAL_ARM_COUNTS: dict[str, int] = {}
+
+
+def _stamp_adversarial_arm(run_id: str, question_id: str, question: Optional[dict] = None) -> Optional[str]:
+    """Record the adversarial counter-evidence arm on the question's rows.
+
+    ``shown``/``withheld`` for a question whose SPD prompt was eligible for
+    the block (a check loaded and the RC level showed it), ``n/a`` for any
+    other question, nothing at all when the experiment is off. Written on
+    ``forecasts_raw`` (every member row, Track 2 included) and
+    ``forecasts_ensemble``. Returns the arm stamped.
+    """
+    arm = adversarial_arm_applied(question_id)
+    if not arm or not question_id:
+        return None
+    _ADVERSARIAL_ARM_COUNTS[arm] = _ADVERSARIAL_ARM_COUNTS.get(arm, 0) + 1
+    try:
+        con = connect(read_only=False)
+        try:
+            for table in ("forecasts_raw", "forecasts_ensemble"):
+                con.execute(
+                    f"UPDATE {table} SET adversarial_arm = ? WHERE run_id = ? AND question_id = ?",
+                    [arm, run_id, question_id],
+                )
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("adversarial arm not stamped for %s: %s", question_id, exc)
+    return arm
+
+
+def adversarial_arm_summary_line() -> Optional[str]:
+    """``eligible / shown / withheld`` for the questions stamped this run."""
+    if not _ADVERSARIAL_ARM_COUNTS:
+        return None
+    shown = _ADVERSARIAL_ARM_COUNTS.get("shown", 0)
+    withheld = _ADVERSARIAL_ARM_COUNTS.get("withheld", 0)
+    na = _ADVERSARIAL_ARM_COUNTS.get("n/a", 0)
+    return (
+        f"[adversarial-arm] eligible={shown + withheld} shown={shown} "
+        f"withheld={withheld} not_eligible={na}"
+    )
 
 
 def _recalibrate_binary_members(
@@ -7077,6 +7123,7 @@ def main() -> None:
                         await _run_spd_for_question(run_id, q)
                     _stamp_advice_arm(run_id, qid, q)
                     _stamp_rc_shift_arm(run_id, qid, q)
+                    _stamp_adversarial_arm(run_id, qid, q)
                 if not qid:
                     return
                 start_ms = question_start_ms.get(qid)
@@ -7100,6 +7147,9 @@ def main() -> None:
                 await asyncio.gather(*(_spd_task(q) for q in batch))
 
         asyncio.run(_run_v2_pipeline_async())
+        _adv_line = adversarial_arm_summary_line()
+        if _adv_line:
+            print(_adv_line)
 
         if _batch_submit_active():
             # Submit the enqueued member calls as provider batches and stop —

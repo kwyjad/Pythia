@@ -1880,6 +1880,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "reasoning_trace_json": "TEXT",
                 # Advice experiment arm (PYTHIA_ADVICE_EXPERIMENT_SHARE).
                 "advice_arm": "TEXT",
+                # Adversarial counter-evidence experiment
+                # (PYTHIA_ADVERSARIAL_WITHHELD_SHARE, Nov 2026): 'shown',
+                # 'withheld', 'n/a' (not eligible), NULL before it existed.
+                "adversarial_arm": "TEXT",
             },
         )
 
@@ -1941,6 +1945,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # 2026): 'shift' or 'control' on Track 1 member rows, NULL
                 # when the test was off.
                 "rc_shift_arm": "TEXT",
+                # Adversarial counter-evidence experiment
+                # (PYTHIA_ADVERSARIAL_WITHHELD_SHARE, Nov 2026): 'shown',
+                # 'withheld' or 'n/a'; NULL before the experiment existed.
+                "adversarial_arm": "TEXT",
             },
         )
 
