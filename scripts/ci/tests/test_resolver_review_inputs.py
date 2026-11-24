@@ -651,6 +651,29 @@ def test_a_zero_second_step_is_matched_to_its_own_logs_only(tmp_path):
     assert got("Set up job") == []
 
 
+def test_a_log_naming_another_source_is_not_matched_on_a_shared_word(tmp_path):
+    """11 November: "Backfill missing CrisisWatch editions" took
+    phase4_enso_backfill.log on the word "backfill"."""
+    names = ("phase4_crisiswatch.log", "phase4_crisiswatch_refresh.log",
+             "phase4_enso.log", "phase4_enso_backfill.log", "phase25_haz_flood.log",
+             "phase26_conflict_extract.log", "phase26_conflict_extract_plan.log")
+    for n in names:
+        _w(tmp_path / n, "x")
+    logs = sorted(tmp_path.iterdir())
+
+    def got(step):
+        return [p.name for p in rri.match_step_logs(step, logs)]
+
+    assert got("Phase 4: Backfill missing CrisisWatch editions") == ["phase4_crisiswatch.log"]
+    assert got("Phase 4: Store CrisisWatch") == ["phase4_crisiswatch.log"]
+    assert got("Phase 4: Fetch + store ENSO state") == ["phase4_enso.log"]
+    assert got("Phase 4: Backfill ENSO history from the published ONI table") == [
+        "phase4_enso_backfill.log"]
+    assert got("Phase 2.5: PA machine — flood") == ["phase25_haz_flood.log"]
+    assert got("Phase 2.6: Conflict displacement, ReliefWeb extraction (trailing months)") == [
+        "phase26_conflict_extract.log"]
+
+
 def test_a_skipped_step_is_not_a_step_that_did_nothing(tmp_path):
     st = build_staging(tmp_path)
     zpath = next(st.rglob("resolver-debug-bundle-*.zip"))
