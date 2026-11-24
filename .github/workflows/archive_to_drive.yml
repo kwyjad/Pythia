@@ -16,7 +16,9 @@
 #       (a scoring chain also gets scored_bundle/: the scored bundle's
 #       report files unzipped, for the monthly report's Drive reader; a
 #       chain with a Resolver Update also gets resolver_review/: the
-#       resolver review's inputs summary and the files it reads)
+#       resolver review's inputs summary and the files it reads; a forecast
+#       chain also gets forecast_review/: the forecast pipeline review's
+#       inputs summary and the files it reads)
 #   db_snapshots/<YYYY>/   after a forecast chain, the canonical DB as
 #       .duckdb.zst, verified (decompressed, sha256 compared, opened)
 #
@@ -67,6 +69,16 @@ on:
         required: false
         default: false
         type: boolean
+      forecast_review_only:
+        description: "With publish_run_id: add only the missing forecast_review/ folder to a forecast chain already in Drive (never replaces the zip)"
+        required: false
+        default: false
+        type: boolean
+      forecast_review_replace:
+        description: "With forecast_review_only: remove an existing forecast_review/ folder (only that folder) and write it again"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Weekly safety net: Mondays 05:23 UTC, backfill mode over 80 days.
     - cron: "23 5 * * 1"
@@ -90,6 +102,7 @@ jobs:
     if: >-
       inputs.scored_bundle_only != true && inputs.scored_bundle_only != 'true'
       && inputs.resolver_review_only != true && inputs.resolver_review_only != 'true'
+      && inputs.forecast_review_only != true && inputs.forecast_review_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -366,12 +379,80 @@ jobs:
         if: always()
         run: rm -rf "${RUNNER_TEMP}/rclone"
 
+  # Adds forecast_review/ to a forecast chain archived before that folder
+  # existed. Reads the chain zip back from Drive, writes the workflow-log
+  # index from the API, finds the previous chain's inputs in Drive, and
+  # uploads only that folder.
+  forecast_review:
+    name: Add forecast_review/ to an archived chain
+    if: inputs.forecast_review_only == true || inputs.forecast_review_only == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone >/dev/null
+          python -m pip install --quiet "duckdb>=1.4,<2" pyyaml
+
+      - name: Write rclone config
+        env:
+          RCLONE_CONF_B64: ${{ secrets.RCLONE_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+
+      - name: Add forecast_review/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          IN_REPLACE: ${{ inputs.forecast_review_replace }}
+        run: |
+          set -euo pipefail
+          if [ -z "${IN_PUBLISH_RUN_ID:-}" ]; then
+            echo "::error::forecast_review_only needs publish_run_id."
+            exit 1
+          fi
+          ARGS=(--publish-run-id "${IN_PUBLISH_RUN_ID}" --report "archive_leg/forecast_review_${IN_PUBLISH_RUN_ID}.json")
+          if [ "${IN_REPLACE:-}" = "true" ]; then
+            ARGS+=(--replace)
+          fi
+          python -m scripts.ci.drive_archive forecast-review "${ARGS[@]}"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-forecast-review-${{ github.run_id }}
+          path: archive_leg/*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"
+
   housekeeping:
     name: Thin snapshots, check space, write diagnostics
     needs: [plan, archive]
     if: >-
       always() && inputs.scored_bundle_only != true && inputs.scored_bundle_only != 'true'
       && inputs.resolver_review_only != true && inputs.resolver_review_only != 'true'
+      && inputs.forecast_review_only != true && inputs.forecast_review_only != 'true'
 
     runs-on: ubuntu-latest
     timeout-minutes: 30

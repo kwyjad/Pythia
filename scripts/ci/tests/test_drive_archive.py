@@ -702,3 +702,192 @@ def test_the_backfill_refuses_a_chain_not_in_drive(tmp_path):
     out = da.backfill_scored_bundle(spec, rclone=rc, work=tmp_path / "bf", env={})
     assert out["status"] == "failed" and "not in Drive" in out["reason"]
     assert rc.copies == []
+
+
+# ---------------------------------------------------------------------------
+# forecast_review/ beside a forecast chain
+# ---------------------------------------------------------------------------
+
+from scripts.ci.tests.test_forecast_review_inputs import FC, build_chain  # noqa: E402
+
+
+def test_a_forecast_chain_gets_its_review_folder_inputs_first(tmp_path):
+    staging = build_chain(tmp_path)
+    out = da.extract_forecast_review(staging, tmp_path / "fr", tmp_path / "w", env={})
+    assert out["files"][0]["file"] == da.FORECAST_REVIEW_INPUTS
+    names = {f["file"] for f in out["files"]}
+    assert f"debug__question_metrics__{FC}.csv" in names
+    assert "attribution__trace_quality.csv" in names
+    assert "current__sibyl.json" in names
+    assert "pipeline_stage__stage_health__fc_collect_finalize.json" in names
+    assert "sibyl__sibyl_run.log" in names
+    # Never the large files: their figures are in the inputs.
+    assert not any("llm_calls_detail" in n or "spd_tables" in n for n in names)
+    skipped = (tmp_path / "fr" / "SKIPPED.md").read_text()
+    assert "debug__llm_calls_detail" in skipped and "never copied" in skipped
+    assert "workflow_logs_index.json" in skipped  # this chain has none
+    payload = json.loads((tmp_path / "fr" / da.FORECAST_REVIEW_INPUTS).read_text())
+    assert payload["meta"]["fc_run_id"] == FC
+    assert all(p.stat().st_size <= da.SCORED_FILE_CAP for p in (tmp_path / "fr").iterdir())
+    assert not any(p.suffix == ".zip" for p in (tmp_path / "fr").iterdir())
+
+
+def test_the_forecast_review_caps_skip_and_name_files(tmp_path):
+    staging = build_chain(tmp_path)
+    out = da.extract_forecast_review(staging, tmp_path / "fr", tmp_path / "w", env={},
+                                     file_cap=20_000, total_cap=150_000)
+    reasons = {s["file"]: s["reason"] for s in out["skipped"]}
+    assert any("per-file cap" in r for r in reasons.values())
+    assert any("folder past" in r for r in reasons.values())
+    skipped_md = (tmp_path / "fr" / "SKIPPED.md").read_text()
+    assert "per-file cap" in skipped_md
+    # The inputs file always leads, even over the per-file cap.
+    assert out["files"][0]["file"] == da.FORECAST_REVIEW_INPUTS
+
+
+def test_the_forecast_review_folder_is_scanned_for_credentials(tmp_path):
+    staging = build_chain(tmp_path)
+    secret = "sk-live-0123456789abcdefghijklmnop"
+    log = next(staging.rglob("sibyl_run.log"))
+    log.write_text(log.read_text() + f"key={secret}\n")
+    with pytest.raises(bcd.SecretLeak):
+        da.extract_forecast_review(staging, tmp_path / "fr", tmp_path / "w", env={"OPENAI_API_KEY": secret})
+
+
+def test_a_scoring_chain_gets_no_forecast_review(tmp_path):
+    staging = tmp_path / "s"
+    (staging / "01_resolver_update__1").mkdir(parents=True)
+    (staging / "manifest.json").write_text(json.dumps({"chain": {"kind": "scoring"}}))
+    assert da.extract_forecast_review(staging, tmp_path / "fr", tmp_path / "w", env={}) is None
+
+
+def _put_previous(rc_store: Path, folder: str, payload: dict) -> None:
+    p = rc_store / "Fred_archive" / "runs" / folder[:4] / folder / da.FORECAST_REVIEW_DIR / da.FORECAST_REVIEW_INPUTS
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(payload))
+
+
+def test_the_previous_review_is_the_newest_older_production_chain(tmp_path):
+    rc = FakeRclone(tmp_path / "drive")
+    names = da.archive_names(kind="forecast", start_date="2026-11-13", publish_run_id="13", fc_run_id="fc_3")
+    _put_previous(tmp_path / "drive", "2026-10-01__forecast__fc_1__gh1", {"meta": {"fc_run_id": "fc_1", "is_test": False}})
+    _put_previous(tmp_path / "drive", "2026-10-13__forecast__fc_2__gh2",
+                  {"meta": {"fc_run_id": "fc_2", "is_test": False}, "previous_run": {"x": 1}})
+    _put_previous(tmp_path / "drive", "2026-11-01__forecast__fc_t__gh9__TEST", {"meta": {"is_test": True}})
+    _put_previous(tmp_path / "drive", "2026-12-13__forecast__fc_4__gh4", {"meta": {"fc_run_id": "fc_4"}})
+    prev = da.find_previous_review(rc, names, tmp_path / "w")
+    assert prev["meta"]["fc_run_id"] == "fc_2"
+    assert "previous_run" not in prev  # never nested twice
+    empty = da.find_previous_review(FakeRclone(tmp_path / "none"), names, tmp_path / "w2")
+    assert empty == {"stub": True, "reason": "no earlier forecast_review"}
+
+
+def test_job_log_scan_counts_annotations_and_tracebacks_not_echoed_source():
+    steps = [{"name": "Download", "started_at": "2026-11-13T23:54:20Z", "completed_at": "2026-11-13T23:54:59Z"},
+             {"name": "Bundle", "started_at": "2026-11-14T00:01:00Z", "completed_at": "2026-11-14T00:05:00Z"}]
+    text = "\n".join([
+        "2026-11-13T23:54:21.7437534Z \x1b[36;1m  echo \"::error::pipeline_id has an unexpected shape\"\x1b[0m",
+        "2026-11-14T00:02:00.0000000Z Traceback (most recent call last):",
+        "2026-11-14T00:02:00.1000000Z ##[error]Process completed with exit code 1.",
+        "2026-11-14T00:09:00.0000000Z ##[error]late",
+    ])
+    hits = da.scan_job_log(text, steps)
+    assert "Download" not in hits
+    assert hits["Bundle"]["n_traceback"] == 1 and hits["Bundle"]["n_error"] == 1
+    assert hits["(unattributed)"]["n_error"] == 1
+
+
+class LogGh(FakeGh):
+    def __init__(self, yaml_text: str, log: str):
+        super().__init__()
+        self.yaml_text, self.log = yaml_text, log
+
+    def api(self, path):
+        import base64
+
+        if "/contents/" in path:
+            return {"content": base64.b64encode(self.yaml_text.encode()).decode()}
+        if path.split("?")[0].endswith("/jobs"):
+            return {"jobs": [{"id": 7, "name": "build", "steps": [
+                {"name": "Make bundle", "conclusion": "success",
+                 "started_at": "2026-11-14T00:01:00Z", "completed_at": "2026-11-14T00:05:00Z"},
+                {"name": "Upload", "conclusion": "success",
+                 "started_at": "2026-11-14T00:05:01Z", "completed_at": "2026-11-14T00:06:00Z"}]}]}
+        return super().api(path)
+
+    def api_text(self, path):
+        assert path.endswith("/jobs/7/logs")
+        return self.log
+
+
+def test_the_logs_index_reads_continue_on_error_from_the_workflow_at_the_run_sha(tmp_path):
+    wf = "jobs:\n  build:\n    steps:\n      - name: Make bundle\n        continue-on-error: true\n        run: x\n" \
+         "      - name: Upload\n        run: y\n"
+    gh = LogGh(wf, "2026-11-14T00:02:00.0000000Z Traceback (most recent call last):\n")
+    info = _run(55, "Sibyl Deep Research", "2026-11-14T00:00:00Z")
+    info["head_sha"] = "abc"
+    gh.add(info)
+    idx = da.build_workflow_logs_index(gh, REPO, ["55"])
+    steps = {s["name"]: s for s in idx["runs"][0]["steps"]}
+    assert steps["Make bundle"]["continue_on_error"] is True and steps["Make bundle"]["n_traceback"] == 1
+    assert steps["Upload"]["continue_on_error"] is False and steps["Upload"]["n_traceback"] == 0
+    # And the inputs builder reads it: a step that succeeded and logged a traceback.
+    staging = build_chain(tmp_path)
+    (staging / "workflow_logs_index.json").write_text(json.dumps(idx))
+    from scripts.ci import forecast_review_inputs as fri
+
+    payload = fri.build_inputs(fri.locate(staging, tmp_path / "w"))
+    errored = payload["chain"]["steps_succeeded_with_traceback_or_error"]
+    assert [e["step"] for e in errored] == ["Make bundle"]
+    assert errored[0]["continue_on_error"] is True
+
+
+def test_an_unreadable_run_is_recorded_not_raised():
+    idx = da.build_workflow_logs_index(FakeGh(), REPO, ["999"])
+    assert idx["runs"][0]["problems"]
+
+
+def test_the_forecast_review_backfill_adds_only_its_folder(tmp_path):
+    rc = FakeRclone(tmp_path / "drive")
+    names = da.archive_names(kind="forecast", start_date="2026-11-13", publish_run_id="43538181703",
+                             fc_run_id=FC, sibyl_run_id="43531717339")
+    staging = build_chain(tmp_path / "c")
+    run_dir = tmp_path / "drive" / "Fred_archive" / names.run_dir
+    run_dir.mkdir(parents=True)
+    bcd.zip_tree(staging, run_dir / names.zip_name)
+    (run_dir / "README.md").write_text("loose")
+    _put_previous(tmp_path / "drive", "2026-10-13__forecast__fc_1791866322__gh38355281121",
+                  {"meta": {"fc_run_id": "fc_1791866322", "is_test": False}})
+    before = {p.name: p.read_bytes() for p in run_dir.iterdir() if p.is_file()}
+    spec = {"publish_run_id": "43538181703", "names": dataclasses_asdict(names)}
+    out = da.backfill_forecast_review(spec, rclone=rc, work=tmp_path / "bf", env={})
+    assert out["status"] == "archived", out
+    assert {p.name: p.read_bytes() for p in run_dir.iterdir() if p.is_file()} == before
+    assert rc.copies == [("subtree", f"{names.run_dir}/forecast_review")]
+    folder = run_dir / "forecast_review"
+    payload = json.loads((folder / da.FORECAST_REVIEW_INPUTS).read_text())
+    assert payload["previous_run"]["meta"]["fc_run_id"] == "fc_1791866322"
+    assert out["forecast_review"]["previous_run"] == "fc_1791866322"
+    # Again: present, left alone. With replace: only that folder is rewritten.
+    rc.copies.clear()
+    assert da.backfill_forecast_review(spec, rclone=rc, work=tmp_path / "bf2", env={})["status"] == "already_present"
+    assert rc.copies == []
+    purged = []
+    rc.purge_dir = lambda rel: (purged.append(rel), shutil.rmtree(tmp_path / "drive" / "Fred_archive" / rel))
+    again = da.backfill_forecast_review(spec, rclone=rc, work=tmp_path / "bf3", env={}, replace=True)
+    assert again["status"] == "archived" and purged == [f"{names.run_dir}/forecast_review"]
+    assert {p.name: p.read_bytes() for p in run_dir.iterdir() if p.is_file()} == before
+
+
+def test_the_forecast_review_backfill_refuses_a_chain_not_in_drive(tmp_path):
+    rc = FakeRclone(tmp_path / "drive")
+    names = da.archive_names(kind="forecast", start_date="2026-11-13", publish_run_id="1", fc_run_id="fc_1")
+    out = da.backfill_forecast_review({"publish_run_id": "1", "names": dataclasses_asdict(names)},
+                                      rclone=rc, work=tmp_path / "bf", env={})
+    assert out["status"] == "failed" and "not in Drive" in out["reason"]
+
+
+def dataclasses_asdict(obj):
+    import dataclasses
+
+    return dataclasses.asdict(obj)

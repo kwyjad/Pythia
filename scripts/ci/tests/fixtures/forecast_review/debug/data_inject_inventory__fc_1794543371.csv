@@ -1,0 +1,4 @@
+iso3,country_name,acled_fatalities_months,idmc_displacement_months,ifrc_pa_months,conflict_forecasts_available,fewsnet_ipc_rows,ipc_api_rows,food_security_source,reliefweb_reports_count,hdx_signals_count,enso_loaded,seasonal_tc_loaded,nmme_available,crisiswatch_arrow,gdacs_event_months
+AFG,,106,7,344,True,182,0,FEWS NET,284,27,True,,True,unchanged,81
+PER,,106,0,213,True,0,0,,37,5,True,,True,unchanged,106
+SDN,,106,9,328,True,190,0,FEWS NET,309,57,True,,True,unchanged,69

@@ -1,0 +1,11 @@
+{
+ "forecaster_run_id": "fc_1794543371",
+ "hs_run_id": "hs_20261113T035247",
+ "env_snapshot": {
+  "env": {
+   "PYTHIA_ADVICE_EXPERIMENT_SHARE": "0.5",
+   "PYTHIA_RC_SHIFT_SHARE": "0.5",
+   "SIBYL_ADVICE_EXPERIMENT_SHARE": "<unset>"
+  }
+ }
+}

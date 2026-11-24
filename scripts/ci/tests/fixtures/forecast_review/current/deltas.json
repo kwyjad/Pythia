@@ -1,0 +1,35 @@
+{
+ "previous_run_id": "fc_1791866322",
+ "largest_spd_movements": [
+  {
+   "iso3": "MEX",
+   "hazard_code": "ACE",
+   "metric": "FATALITIES",
+   "question_id": "MEX_ACE_FATALITIES_2026-12",
+   "previous_question_id": "MEX_ACE_FATALITIES_2026-11",
+   "js_current_vs_previous": 0.32144,
+   "current_model": "track2_flash",
+   "previous_model": "track2_flash"
+  },
+  {
+   "iso3": "GTM",
+   "hazard_code": "ACE",
+   "metric": "FATALITIES",
+   "question_id": "GTM_ACE_FATALITIES_2026-12",
+   "previous_question_id": "GTM_ACE_FATALITIES_2026-11",
+   "js_current_vs_previous": 0.22364,
+   "current_model": "track2_flash",
+   "previous_model": "ensemble_mean_v2"
+  },
+  {
+   "iso3": "NGA",
+   "hazard_code": "ACE",
+   "metric": "FATALITIES",
+   "question_id": "NGA_ACE_FATALITIES_2026-12",
+   "previous_question_id": "NGA_ACE_FATALITIES_2026-11",
+   "js_current_vs_previous": 0.21976,
+   "current_model": "track2_flash",
+   "previous_model": "track2_flash"
+  }
+ ]
+}

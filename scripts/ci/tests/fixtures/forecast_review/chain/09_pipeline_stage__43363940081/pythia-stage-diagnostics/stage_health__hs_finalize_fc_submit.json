@@ -1,0 +1,141 @@
+{
+  "stage": "hs_finalize_fc_submit",
+  "hs_run_id": "hs_20261113T035247",
+  "fc_run_id": "",
+  "since": "2026-11-13 04:12:10",
+  "grounding": {
+    "available": true,
+    "rc": {
+      "n_calls": 0,
+      "by_model": {},
+      "n_no_backend": 0,
+      "no_backend_by_reason": {},
+      "no_backend_pct": 0.0
+    },
+    "triage": {
+      "n_calls": 0,
+      "by_model": {},
+      "n_no_backend": 0,
+      "no_backend_by_reason": {},
+      "no_backend_pct": 0.0
+    }
+  },
+  "rc_levels": {
+    "available": true,
+    "n_rows": 480,
+    "n_not_assessed": 132,
+    "n_assessed": 348,
+    "by_level": {
+      "0": 406,
+      "1": 37,
+      "2": 34,
+      "3": 3
+    },
+    "by_level_assessed": {
+      "0": 274,
+      "1": 37,
+      "2": 34,
+      "3": 3
+    },
+    "by_track": {
+      "(null)": 379,
+      "1": 74,
+      "2": 27
+    }
+  },
+  "is_test": {
+    "scoped": true,
+    "per_table": {
+      "hs_runs": {
+        "false": 1
+      },
+      "hs_triage": {
+        "false": 480
+      },
+      "llm_calls": {
+        "false": 1448
+      },
+      "hs_hazard_tail_packs": {
+        "false": 578
+      },
+      "hs_adversarial_checks": {
+        "false": 73
+      }
+    },
+    "distinct_values": [
+      "false"
+    ],
+    "consistent": true,
+    "expected": false,
+    "matches_expected": true
+  },
+  "cost": {
+    "available": true,
+    "since": "2026-11-13 04:12:10",
+    "run_scoped": true,
+    "run_total": {
+      "n_calls": 1448,
+      "cost_usd": 8.0949,
+      "tokens": 5349993
+    },
+    "stage_total": {
+      "n_calls": 522,
+      "cost_usd": 3.2174,
+      "tokens": 2440085
+    },
+    "run_by_phase": [
+      {
+        "key": "hs_triage",
+        "n_calls": 1448,
+        "cost_usd": 8.0949,
+        "tokens": 5349993
+      }
+    ],
+    "stage_by_phase": [
+      {
+        "key": "hs_triage",
+        "n_calls": 522,
+        "cost_usd": 3.2174,
+        "tokens": 2440085
+      }
+    ],
+    "stage_by_call_type": [
+      {
+        "key": "triage_pass_1",
+        "n_calls": 230,
+        "cost_usd": 1.2489,
+        "tokens": 1961945
+      },
+      {
+        "key": "adversarial_search",
+        "n_calls": 219,
+        "cost_usd": 1.095,
+        "tokens": 0
+      },
+      {
+        "key": "adversarial_synthesis",
+        "n_calls": 73,
+        "cost_usd": 0.8735,
+        "tokens": 478140
+      }
+    ],
+    "stage_by_model": [
+      {
+        "key": "gemini-3.6-flash",
+        "n_calls": 303,
+        "cost_usd": 2.1224,
+        "tokens": 2440085
+      },
+      {
+        "key": "brave-web-search",
+        "n_calls": 219,
+        "cost_usd": 1.095,
+        "tokens": 0
+      }
+    ]
+  },
+  "sibyl": {
+    "available": false,
+    "reason": "no sibyl_runs row matching hs_run_id = ?"
+  }
+}

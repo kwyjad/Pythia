@@ -1,0 +1,99 @@
+{
+ "built_at": "2026-11-19T17:11:08+00:00",
+ "repository": "kwyjad/Pythia",
+ "source_run": "43538181703",
+ "publish_run": "43538181703",
+ "runs": [
+  {
+   "folder": "08_pipeline_stage__43362670678",
+   "run_id": "43362670678",
+   "workflow": "Pythia Pipeline Stage",
+   "reason": "stage of pipeline hs_20261113T035247",
+   "conclusion": "success",
+   "created_at": "2026-11-13T04:00:41Z",
+   "lineage": null
+  },
+  {
+   "folder": "09_pipeline_stage__43363940081",
+   "run_id": "43363940081",
+   "workflow": "Pythia Pipeline Stage",
+   "reason": "stage of pipeline hs_20261113T035247",
+   "conclusion": "success",
+   "created_at": "2026-11-13T04:12:03Z",
+   "lineage": null
+  },
+  {
+   "folder": "10_pipeline_stage__43530492374",
+   "run_id": "43530492374",
+   "workflow": "Pythia Pipeline Stage",
+   "reason": "upstream (Actions API fallback: no lineage.json)",
+   "conclusion": "success",
+   "created_at": "2026-11-13T23:54:14Z",
+   "lineage": null
+  },
+  {
+   "folder": "11_sibyl__43531717339",
+   "run_id": "43531717339",
+   "workflow": "Sibyl Deep Research",
+   "reason": "upstream (Actions API fallback: no lineage.json)",
+   "conclusion": "success",
+   "created_at": "2026-11-14T00:04:56Z",
+   "lineage": null
+  },
+  {
+   "folder": "12_publish_latest_data__43538181703",
+   "run_id": "43538181703",
+   "workflow": "Publish Latest Data (Release)",
+   "reason": "source",
+   "conclusion": "success",
+   "created_at": "2026-11-14T01:03:13Z",
+   "lineage": null
+  }
+ ],
+ "missing": [
+  {
+   "run_id": "43362670678",
+   "artifact": "pythia-stage-context",
+   "reason": "absent"
+  },
+  {
+   "run_id": "43363940081",
+   "artifact": "pythia-stage-context",
+   "reason": "absent"
+  },
+  {
+   "run_id": "43531717339",
+   "artifact": "pythia-debug-bundle-workflow-logs",
+   "reason": "absent"
+  },
+  {
+   "run_id": "43538181703",
+   "artifact": "chain-diagnostics-publish_latest_data-43538181703",
+   "reason": "absent (the run predates chain diagnostics, or died before writing them)"
+  }
+ ],
+ "notes": [],
+ "mode": "full",
+ "max_bytes": null,
+ "chain": {
+  "kind": "forecast",
+  "started_at": "2026-11-13T04:00:41+00:00",
+  "start_date": "2026-11-13",
+  "fc_run_id": "fc_1794543371",
+  "hs_run_id": "hs_20261113T035247",
+  "pipeline_id": "hs_20261113T035247",
+  "sibyl_run_id": "43531717339",
+  "is_test": false
+ },
+ "dropped": [],
+ "files": [
+  {
+   "path": "11_sibyl__43531717339/pythia-debug-bundle/pythia_debug_bundle__fc_1794543371.zip",
+   "source_run": "43531717339",
+   "workflow": "Sibyl Deep Research",
+   "artifact": "pythia-debug-bundle",
+   "bytes": 20935033,
+   "sha256": "b61282a5e3426e81ce175af88e6357bcf04f31eb3d3aed0166bb4c9e0f3491b4"
+  }
+ ]
+}

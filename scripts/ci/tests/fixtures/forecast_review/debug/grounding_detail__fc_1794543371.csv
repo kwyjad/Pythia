@@ -1,0 +1,27 @@
+iso3,hazard_code,phase,call_type,stage,model_id,grounded,n_sources,query,error_code,elapsed_ms,timestamp,db_phase
+AFG,ADVERSARIAL_ACE,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Afghanistan peace talks ceasefire diplomatic resolution 2026,,870,2026-11-13 04:13:19.785763,hs_triage
+AFG,ADVERSARIAL_ACE,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Afghanistan conflict de-escalation stabilization November 2026,,850,2026-11-13 04:13:20.758364,hs_triage
+AFG,ADVERSARIAL_ACE,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Afghanistan Sustained heavy artillery or airstrike exchanges between Pakistani forces,,825,2026-11-13 04:13:21.623895,hs_triage
+AFG,ADVERSARIAL_FL,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Afghanistan flood forecast revised improved 2026,,640,2026-11-13 04:13:39.033717,hs_triage
+AFG,ADVERSARIAL_FL,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Afghanistan flood preparedness infrastructure improved,,626,2026-11-13 04:13:39.718185,hs_triage
+AFG,ADVERSARIAL_FL,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Afghanistan Widespread flash flooding reports and soil saturation levels reaching,,670,2026-11-13 04:13:40.439950,hs_triage
+AFG,GROUNDING_ACE,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Afghanistan (AFG) armed conflict violence displacement humanitarian situation 2026,,1001,2026-11-13 03:52:50.671512,hs_triage
+AFG,GROUNDING_DR,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Afghanistan (AFG) drought food insecurity food security crisis 2026,,1006,2026-11-13 03:52:50.676704,hs_triage
+AFG,GROUNDING_FL,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Afghanistan (AFG) flooding displacement humanitarian impact 2026,,1036,2026-11-13 03:52:50.707384,hs_triage
+AFG,TRIAGE_GROUNDING_DR,triage_grounding,triage_grounding,triage_grounding,brave-web-search,True,10,Afghanistan (AFG) drought food insecurity crop failure humanitarian response 2026,,1093,2026-11-13 04:02:07.286196,hs_triage
+PER,ADVERSARIAL_DR,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Peru drought forecast revised rainfall improvement 2026,,899,2026-11-13 04:15:07.258034,hs_triage
+PER,ADVERSARIAL_DR,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Peru drought preparedness water infrastructure improved,,728,2026-11-13 04:15:08.029331,hs_triage
+PER,ADVERSARIAL_DR,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Peru Widespread crop loss reports exceeding historical seasonal averages during,,795,2026-11-13 04:15:08.865734,hs_triage
+PER,ADVERSARIAL_FL,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Peru flood forecast revised improved 2026,,763,2026-11-13 04:14:51.756968,hs_triage
+PER,ADVERSARIAL_FL,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Peru flood preparedness infrastructure improved,,733,2026-11-13 04:14:52.531597,hs_triage
+PER,ADVERSARIAL_FL,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,"Peru ENFEN/INDECI red-alert warnings for major river overflows in Piura,",,780,2026-11-13 04:14:53.352622,hs_triage
+PER,GROUNDING_ACE,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Peru (PER) armed conflict violence displacement humanitarian situation 2026,,864,2026-11-13 03:53:13.749178,hs_triage
+PER,GROUNDING_DR,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Peru (PER) drought food insecurity food security crisis 2026,,804,2026-11-13 03:53:13.689645,hs_triage
+PER,GROUNDING_FL,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Peru (PER) flooding displacement humanitarian impact 2026,,832,2026-11-13 03:53:13.718602,hs_triage
+PER,TRIAGE_GROUNDING_ACE,triage_grounding,triage_grounding,triage_grounding,brave-web-search,True,10,Peru (PER) armed conflict violence displacement humanitarian situation 2026,,858,2026-11-13 04:02:42.088623,hs_triage
+SDN,ADVERSARIAL_DR,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Sudan drought forecast revised rainfall improvement 2026,,692,2026-11-13 04:15:15.147086,hs_triage
+SDN,ADVERSARIAL_DR,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Sudan drought preparedness water infrastructure improved,,719,2026-11-13 04:15:15.906392,hs_triage
+SDN,ADVERSARIAL_DR,adversarial_search,adversarial_search,adversarial_search,brave-web-search,True,10,Sudan Abnormal post-harvest staple food price spikes in Darfur and,,772,2026-11-13 04:15:16.719870,hs_triage
+SDN,GROUNDING_ACE,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Sudan (SDN) armed conflict violence displacement humanitarian situation 2026,,1188,2026-11-13 03:53:17.454152,hs_triage
+SDN,GROUNDING_DR,rc_grounding,rc_grounding,rc_grounding,brave-web-search,True,10,Sudan (SDN) drought food insecurity food security crisis 2026,,1248,2026-11-13 03:53:17.514530,hs_triage
+SDN,TRIAGE_GROUNDING_ACE,triage_grounding,triage_grounding,triage_grounding,brave-web-search,True,10,Sudan (SDN) armed conflict violence displacement humanitarian situation 2026,,843,2026-11-13 04:02:46.809994,hs_triage

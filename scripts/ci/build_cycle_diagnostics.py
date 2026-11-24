@@ -162,6 +162,19 @@ class Gh:
                     self.sleep(5 * (2 ** i))
         raise RuntimeError(f"gh api {path} failed: {last}")
 
+    def api_text(self, path: str) -> str:
+        """A raw (non-JSON) API answer, such as a job's log (``gh`` follows the redirect)."""
+        last: Exception | None = None
+        for i in range(self.attempts):
+            try:
+                return subprocess.run(["gh", "api", path], capture_output=True, text=True,
+                                      check=True, timeout=300).stdout or ""
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                if i + 1 < self.attempts:
+                    self.sleep(5 * (2 ** i))
+        raise RuntimeError(f"gh api {path} failed: {last}")
+
     def download(self, run_id: str, name: str, dest: Path) -> tuple[bool, str]:
         dest.mkdir(parents=True, exist_ok=True)
         try:

@@ -23,6 +23,10 @@ Layout under ``$DRIVE_ROOT`` (``Fred_archive``)::
                                                 a chain with a Resolver Update
                                                 also gets resolver_review/ (the
                                                 resolver review's inputs file
+                                                and the files it reads); a
+                                                forecast chain also gets
+                                                forecast_review/ (the forecast
+                                                pipeline review's inputs file
                                                 and the files it reads)
     db_snapshots/<YYYY>/                        pythia_resolver_db_*.duckdb.zst
                                                 and its .db_snapshot.json
@@ -38,6 +42,8 @@ Subcommands, each a step of the workflow:
                  files are never replaced).
 ``resolver-review`` add only the missing ``resolver_review/`` folder the
                  same way.
+``forecast-review`` add only the missing ``forecast_review/`` folder the
+                 same way (and the workflow-log index, from the API).
 ``housekeeping`` thin old DB snapshots, check Drive space, merge the legs'
                  reports into ``archive_report.json`` for the chain diagnostics.
 
@@ -776,6 +782,312 @@ def extract_resolver_review(staging: Path, dest: Path, work: Path, *,
             "files": written, "skipped": skipped, "total_bytes": total}
 
 
+# ---------------------------------------------------------------------------
+# The forecast pipeline review's inputs, unzipped beside a forecast chain
+# ---------------------------------------------------------------------------
+
+#: The forecast pipeline review (``forecast_review_template.md`` in Drive) is
+#: written after every forecast chain by a session reading Drive as text. Its
+#: inputs sit in three zips nested in the chain zip, the debug bundle alone
+#: 20 MB in November 2026; this folder holds a summary of them
+#: (``forecast_review_inputs.json``) and the files the review reads.
+FORECAST_REVIEW_DIR = "forecast_review"
+FORECAST_REVIEW_INPUTS = "forecast_review_inputs.json"
+#: Lifted from the debug bundle, by stem (``<stem>__<run>.<ext>`` at its top),
+#: named ``debug__<file>``. Never ``llm_calls_detail``, ``spd_tables``,
+#: ``provider_batch_objects`` or the workflow logs: their figures are in the
+#: inputs file.
+FORECAST_REVIEW_DEBUG_FILES = (
+    "anomalies", "executive_summary", "health_report", "timing_breakdown", "batch_lifecycle",
+    "retry_report", "model_completeness_rollup", "run_comparison", "connector_freshness",
+    "crisiswatch_inject", "data_inject_inventory", "gdacs_prompt_check", "rc_triage_summary",
+    "prompt_cache_report", "model_config", "env_and_config", "question_metrics", "coverage_detail",
+    "provider_preflight", "rc_pass_detail", "grounding_detail", "model_completeness", "prompt_prefixes",
+)
+#: Lifted from the forecast attribution bundle, named ``attribution__<file>``.
+FORECAST_REVIEW_ATTRIBUTION_FILES = (
+    "ANALYST_GUIDE.md", "MANIFEST.json", "prompts/section_hashes.json", "prompts/prompt_sections.csv",
+    "inputs/input_inventory.csv", "attribution/trace_quality.csv", "attribution/rc_assessment.csv",
+    "attribution/rc_shift_arms.csv", "contrasts/run_over_run.csv", "contrasts/fred_vs_sibyl.csv",
+    "inputs/base_rates.csv", "attribution/prior_anchoring.csv", "contrasts/model_disagreement.csv",
+    "prompts/token_share.csv",
+)
+#: Lifted from the current-run bundle, named ``current__<file>``.
+FORECAST_REVIEW_CURRENT_FILES = ("sibyl.json", "blind_spots.json", "deltas.json", "manifest.json")
+#: Stage files anywhere in the chain, by glob, named ``<run folder slug>__<file>``.
+FORECAST_REVIEW_STAGE_GLOBS = (
+    "stage_health__*.json", "post_run__*.txt", "batch_economics__*.json", "hs_triage_failures__*.json",
+    "hs_triage_coverage__*.csv", "provider_preflight.json", "grounding_citation.json", "sibyl_run.log",
+    "experiment_arms__*.json", "gate_recalibration.md", "anchor_depth.json",
+)
+FORECAST_REVIEW_NEVER = ("debug__llm_calls_detail", "debug__spd_tables", "debug__provider_batch_objects",
+                         "debug__workflow_logs/")
+
+
+def _forecast_review_plan(src: Any) -> list[tuple[str, Path | None]]:
+    """(name in the folder, source path or None when absent), in priority order."""
+    plan: list[tuple[str, Path | None]] = [("workflow_logs_index.json",
+                                            src.staging / "workflow_logs_index.json"
+                                            if (src.staging / "workflow_logs_index.json").is_file() else None)]
+    for stem in FORECAST_REVIEW_DEBUG_FILES:
+        path = src.dbg(stem)
+        plan.append((f"debug__{path.name if path else stem}", path))
+    for rel in FORECAST_REVIEW_ATTRIBUTION_FILES:
+        plan.append((f"attribution__{Path(rel).name}", src.att(rel)))
+    for rel in FORECAST_REVIEW_CURRENT_FILES:
+        plan.append((f"current__{rel}", src.cur(rel)))
+    seen: set[Path] = set()
+    for pattern in FORECAST_REVIEW_STAGE_GLOBS:
+        hits = [p for p in src.find(pattern) if p.resolve() not in seen]
+        if not hits:
+            plan.append((pattern, None))
+        for p in hits:
+            seen.add(p.resolve())
+            m = _rr_folder_re().match(p.relative_to(src.staging).parts[0])
+            prefix = m.group("slug") if m else "chain"
+            plan.append((f"{prefix}__{p.name}", p))
+    return plan
+
+
+def _rr_folder_re():
+    from scripts.ci.resolver_review_inputs import _FOLDER_RE
+
+    return _FOLDER_RE
+
+
+def is_forecast_chain(staging: Path) -> bool:
+    manifest = {}
+    try:
+        manifest = json.loads((staging / "manifest.json").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        pass
+    if (manifest.get("chain") or {}).get("kind") == "forecast":
+        return True
+    return any(staging.rglob("pythia_debug_bundle__*.zip"))
+
+
+def extract_forecast_review(staging: Path, dest: Path, work: Path, *,
+                            previous: Mapping[str, Any] | None = None,
+                            file_cap: int = SCORED_FILE_CAP, total_cap: int = SCORED_TOTAL_CAP,
+                            env: Mapping[str, str] | None = None) -> dict[str, Any] | None:
+    """Write ``forecast_review/`` for a forecast chain (None for any other).
+
+    The inputs file goes in first; then the lifted files in priority order
+    under the ``scored_bundle/`` caps, every listed file absent, too large or
+    over the folder cap named in ``SKIPPED.md``. Scanned for credentials
+    (raises ``SecretLeak``)."""
+    from scripts.ci.build_cycle_diagnostics import scan_for_secrets
+    from scripts.ci import forecast_review_inputs as fri
+
+    if not is_forecast_chain(staging):
+        return None
+    src = fri.locate(staging, work)
+    dest.mkdir(parents=True, exist_ok=True)
+    payload = fri.write_inputs_from(src, dest / FORECAST_REVIEW_INPUTS, previous=previous)
+    total = (dest / FORECAST_REVIEW_INPUTS).stat().st_size
+    written = [{"file": FORECAST_REVIEW_INPUTS, "bytes": total}]
+    skipped: list[dict[str, Any]] = []
+    if total > file_cap:
+        skipped.append({"file": FORECAST_REVIEW_INPUTS, "bytes": total,
+                        "reason": f"over the {file_cap} byte per-file cap: written anyway, it leads the folder"})
+    for name, path in _forecast_review_plan(src):
+        if path is None or not Path(path).is_file():
+            skipped.append({"file": name, "bytes": None, "reason": "not in this chain"})
+            continue
+        size = Path(path).stat().st_size
+        if size > file_cap:
+            skipped.append({"file": name, "bytes": size, "reason": f"over the {file_cap} byte per-file cap"})
+            continue
+        if total + size > total_cap:
+            skipped.append({"file": name, "bytes": size,
+                            "reason": f"would take the folder past the {total_cap} byte cap"})
+            continue
+        shutil.copy2(path, dest / name)
+        total += size
+        written.append({"file": name, "bytes": size})
+    for name in FORECAST_REVIEW_NEVER:
+        skipped.append({"file": name, "bytes": None,
+                        "reason": f"never copied: its figures are in {FORECAST_REVIEW_INPUTS}"})
+    lines = ["# Files not copied into forecast_review/", "",
+             f"Caps: {file_cap} bytes per file, {total_cap} bytes in all.", "",
+             "| File | Bytes | Why |", "|---|---|---|"]
+    lines += [f"| `{s['file']}` | {s['bytes'] if s['bytes'] is not None else '-'} | {s['reason']} |"
+              for s in skipped]
+    (dest / "SKIPPED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    scan_for_secrets(dest, dict(os.environ if env is None else env))
+    shutil.rmtree(work, ignore_errors=True)
+    return {"folder": FORECAST_REVIEW_DIR, "debug_bundle": src.debug_zip.name if src.debug_zip else None,
+            "files": written, "skipped": skipped, "total_bytes": total,
+            "stubs": fri.stubs(payload),
+            "previous_run": None if not previous or previous.get("stub") else
+            (previous.get("meta") or {}).get("fc_run_id")}
+
+
+#: ``runs/<YYYY>/<YYYY-MM-DD>__forecast__...`` folders: date and test flag.
+_RUN_FOLDER = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})__forecast__(?P<rest>.+)$")
+
+
+def find_previous_review(rclone: Rclone, names: "ArchiveNames", work: Path) -> dict[str, Any]:
+    """The newest earlier production forecast chain's inputs file, from Drive.
+
+    Lists ``runs/`` for ``*/forecast_review/forecast_review_inputs.json``,
+    newest folder first, and takes the first whose ``meta.is_test`` is false
+    and whose folder is older than this chain's. ``{"stub": ...}`` when none."""
+    try:
+        files = rclone.list_files("runs")
+    except Exception as exc:  # noqa: BLE001
+        return {"stub": True, "reason": f"Drive listing failed: {type(exc).__name__}: {exc}"}
+    candidates = []
+    for f in files:
+        parts = f.split("/")
+        if len(parts) < 4 or parts[-2] != FORECAST_REVIEW_DIR or parts[-1] != FORECAST_REVIEW_INPUTS:
+            continue
+        folder = parts[-3]
+        m = _RUN_FOLDER.match(folder)
+        if not m or "__TEST" in folder or folder >= names.folder:
+            continue
+        candidates.append((m.group("date"), folder, f))
+    for _, folder, rel in sorted(candidates, reverse=True):
+        local = work / "previous" / folder / FORECAST_REVIEW_INPUTS
+        try:
+            rclone.download(f"runs/{rel}", local)
+            payload = json.loads(local.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if (payload.get("meta") or {}).get("is_test"):
+            continue
+        payload.pop("previous_run", None)
+        return payload
+    return {"stub": True, "reason": "no earlier forecast_review"}
+
+
+_LOG_TS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
+#: A line the shell echoed as script source (``[36;1m``) is not an error.
+_ECHOED_SOURCE = "[36;1m"
+
+
+def _workflow_step_flags(gh: Any, repo: str, path: str, sha: str,
+                         cache: dict[tuple[str, str], dict[str, bool] | None]) -> dict[str, bool] | None:
+    """Step name -> continue-on-error, from the workflow file at ``sha``."""
+    key = (path, sha)
+    if key in cache:
+        return cache[key]
+    flags: dict[str, bool] | None = None
+    try:
+        import base64
+
+        import yaml
+
+        payload = gh.api(f"repos/{repo}/contents/{path}?ref={sha}") or {}
+        doc = yaml.safe_load(base64.b64decode(payload.get("content") or "").decode("utf-8")) or {}
+        flags = {}
+        for job in (doc.get("jobs") or {}).values():
+            for step in (job or {}).get("steps") or []:
+                name = step.get("name") or (f"Run {step['uses']}" if step.get("uses") else None)
+                if name:
+                    coe = step.get("continue-on-error")
+                    flags[str(name)] = flags.get(str(name), False) or coe is True or str(coe).lower() == "true"
+    except Exception:  # noqa: BLE001
+        flags = None
+    cache[key] = flags
+    return flags
+
+
+def scan_job_log(text: str, steps: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Tracebacks and ``##[error]`` lines per step, attributed by timestamp.
+
+    A ``::error`` a step echoes as script source is not counted: only lines
+    GitHub rendered as an annotation (``##[error]``) and Python tracebacks."""
+    windows = []
+    for st in steps:
+        a, b = str(st.get("started_at") or "")[:19], str(st.get("completed_at") or "")[:19]
+        if a:
+            windows.append((a, b or "9999", str(st.get("name"))))
+    out: dict[str, dict[str, Any]] = {}
+    for line in text.splitlines():
+        if _ECHOED_SOURCE in line:
+            continue
+        is_tb = "Traceback (most recent call last)" in line
+        is_err = "##[error]" in line
+        if not (is_tb or is_err):
+            continue
+        m = _LOG_TS.match(line)
+        ts = m.group(1) if m else ""
+        step = next((n for a, b, n in windows if ts and a <= ts <= b), "(unattributed)")
+        rec = out.setdefault(step, {"n_traceback": 0, "n_error": 0, "first_traceback": None, "first_error": None})
+        body = line[29:].strip() if m else line.strip()
+        if is_tb:
+            rec["n_traceback"] += 1
+            rec["first_traceback"] = rec["first_traceback"] or body[:300]
+        if is_err:
+            rec["n_error"] += 1
+            rec["first_error"] = rec["first_error"] or body[:300]
+    return out
+
+
+def build_workflow_logs_index(gh: Any, repo: str, run_ids: Iterable[str]) -> dict[str, Any]:
+    """One row per chain run: its steps, their conclusions, continue-on-error,
+    and the Tracebacks and ``##[error]`` lines in their logs. Logs are read,
+    never stored. Every failure is recorded on the row, never raised."""
+    cache: dict[tuple[str, str], dict[str, bool] | None] = {}
+    runs = []
+    for run_id in run_ids:
+        row: dict[str, Any] = {"run_id": str(run_id), "steps": [], "problems": []}
+        try:
+            info = gh.api(f"repos/{repo}/actions/runs/{run_id}") or {}
+            row |= {"workflow": info.get("name"), "path": info.get("path"),
+                    "head_sha": info.get("head_sha"), "conclusion": info.get("conclusion")}
+            flags = _workflow_step_flags(gh, repo, str(info.get("path") or "").split("@")[0],
+                                         str(info.get("head_sha") or ""), cache) if info.get("path") else None
+            jobs = (gh.api(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100") or {}).get("jobs") or []
+        except Exception as exc:  # noqa: BLE001
+            row["problems"].append(f"run unreadable: {type(exc).__name__}: {exc}")
+            runs.append(row)
+            continue
+        for job in jobs:
+            text = ""
+            api_text = getattr(gh, "api_text", None)
+            if api_text is not None:
+                try:
+                    text = api_text(f"repos/{repo}/actions/jobs/{job.get('id')}/logs") or ""
+                except Exception as exc:  # noqa: BLE001
+                    row["problems"].append(f"job {job.get('id')} log unreadable: {type(exc).__name__}")
+            steps = job.get("steps") or []
+            hits = scan_job_log(text, steps)
+            for st in steps:
+                name = str(st.get("name"))
+                h = hits.get(name, {})
+                row["steps"].append({"job": job.get("name"), "name": name, "conclusion": st.get("conclusion"),
+                                     "continue_on_error": (flags or {}).get(name) if flags is not None else None,
+                                     "n_traceback": h.get("n_traceback", 0), "n_error": h.get("n_error", 0),
+                                     "first_traceback": h.get("first_traceback"),
+                                     "first_error": h.get("first_error")})
+            if "(unattributed)" in hits:
+                row["steps"].append({"job": job.get("name"), "name": "(unattributed)", "conclusion": None,
+                                     "continue_on_error": None, **hits["(unattributed)"]})
+            row["log_read"] = bool(text) or row.get("log_read", False)
+        runs.append(row)
+    return {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "note": "counts Python tracebacks and lines GitHub rendered as ##[error]; a ::error the shell "
+                    "echoed as script source is not counted. continue_on_error is read from the workflow "
+                    "file at the run's head_sha (null when that could not be read).",
+            "runs": runs}
+
+
+def write_workflow_logs_index(gh: Any, repo: str, staging: Path) -> Path | None:
+    """Write ``workflow_logs_index.json`` into ``staging`` for every run in its manifest."""
+    try:
+        manifest = json.loads((staging / "manifest.json").read_text(encoding="utf-8"))
+        ids = [str(r.get("run_id")) for r in manifest.get("runs") or [] if r.get("run_id")]
+        payload = build_workflow_logs_index(gh, repo, ids)
+        out = staging / "workflow_logs_index.json"
+        out.write_text(json.dumps(payload, indent=1, default=str) + "\n", encoding="utf-8")
+        return out
+    except Exception as exc:  # noqa: BLE001 - the index is a diagnostic
+        print(f"::warning title=workflow logs index::{type(exc).__name__}: {exc}")
+        return None
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -910,6 +1222,11 @@ def run_leg(spec: Mapping[str, Any], *, gh: Any, repo: str, rclone: Rclone, work
                                      env=env)
     if review is not None:
         report["resolver_review"] = review
+    if is_forecast_chain(staging):
+        write_workflow_logs_index(gh, repo, staging)
+        previous = find_previous_review(rclone, names, work)
+        report["forecast_review"] = extract_forecast_review(
+            staging, run_dir / FORECAST_REVIEW_DIR, work / "forecast_review", previous=previous, env=env)
     shutil.rmtree(staging, ignore_errors=True)
     if names.db_name and spec.get("chain", {}).get("sibyl_run_id"):
         sibyl = str(spec["chain"]["sibyl_run_id"])
@@ -1136,6 +1453,91 @@ def cmd_resolver_review(args: argparse.Namespace, *, gh: Any = None, rclone: Rcl
     return code
 
 
+def backfill_forecast_review(spec: Mapping[str, Any], *, rclone: Rclone, work: Path,
+                             gh: Any = None, repo: str = "",
+                             env: Mapping[str, str] | None = None,
+                             replace: bool = False) -> dict[str, Any]:
+    """Add the missing ``forecast_review/`` folder to a forecast chain already in Drive.
+
+    Reads the chain zip back from Drive, writes the workflow-log index from
+    the API when ``gh`` is given, finds the previous chain's inputs in Drive,
+    and uploads ONLY ``<run_dir>/forecast_review/``. The zip and everything
+    beside it are never touched; an existing folder is left alone unless
+    ``replace`` is set, which removes that folder alone once its replacement
+    is built."""
+    names = ArchiveNames(**spec["names"])
+    pid = str(spec.get("publish_run_id"))
+    report: dict[str, Any] = {"publish_run_id": pid, "names": dataclasses.asdict(names),
+                              "mode": "forecast_review_only", "status": "failed"}
+    rclone.assert_single_root()
+    zip_rel = f"{names.run_dir}/{names.zip_name}"
+    if not rclone.exists(zip_rel):
+        report["reason"] = f"{zip_rel} is not in Drive; run the normal archive leg instead"
+        return report
+    folder_rel = f"{names.run_dir}/{FORECAST_REVIEW_DIR}"
+    already = rclone.list_files(folder_rel)
+    if already and not replace:
+        report.update(status="already_present", reason=f"{folder_rel} already holds {len(already)} file(s)")
+        return report
+    shutil.rmtree(work, ignore_errors=True)
+    local_zip = work / "chain" / names.zip_name
+    rclone.download(zip_rel, local_zip)
+    staging = unpack_chain_zip(local_zip, work / "staging")
+    if not is_forecast_chain(staging):
+        report.update(status="not_a_forecast_chain", reason="the chain holds no forecast pipeline")
+        shutil.rmtree(work, ignore_errors=True)
+        return report
+    if gh is not None:
+        write_workflow_logs_index(gh, repo, staging)
+    previous = find_previous_review(rclone, names, work)
+    upload = work / "upload"
+    review = extract_forecast_review(staging, upload / folder_rel, work / "review_work",
+                                     previous=previous, env=env)
+    report["forecast_review"] = review
+    if already:
+        assert folder_rel.endswith("/" + FORECAST_REVIEW_DIR)
+        rclone.purge_dir(folder_rel)
+        report["replaced_files"] = len(already)
+    rclone.upload_subtree(upload, folder_rel)
+    report["drive_paths"] = sorted(
+        f"{rclone.root}/{p.relative_to(upload).as_posix()}" for p in upload.rglob("*") if p.is_file())
+    report["status"] = "archived"
+    shutil.rmtree(work, ignore_errors=True)
+    return report
+
+
+def cmd_forecast_review(args: argparse.Namespace, *, gh: Any = None, rclone: Rclone | None = None) -> int:
+    gh = gh or _gh_cls()(args.repo)
+    rclone = rclone or Rclone(args.remote, args.root)
+    work = Path(args.work_dir)
+    try:
+        spec = plan_one(gh, args.repo, None, str(args.publish_run_id), include_test=True, work=work)
+        if spec.get("status") != "todo":
+            report = {**spec, "mode": "forecast_review_only"}
+            code = 1 if spec.get("status") == "failed" else 0
+        else:
+            report = backfill_forecast_review(spec, rclone=rclone, work=work / "forecast", gh=gh,
+                                              repo=args.repo, replace=bool(getattr(args, "replace", False)))
+            code = 1 if report.get("status") == "failed" else 0
+    except Exception as exc:  # noqa: BLE001
+        from scripts.ci.build_cycle_diagnostics import SecretLeak
+
+        report = {"publish_run_id": str(args.publish_run_id), "mode": "forecast_review_only",
+                  "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        code = 2 if isinstance(exc, SecretLeak) else 1
+    if report.get("status") == "failed":
+        print(f"::error title=Drive forecast-review backfill failed::{report.get('reason')}")
+    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.report).write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
+    fr = report.get("forecast_review") or {}
+    print(json.dumps({"status": report.get("status"), "reason": report.get("reason"),
+                      "replaced_files": report.get("replaced_files"),
+                      "files": len(fr.get("files") or []), "total_bytes": fr.get("total_bytes"),
+                      "stubs": fr.get("stubs"), "previous_run": fr.get("previous_run"),
+                      "drive_paths": report.get("drive_paths")}, indent=2, default=str))
+    return code
+
+
 # ---------------------------------------------------------------------------
 # Housekeeping: thinning, space, the merged report
 # ---------------------------------------------------------------------------
@@ -1259,6 +1661,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--report", default="archive_leg/resolver_review.json")
     p.add_argument("--replace", action="store_true",
                    help="remove an existing resolver_review/ folder (and nothing else) and write it again")
+    p = sub.add_parser("forecast-review",
+                       help="add only the missing forecast_review/ folder to a forecast chain already in Drive")
+    p.add_argument("--publish-run-id", required=True)
+    p.add_argument("--work-dir", default="archive_work")
+    p.add_argument("--report", default="archive_leg/forecast_review.json")
+    p.add_argument("--replace", action="store_true",
+                   help="remove an existing forecast_review/ folder (and nothing else) and write it again")
     p = sub.add_parser("housekeeping")
     p.add_argument("--plan", default="diagnostics/archive_plan.json")
     p.add_argument("--legs-dir", default="archive_legs")
@@ -1273,6 +1682,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_scored_bundle(args)
     if args.cmd == "resolver-review":
         return cmd_resolver_review(args)
+    if args.cmd == "forecast-review":
+        return cmd_forecast_review(args)
     return cmd_housekeeping(args)
 
 
