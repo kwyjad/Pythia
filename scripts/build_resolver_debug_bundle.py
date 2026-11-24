@@ -72,6 +72,7 @@ from resolver.diagnostics import (  # noqa: E402
     issues as issues_mod,
     refusals as refusals_mod,
     run_log,
+    writer_steps,
 )
 from resolver.diagnostics.redaction import (  # noqa: E402
     find_secrets,
@@ -336,6 +337,79 @@ def log_level_of(line: str) -> str | None:
     return _LOG_LEVEL_ALIASES.get(level, level)
 
 
+_TRACEBACK_RE = re.compile(r"(?:^|\s)Traceback \(most recent call last\):")
+#: Python's markers between the tracebacks of a chained exception.
+_CHAIN_MARKERS = (
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+)
+
+
+def log_events(lines: Iterable[str]) -> list[tuple[str, str]]:
+    """``(level, line)`` for every line that counts, tracebacks included.
+
+    ``log_level_of`` reads one line at a time, and a Python traceback names
+    no level at all: the 11 Nov 2026 Phase 2.6 crash was
+    ``Traceback (most recent call last):``, a few ``File ...`` frames (one
+    quoting ``os.getenv("LOG_LEVEL", "INFO")``) and ``ValueError: Unknown
+    level: ''``, and the index filed it as INFO=1 because the only level
+    word in it was the default in the quoted source. So a traceback is one
+    ERROR, reported by its closing exception line, and nothing inside it is
+    read for a level word: the frames, the source they quote and the
+    exception line belong to the traceback. A chained exception (``During
+    handling of the above exception...``) is the same crash, counted once
+    and reported by its LAST exception, which is the one that ended the
+    process.
+    """
+
+    events: list[tuple[str, str]] = []
+    in_tb = False
+    #: True while the traceback being read belongs to an event already
+    #: counted: a chained exception, or the traceback ``LOG.exception``
+    #: prints under its own ERROR line. Its exception line then names the
+    #: crash only if the event was itself a bare traceback.
+    absorbed = False
+    pending_chain = False
+    previous_was_error_line = False
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if _TRACEBACK_RE.search(line):
+            if pending_chain and events and events[-1][0] == "ERROR":
+                # A chained traceback continues the crash already counted.
+                absorbed = not events[-1][1].startswith("Traceback")
+            elif previous_was_error_line:
+                # LOG.exception: the ERROR line is the event, and keeps its
+                # text, which is what a known-issues signature matches.
+                absorbed = True
+            else:
+                events.append(("ERROR", line.strip()))
+                absorbed = False
+            in_tb = True
+            pending_chain = False
+            previous_was_error_line = False
+            continue
+        if in_tb:
+            stripped = line.strip()
+            if not stripped or line[:1].isspace() or stripped.startswith("File "):
+                continue
+            # The first unindented line ends the traceback: the exception.
+            if not absorbed:
+                events[-1] = ("ERROR", f"Traceback: {stripped}")
+            in_tb = False
+            continue
+        if line.strip() in _CHAIN_MARKERS:
+            pending_chain = True
+            continue
+        if pending_chain and not line.strip():
+            continue
+        pending_chain = False
+        level = log_level_of(line)
+        previous_was_error_line = level in ("ERROR", "CRITICAL")
+        if level is not None:
+            events.append((level, line))
+    return events
+
+
 #: Tracked files a run is EXPECTED to rewrite. Each is a committed
 #: fallback a reader consults (the checked-in CrisisWatch edition, the
 #: FEWS NET country list, the HDX Signals cache) that the same run also
@@ -495,6 +569,7 @@ class BundleBuilder:
         self.reconciliation_rows: list[dict[str, Any]] = []
         #: Measurements collected by other sections for the register.
         self.extra_issues: list[Any] = []
+        self.writer_step_rows: list[dict[str, Any]] = []
         self.issue_counts: dict[str, int] = {}
         self._con = None
         self._db_reported = False
@@ -949,10 +1024,7 @@ class BundleBuilder:
             text = (dest / name).read_text(encoding="utf-8", errors="replace")
             levels: Counter[str] = Counter()
             shapes: Counter[str] = Counter()
-            for line in text.splitlines():
-                level = log_level_of(line)
-                if level is None:
-                    continue
+            for level, line in log_events(text.splitlines()):
                 levels[level] += 1
                 if level in ("CRITICAL", "ERROR", "WARNING"):
                     shapes[f"{level}: {_normalise_log_line(line)[:200]}"] += 1
@@ -2546,6 +2618,7 @@ class BundleBuilder:
             self._check_spei3_feed_is_current,
             self._check_spei3_producer_can_commit,
             self._check_conflict_displacement_inside_its_month,
+            self._check_no_writer_step_left_its_tables_unchanged,
         ):
             try:
                 check()
@@ -2611,6 +2684,9 @@ class BundleBuilder:
             self.reconciliation_rows
         ))
         register.extend(issue_sources.issues_from_log_histogram(self.log_shapes))
+        register.extend(issue_sources.issues_from_missing_summaries(
+            self.missing_step_summaries()
+        ))
         # From CONFIG, not from a failed fetch. A source deliberately stood
         # down makes no request, so nothing appears in the fetch stream and
         # the rung would stop being visible at the moment it became
@@ -2658,6 +2734,121 @@ class BundleBuilder:
         if issues:
             record["issues"] = issues
         self.checks.append(record)
+
+    # -- writer steps ------------------------------------------------------
+
+    def _last_error_line(self, path: Path) -> str:
+        """The last ERROR or CRITICAL event in a log, tracebacks included."""
+
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return ""
+        last = ""
+        for level, line in log_events(text.splitlines()):
+            if level in ("ERROR", "CRITICAL"):
+                last = line.strip()
+        return redact_text(last, self.secrets)
+
+    def missing_step_summaries(self) -> list[dict[str, str]]:
+        """Writer steps that left a log and no summary JSON. Never raises."""
+
+        try:
+            return writer_steps.missing_summaries(
+                self.diagnostics_dir, self._last_error_line
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.problem(f"writer-step summary check failed: {exc}")
+            return []
+
+    def _rows_stamped_since(self, spec: "writer_steps.TableSpec") -> int | None:
+        """Rows of a declared table written since the run started, or None."""
+
+        started_at = self._run_started_at()
+        if not started_at or spec.table not in self.tables():
+            return None
+        stamp: tuple[str, str] | None = None
+        if spec.stamp:
+            types = {c: t for c, t in self.columns_of(spec.table)}
+            if spec.stamp in types:
+                stamp = (spec.stamp, types[spec.stamp])
+        if stamp is None:
+            stamp = self._write_stamp_column(spec.table)
+        if stamp is None:
+            return None
+        column, column_type = stamp
+        if "DATE" in column_type.upper() and "TIME" not in column_type.upper():
+            predicate = f'TRY_CAST("{column}" AS DATE) >= TRY_CAST(? AS DATE)'
+        else:
+            predicate = f'TRY_CAST("{column}" AS TIMESTAMP) >= TRY_CAST(? AS TIMESTAMP)'
+        clause = f" AND ({spec.where})" if spec.where else ""
+        result = self.query(
+            f'SELECT COUNT(*) FROM "{spec.table}" WHERE {predicate}{clause}', [started_at]
+        )
+        if not result or not result[1]:
+            return None
+        return int(result[1][0][0] or 0)
+
+    def _check_no_writer_step_left_its_tables_unchanged(self) -> None:
+        """A step that exists to write tables and wrote none is a finding.
+
+        On 11 Nov 2026 both Phase 2.6 steps crashed on their first line under
+        ``continue-on-error``; the four conflict displacement tables left the
+        run with the counts they entered it with, and no check compared them.
+        Every step in ``resolver.diagnostics.writer_steps.WRITER_STEPS`` that
+        left a log is compared: a table changed when its row count moved, or
+        when rows inside the step's own predicate carry a write stamp from
+        this run (a delete-and-reinsert moves no count). Unchanged is FAIL
+        unless the step's summary says it had nothing to do. Tolerance 0.
+        """
+
+        name = "no_writer_step_left_its_tables_unchanged"
+        before = self._read_json(self.diagnostics_dir / "db_signature_before.json")
+        after = self._read_json(self.diagnostics_dir / "db_signature_after.json")
+        rows = writer_steps.evaluate(
+            self.diagnostics_dir, before, after, self._rows_stamped_since
+        )
+        self.writer_step_rows = rows
+        if not rows:
+            return self._check(name, "SKIP", "", "", "no writer step left a log in this run")
+        unchanged = [r for r in rows if r["verdict"] == "unchanged"]
+
+        def describe(row: dict[str, Any]) -> str:
+            parts = []
+            for t in row["tables"]:
+                touched = t["touched_since_start"]
+                parts.append(
+                    f"{t['table']} {t['before']}->{t['after']}"
+                    + (f" (stamped this run: {touched})" if touched is not None else "")
+                )
+            return f"{row['step']}: " + ", ".join(parts)
+
+        summary = ", ".join(f"{r['step']}={r['verdict']}" for r in rows)
+        if unchanged:
+            return self._check(
+                name, "FAIL",
+                f"{len(unchanged)} step(s) unchanged", "every writer step changed a table",
+                "; ".join(describe(r) for r in unchanged) + f". All steps: {summary}",
+                issues=[{
+                    "id": f"writer_step_left_tables_unchanged_{issue_sources.slug(r['step'])}",
+                    "title": f"{r['step']} ran and left its tables unchanged",
+                    "evidence": describe(r),
+                    "recovers_on_rerun": False,
+                } for r in unchanged],
+            )
+        return self._check(
+            name, "PASS", f"{len(rows)} step(s) ran", "every writer step changed a table",
+            summary,
+        )
+
+    def _read_json(self, path: Path) -> dict[str, Any] | None:
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def _check_bundle_records_the_checked_out_commit(self) -> None:
         """In CI, git.json must name the commit the workflow ran at, clean."""
@@ -5407,8 +5598,17 @@ class BundleBuilder:
             "   already registered in `resolver/config/known_issues.yml` with an",
             "   owner and a review date; it is stated once and shouts at nobody.",
             "2. `checks/contradictions.md` — two things in this run that disagree.",
+            "   `no_writer_step_left_its_tables_unchanged` compares, for every",
+            "   step in `resolver/diagnostics/writer_steps.py` that left a log,",
+            "   its tables before and after the run (row counts, and rows stamped",
+            "   since the run started); a step that wrote nothing without saying",
+            "   it had nothing to do FAILs. A writer step that ran and left no",
+            "   summary JSON is the issue `step_left_no_summary_<step>`, with the",
+            "   log's last error line.",
             "3. `logs/log_index.md` — every ERROR and WARNING, collapsed so one",
-            "   fault repeated 252 times reads as one row with a count.",
+            "   fault repeated 252 times reads as one row with a count. A Python",
+            "   traceback is one ERROR, named by its closing exception line;",
+            "   nothing inside it is read for a level word.",
             "4. `checks/reconciliation.md` — what each connector claimed against",
             "   what its table actually gained.",
             "5. `hazard/cell_ledger.csv` — for any unresolved hazard cell, the",

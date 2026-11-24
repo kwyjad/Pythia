@@ -40,6 +40,7 @@ import random
 import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Sequence
+from resolver.common.logs import env_log_level
 
 from resolver.hazard_resolution import rules
 from resolver.hazard_resolution.base_rates import last_frozen_month, months_back_window
@@ -932,7 +933,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--no-cross-check", action="store_true",
         help="Skip the DFO calibration section",
     )
-    parser.add_argument("--log-level", default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"))
+    parser.add_argument("--log-level", default=env_log_level("RESOLVER_LOG_LEVEL"))
     args = parser.parse_args(argv)
 
     logging.basicConfig(

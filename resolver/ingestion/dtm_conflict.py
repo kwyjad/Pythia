@@ -52,6 +52,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
+from resolver.common.logs import env_log_level
 from tools.probe_dtm_conflict import (
     DTM_BASE,
     USER_AGENT,
@@ -372,8 +373,18 @@ def run(
     today: dt.date | None = None,
     get: GetFn | None = None,
     delay: float = 0.5,
+    max_minutes: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
-    """Fetch, derive and store every country. One failure costs one country."""
+    """Fetch, derive and store every country. One failure costs one country.
+
+    ``max_minutes`` stops it STARTING another country once spent, and the
+    countries not reached are named in ``not_reached``. The 23 Nov 2026
+    Resolver Update's DTM step was killed by the step's ``timeout`` after 13
+    minutes with nothing logged after the connect line and no summary
+    written, so nobody could say how far it got. A run that stops itself
+    writes its summary; a run that is killed writes nothing.
+    """
 
     ensure_schema(con)
     today = today or dt.date.today()
@@ -381,10 +392,20 @@ def run(
     summary: dict[str, Any] = {
         "window": f"{start.isoformat()}..{today.isoformat()}", "max_gap_days": max_gap_days,
         "per_country": {}, "countries_with_rounds": [], "countries_with_bounds": [],
-        "fetch_errors": {},
+        "fetch_errors": {}, "not_reached": [],
     }
-    for iso3 in countries:
+    started = clock()
+    for index, iso3 in enumerate(countries):
+        if max_minutes is not None and (clock() - started) / 60.0 >= max_minutes:
+            summary["not_reached"] = list(countries[index:])
+            LOG.warning("[dtm_conflict] time budget of %.1f min spent; %d country(ies) "
+                        "not reached: %s", max_minutes, len(summary["not_reached"]),
+                        ",".join(summary["not_reached"]))
+            break
+        t0 = clock()
         records, error = fetch_admin0(iso3, start, today, key, get=get)
+        LOG.info("[dtm_conflict] %s (%d/%d): %s in %.1fs", iso3, index + 1, len(countries),
+                 f"error {error}" if error else f"{len(records)} records", clock() - t0)
         if error:
             summary["fetch_errors"][iso3] = error
             continue
@@ -413,9 +434,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--countries", default="", help="ISO3s (default: ACE countries)")
     parser.add_argument("--all-listed", action="store_true")
     parser.add_argument("--months", type=int, default=None)
+    parser.add_argument("--max-minutes", type=float, default=None,
+                        help="stop starting countries once spent; the rest are named")
     parser.add_argument("--summary-out", default=None)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+    logging.basicConfig(level=env_log_level("LOG_LEVEL"),
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
     from resolver.db.duckdb_io import close_db, get_db
@@ -442,7 +465,8 @@ def main(argv: list[str] | None = None) -> int:
                   "lower bounds not refreshed")
             summary["status"] = "no_credentials"
         else:
-            summary.update(run(con, countries, key=key, months=months, max_gap_days=gap))
+            summary.update(run(con, countries, key=key, months=months, max_gap_days=gap,
+                               max_minutes=args.max_minutes))
             summary["status"] = "ok"
             print(f"[dtm_conflict] {len(summary['countries_with_rounds'])} countries with "
                   f"conflict rounds, {len(summary['countries_with_bounds'])} with lower "

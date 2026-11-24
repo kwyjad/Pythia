@@ -6,7 +6,7 @@
 """Common utilities shared across resolver components."""
 
 from .series_semantics import compute_series_semantics
-from .logs import get_logger, dict_counts, df_schema, configure_root_logger
+from .logs import get_logger, dict_counts, df_schema, configure_root_logger, env_log_level
 
 __all__ = [
     "compute_series_semantics",
@@ -14,4 +14,5 @@ __all__ = [
     "dict_counts",
     "df_schema",
     "configure_root_logger",
+    "env_log_level",
 ]

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+from resolver.common.logs import env_log_level
 
 import pandas as pd
 import yaml
@@ -360,7 +361,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--log-level",
-        default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"),
+        default=env_log_level("RESOLVER_LOG_LEVEL"),
         help="Logging level (default: INFO)",
     )
     args = parser.parse_args(argv)

@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/runner/work/Pythia/Pythia/resolver/ingestion/conflict_displacement_extract.py", line 1274, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/runner/work/Pythia/Pythia/resolver/ingestion/conflict_displacement_extract.py", line 1231, in main
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+  File "/opt/hostedtoolcache/Python/3.11.18/x64/lib/python3.11/logging/__init__.py", line 2062, in basicConfig
+    root.setLevel(level)
+  File "/opt/hostedtoolcache/Python/3.11.18/x64/lib/python3.11/logging/__init__.py", line 1464, in setLevel
+    self.level = _checkLevel(level)
+                 ^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.18/x64/lib/python3.11/logging/__init__.py", line 207, in _checkLevel
+    raise ValueError("Unknown level: %r" % level)
+ValueError: Unknown level: ''

@@ -18,6 +18,7 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable
+from resolver.common.logs import env_log_level
 
 DEFAULT_LOG_DIR = Path("resolver/logs/ingestion")
 
@@ -204,14 +205,14 @@ def init_logger(
 
     global _BASE_LOGGER, _CONTEXT
 
-    env_level = os.environ.get("RUNNER_LOG_LEVEL", "INFO")
+    env_level = env_log_level("RUNNER_LOG_LEVEL")
     env_format = os.environ.get("RUNNER_LOG_FORMAT", "plain")
     env_dir = os.environ.get("RUNNER_LOG_DIR")
 
     log_dir = Path(env_dir) if env_dir else (log_dir or DEFAULT_LOG_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    chosen_level = (level or env_level).upper()
+    chosen_level = (level or env_level).strip().upper() or env_level
     level_value = getattr(logging, chosen_level, logging.INFO)
     chosen_format = (fmt or env_format).lower()
 

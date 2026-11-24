@@ -199,8 +199,8 @@ jobs:
       IDMC_HDX_PACKAGE_ID: preliminary-internal-displacement-updates
       ONLY_CONNECTOR: ${{ inputs.only_connector }}
       RESOLVER_OUTPUT_DIR: resolver/staging
-      LOG_LEVEL: ${{ inputs.log_level }}
-      EMPTY_POLICY: ${{ inputs.empty_policy }}
+      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
+      EMPTY_POLICY: ${{ inputs.empty_policy || 'allow' }}
       IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
       IDMC_HELIX_ENV: RELEASE
       RESOLVER_EXPORT_ENABLE_FLOW: "1"
@@ -1031,8 +1031,13 @@ jobs:
           set -o pipefail
           mkdir -p diagnostics
           echo "::group::DTM conflict lower bounds"
+          # --max-minutes stops it starting another country two minutes
+          # before `timeout` would kill it, so the summary is still written
+          # and names the countries not reached (23 Nov 2026: killed at 13m,
+          # nothing logged, no summary).
           timeout 13m python -m resolver.ingestion.dtm_conflict \
-            --db "${BACKFILL_DB_PATH}" --summary-out diagnostics/dtm_conflict.json \
+            --db "${BACKFILL_DB_PATH}" --max-minutes 10 \
+            --summary-out diagnostics/dtm_conflict.json \
             2>&1 | tee diagnostics/phase26_dtm_conflict.log \
             || echo "::warning::DTM conflict lower bounds failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"

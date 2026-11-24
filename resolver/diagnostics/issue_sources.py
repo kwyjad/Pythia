@@ -369,10 +369,45 @@ def issue_from_measurement(
     )
 
 
+def issues_from_missing_summaries(
+    missing: Iterable[Mapping[str, Any]],
+) -> list[Issue]:
+    """A writer step that ran and left no summary JSON is a finding.
+
+    ``missing`` comes from ``resolver.diagnostics.writer_steps
+    .missing_summaries``: the step, its log, the summary it should have
+    written and the log's last ERROR line. Every one of these scripts writes
+    its summary on the way out, success or failure, so its absence means
+    the process died first. On 11 Nov 2026 both Phase 2.6 steps did exactly
+    that, under ``continue-on-error``, and the run read green.
+    """
+
+    out: list[Issue] = []
+    for item in missing or []:
+        step = str(item.get("step") or "step")
+        last_error = str(item.get("last_error") or "").strip()
+        evidence = (
+            f"logs/{item.get('log')} exists, {item.get('summary')} does not. "
+            + (f"Last error: {last_error[:300]}" if last_error
+               else "The log names no error line.")
+        )
+        out.append(Issue(
+            id=f"step_left_no_summary_{_slug(step)}",
+            severity=DEGRADED,
+            title=f"{step} ran and left no {item.get('summary')}"
+                  + (f": {last_error[:120]}" if last_error else ""),
+            evidence=evidence,
+            owner=OWNER_PYTHIA,
+            recovers_on_rerun=False,
+            source=f"logs/{item.get('log')}",
+        ))
+    return out
+
+
 __all__ = [
     "OWNER_EXTERNAL", "OWNER_PYTHIA", "slug",
     "CHECK_ISSUE_IDS", "SOURCE_ISSUE_IDS", "VINTAGE_ISSUE_IDS",
     "issues_from_checks", "issues_from_source_fetches",
     "issues_from_reconciliation", "issues_from_log_histogram",
-    "issue_from_measurement",
+    "issue_from_measurement", "issues_from_missing_summaries",
 ]

@@ -74,6 +74,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
+from resolver.common.logs import env_log_level
 from resolver.hazard_resolution import extract as extract_mod
 from resolver.hazard_resolution import figures as figures_mod
 from resolver.hazard_resolution import reliefweb_docs as docs_mod
@@ -1228,7 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--summary-out", default=None)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
+    logging.basicConfig(level=env_log_level("LOG_LEVEL"),
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
     from resolver.db.duckdb_io import close_db, get_db
