@@ -662,6 +662,10 @@ def section_pa_machine(src: Sources, run_date: dt.date | None) -> dict[str, Any]
         freezes.append({**item, "freezes_on": deadline.isoformat(),
                         "frozen_by_run_date": bool(run_date and deadline < run_date)})
     out["freeze_dates"] = {"freeze_days": days, "provisional_months": freezes}
+    no_data = _read_json(src.bundle("hazard/pa_no_data_breakdown.json"))
+    out["no_data_breakdown"] = (
+        no_data if isinstance(no_data, dict) and no_data
+        else stub("hazard/pa_no_data_breakdown.json absent"))
     return out
 
 
