@@ -111,6 +111,16 @@ def test_sibyl_writes_its_counts_from_stage_health(tmp_path):
     assert any(i["id"] == "sibyl_budget_capped" and i["cost"] == 4 for i in issues)
 
 
+def test_a_sibyl_run_that_was_gated_out_says_why(tmp_path):
+    diag = tmp_path / "diagnostics"
+    diag.mkdir()
+    (diag / "stage_health__sibyl.json").write_text(json.dumps(
+        {"sibyl": {"available": False, "reason": "no sibyl_runs row matching hs_run_id = ?"}}))
+    cd.write(_args("sibyl", diag, ""), env={"GITHUB_RUN_ID": "45458289266", "CHAIN_STAGE": "sibyl"})
+    section = json.loads((diag / "sibyl" / "sibyl_section.json").read_text())
+    assert section == {"available": False, "reason": "no sibyl_runs row matching hs_run_id = ?"}
+
+
 def test_a_missing_stage_health_is_a_named_gap_not_a_crash(tmp_path):
     diag = tmp_path / "diagnostics"
     diag.mkdir()
@@ -121,12 +131,18 @@ def test_a_missing_stage_health_is_a_named_gap_not_a_crash(tmp_path):
 def test_publish_post_records_the_cycle_zip(tmp_path):
     cyc = tmp_path / "cycle_out"
     cyc.mkdir()
-    (cyc / "cycle_diagnostics__2026-11-14__1.zip").write_bytes(b"PK" + b"x" * 98)
+    import zipfile
+
+    zpath = cyc / "cycle_diagnostics__2026-11-14__1.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("CYCLE_SUMMARY.md", "# Cycle summary\n")
     out = tmp_path / "d" / "publish_post.json"
     cd.main(["publish-post", "--cycle-dir", str(cyc), "--out", str(out)])
     payload = json.loads(out.read_text())
     assert payload["cycle_zip"] == "cycle_diagnostics__2026-11-14__1.zip"
-    assert payload["cycle_zip_bytes"] == 100
+    assert payload["cycle_zip_bytes"] == zpath.stat().st_size
+    # The summary is inside the zip, never beside it (24 Nov 2026 read false).
+    assert payload["cycle_summary_written"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -205,13 +221,33 @@ def test_each_earlier_context_lands_in_its_own_folder_or_a_stub(tmp_path):
         return 1, "no artifact"
 
     res = sbc.fetch_earlier_stage_contexts(pipeline_id="hs_1", target=tmp_path, repo="o/r",
-                                           list_runs=lambda: RUNS, runner=runner)
+                                           list_runs=lambda: RUNS, runner=runner,
+                                           sleep=lambda _s: None)
     assert res["hs_rc_collect"]["downloaded"] is True
     assert res["hs_finalize_fc_submit"]["downloaded"] is False
     assert (tmp_path / "hs_rc_collect" / "stage_context.json").is_file()
     stub = json.loads((tmp_path / "hs_finalize_fc_submit" / "MISSING.json").read_text())
     assert stub["artifact_name"] == "pythia-stage-context-hs_finalize_fc_submit"
     assert any("pythia-stage-context-hs_rc_collect" in c for c in calls)
+
+
+def test_a_refused_download_is_tried_again(tmp_path):
+    tries = []
+
+    def runner(cmd):
+        tries.append(cmd[3])
+        if cmd[3] == "3" and tries.count("3") < 2:
+            return 1, "HTTP 503: Egress is over the account limit"
+        dest = Path(cmd[cmd.index("-D") + 1])
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "stage_context.json").write_text("{}")
+        return 0, "ok"
+
+    res = sbc.fetch_earlier_stage_contexts(pipeline_id="hs_1", target=tmp_path, repo="o/r",
+                                           list_runs=lambda: RUNS, runner=runner,
+                                           sleep=lambda _s: None)
+    assert res["hs_finalize_fc_submit"]["downloaded"] is True
+    assert tries.count("3") == 2
 
 
 def test_no_pipeline_id_writes_two_stubs(tmp_path):

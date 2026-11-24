@@ -73,7 +73,8 @@ def test_collect_adversarial_reads_the_db():
     con = duckdb.connect(":memory:")
     con.execute("CREATE TABLE hs_adversarial_checks (hs_run_id TEXT, iso3 TEXT, hazard_code TEXT)")
     con.execute("CREATE TABLE questions (question_id TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT)")
-    con.execute("CREATE TABLE hs_triage (hs_run_id TEXT, iso3 TEXT, hazard_code TEXT, regime_change_level INT)")
+    # hs_triage keys the HS run on run_id, as pythia/db/schema.py declares it.
+    con.execute("CREATE TABLE hs_triage (run_id TEXT, iso3 TEXT, hazard_code TEXT, regime_change_level INT)")
     con.execute("CREATE TABLE forecasts_ensemble (run_id TEXT, question_id TEXT, adversarial_arm TEXT)")
     con.execute("CREATE TABLE llm_calls (run_id TEXT, question_id TEXT, phase TEXT, prompt_text TEXT)")
     con.execute("INSERT INTO hs_adversarial_checks VALUES ('hs', 'SOM', 'ACE'), ('hs', 'SDN', 'ACE')")
@@ -96,3 +97,14 @@ def test_na_lines_raise_no_anomaly():
     found = anomalies.build(health_checks=checks)
     subsystems = {a.get("subsystem") for a in found}
     assert "Research Grounding" not in subsystems and "Adversarial Sync" in subsystems
+
+
+def test_collect_adversarial_runs_against_the_real_schema():
+    duckdb = pytest.importorskip("duckdb")
+    from pythia.db.schema import ensure_schema
+
+    con = duckdb.connect(":memory:")
+    ensure_schema(con)
+    con.execute("INSERT INTO hs_adversarial_checks (hs_run_id, iso3, hazard_code) VALUES ('hs', 'SOM', 'ACE')")
+    c = he.collect_adversarial(con, "hs", "fc")
+    assert c["questions_rc1_plus"] == 0

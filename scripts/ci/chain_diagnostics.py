@@ -858,6 +858,13 @@ class Writer:
         sib = sh.get("sibyl") or {}
         if not sib:
             raise RuntimeError("no stage_health__sibyl.json sibyl block")
+        if sib.get("available") is False:
+            # Gated out (a test run, the kill switch, no eligible question) or
+            # died before persisting: say so rather than write a row of nulls.
+            reason = str(sib.get("reason") or "no sibyl_runs row for this run")
+            write_json(self.out / "sibyl_section.json", {"available": False, "reason": reason})
+            self.summary.append(f"- Sibyl wrote no run record: {reason}.")
+            return
         keep = ("sibyl_run_id", "model", "k", "n_selected", "n_forecast", "n_skipped", "by_status",
                 "budget_capped", "time_capped", "run_cost_usd", "run_hard_cap_usd", "degraded",
                 "tools", "research_depth")
@@ -1077,6 +1084,18 @@ def write(args: argparse.Namespace, env: Mapping[str, str] | None = None) -> Pat
     return out
 
 
+def _zip_has(path: Path, member: str) -> bool:
+    """Whether a zip holds ``member`` at its root. The cycle summary is written
+    into the zip's staging tree, never beside the zip."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return member in zf.namelist()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def publish_post(cycle_dir: Path, out: Path, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """What the Publish run did after its chain diagnostics were written.
 
@@ -1089,7 +1108,7 @@ def publish_post(cycle_dir: Path, out: Path, env: Mapping[str, str] | None = Non
         "cycle_zip_outcome": env.get("CYCLE_ZIP_OUTCOME") or None,
         "cycle_zip": zips[-1].name if zips else None,
         "cycle_zip_bytes": zips[-1].stat().st_size if zips else None,
-        "cycle_summary_written": (cycle_dir / "CYCLE_SUMMARY.md").is_file(),
+        "cycle_summary_written": _zip_has(zips[-1], "CYCLE_SUMMARY.md") if zips else False,
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     write_json(out, payload)

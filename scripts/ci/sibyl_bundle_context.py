@@ -41,6 +41,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -255,6 +256,10 @@ def stage_runs_of_pipeline(pipeline_id: str, runs: list[dict[str, Any]]) -> dict
     return {k: v[1] for k, v in out.items()}
 
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_BACKOFF_SEC = 30
+
+
 def fetch_earlier_stage_contexts(
     *,
     pipeline_id: str | None,
@@ -262,6 +267,7 @@ def fetch_earlier_stage_contexts(
     repo: str | None,
     list_runs=None,
     runner=None,
+    sleep=time.sleep,
 ) -> dict[str, Any]:
     """Download each HS-side stage's ``pythia-stage-context-<stage>`` into
     ``target/<stage>/``; a stub where one cannot be had. Never raises."""
@@ -300,13 +306,23 @@ def fetch_earlier_stage_contexts(
         cmd = ["gh", "run", "download", run_id, "-n", name, "-D", str(dest)]
         if repo:
             cmd += ["-R", repo]
-        try:
-            rc, output = runner(cmd)
-        except Exception as exc:  # noqa: BLE001
-            rc, output = 1, f"{type(exc).__name__}: {exc}"
+        rc, output, attempts = 1, "", 0
+        # Three tries: GitHub's artifact store answers 503 ("Egress is over the
+        # account limit") for minutes at a time, and one refusal cost the
+        # 24 Nov 2026 test chain its hs_finalize_fc_submit context.
+        for attempts in range(1, DOWNLOAD_ATTEMPTS + 1):
+            try:
+                rc, output = runner(cmd)
+            except Exception as exc:  # noqa: BLE001
+                rc, output = 1, f"{type(exc).__name__}: {exc}"
+            if rc == 0:
+                break
+            if attempts < DOWNLOAD_ATTEMPTS:
+                sleep(DOWNLOAD_BACKOFF_SEC * attempts)
         files = [p.name for p in dest.glob("*")] if dest.exists() else []
         if rc != 0 or not any(f != "MISSING.json" for f in files):
-            _write_stub(dest, f"artifact {name} not downloadable from run {run_id}",
+            _write_stub(dest, f"artifact {name} not downloadable from run {run_id} "
+                        f"after {attempts} attempt(s)",
                         run_id=run_id, gh_output=output.strip(), artifact_name=name)
             result[stage] = {"downloaded": False, "run_id": run_id}
         else:
