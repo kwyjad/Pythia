@@ -341,6 +341,22 @@ def test_a_clear_arm_difference_gets_a_verdict(tmp_path):
     assert r["verdict"] == "arm advice better"
 
 
+def test_the_adversarial_arm_reads_withheld_against_shown_only(tmp_path):
+    # 24 questions: 4 shown, 4 withheld, 10 n/a (the largest group), 6 none.
+    db = _arms_db(tmp_path, 12)
+    con = duckdb.connect(db)
+    con.execute("ALTER TABLE forecasts_raw ADD COLUMN adversarial_arm TEXT")
+    for i in range(24):
+        arm = "shown" if i < 4 else "withheld" if i < 8 else "n/a" if i < 18 else None
+        con.execute("UPDATE forecasts_raw SET adversarial_arm = ? WHERE question_id = ?", [arm, f"A{i}"])
+    con.close()
+    ctx = _ctx(db, [f"A{i}" for i in range(24)])
+    assert ctx.qmeta["A20"]["adversarial_arm"] == "none"  # before the arm existed: never "shown"
+    rows = [r for r in ea.build_experiments(ctx) if r["flag"] == "adversarial_arm"]
+    assert rows and all(r["arm"] == "withheld" and r["reference_arm"] == "shown" for r in rows)
+    assert all(r["n_arm"] == 4 and r["n_reference"] == 4 for r in rows)
+
+
 def test_rollups_split_on_the_advice_arm(tmp_path):
     db = _arms_db(tmp_path, 3)
     out = tmp_path / "out"

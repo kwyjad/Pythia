@@ -2090,6 +2090,75 @@ def rc_shift_arm(question_id: Optional[str]) -> Optional[str]:
     return "shift" if frac < share else "control"
 
 
+#: Default share of eligible questions whose member prompts withhold the
+#: adversarial counter-evidence block (experiment started 2026-11-24, live
+#: from the 13 December 2026 run).
+ADVERSARIAL_WITHHELD_SHARE_DEFAULT = 0.5
+#: The arm stamped on a question the experiment does not cover: no adversarial
+#: check was loaded, or its RC level kept the block out of the prompt anyway.
+ADVERSARIAL_ARM_NA = "n/a"
+
+_ADVERSARIAL_ELIGIBLE: set = set()
+_ADVERSARIAL_ELIGIBLE_LOCK = threading.Lock()
+
+
+def adversarial_withheld_share() -> float:
+    """``PYTHIA_ADVERSARIAL_WITHHELD_SHARE`` clamped to [0, 1] (default 0.5)."""
+    raw = os.getenv("PYTHIA_ADVERSARIAL_WITHHELD_SHARE")
+    if raw is None or str(raw).strip() == "":
+        return ADVERSARIAL_WITHHELD_SHARE_DEFAULT
+    try:
+        v = float(raw)
+    except ValueError:
+        return ADVERSARIAL_WITHHELD_SHARE_DEFAULT
+    return min(max(v, 0.0), 1.0)
+
+
+def adversarial_arm(question_id: Optional[str]) -> Optional[str]:
+    """``"withheld"`` or ``"shown"`` for a question under the adversarial
+    counter-evidence experiment, None when it is off (share 0).
+
+    A pure function of the question id with its OWN salt (``"adversarial:"``),
+    so it crosses the advice arm (unsalted) and the RC split (``"rc_shift:"``)
+    independently. Whether a question is IN the experiment is a separate
+    fact (an adversarial check exists and the RC level shows the block),
+    recorded by the prompt builder (:func:`adversarial_arm_applied`).
+    """
+    share = adversarial_withheld_share()
+    if share <= 0 or not question_id:
+        return None
+    import hashlib
+
+    key = f"adversarial:{question_id}".encode("utf-8")
+    frac = int(hashlib.sha1(key).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return "withheld" if frac < share else "shown"
+
+
+def _record_adversarial_eligible(question_id: Optional[str]) -> None:
+    if not question_id:
+        return
+    with _ADVERSARIAL_ELIGIBLE_LOCK:
+        _ADVERSARIAL_ELIGIBLE.add(str(question_id))
+
+
+def adversarial_arm_applied(question_id: Optional[str]) -> Optional[str]:
+    """The arm to stamp: ``shown``/``withheld`` for a question whose SPD
+    prompt was eligible for the block in this process, ``n/a`` for one that
+    was not, None when the experiment is off."""
+    arm = adversarial_arm(question_id)
+    if arm is None:
+        return None
+    with _ADVERSARIAL_ELIGIBLE_LOCK:
+        eligible = str(question_id) in _ADVERSARIAL_ELIGIBLE
+    return arm if eligible else ADVERSARIAL_ARM_NA
+
+
+def reset_adversarial_eligibility() -> None:
+    """Forget the eligible questions (tests)."""
+    with _ADVERSARIAL_ELIGIBLE_LOCK:
+        _ADVERSARIAL_ELIGIBLE.clear()
+
+
 def rc_guidance_version(track: int = 1, question_id: Optional[str] = None) -> Optional[str]:
     """The RC guidance a member prompt of this track carries, for ``forecasts_raw.rc_guidance``.
 
@@ -2687,6 +2756,14 @@ def build_spd_prompt_v2(
             pass
 
     if sd.get("adversarial_check") and rc_level_effective >= 1:
+        # The adversarial experiment: an eligible question in the withheld
+        # arm gets no block, and nothing else in its prompt changes.
+        _adv_qid = question.get("question_id")
+        _record_adversarial_eligible(_adv_qid)
+        _adv_withheld = adversarial_arm(_adv_qid) == "withheld"
+    else:
+        _adv_withheld = True
+    if not _adv_withheld:
         try:
             from pythia.adversarial_check import format_adversarial_check_for_spd
             t = format_adversarial_check_for_spd(sd["adversarial_check"], rc_level=rc_level_effective)

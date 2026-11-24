@@ -387,6 +387,7 @@ jobs:
           pytest -vv \
             forecaster/tests/test_rc_shift_guidance.py \
             forecaster/tests/test_rc_shift_split.py \
+            forecaster/tests/test_adversarial_arm.py \
             forecaster/tests/test_shared_advice_observations.py \
             forecaster/tests/test_advice_db_url.py \
             scripts/ci/tests/test_rc_shift_diagnostic.py

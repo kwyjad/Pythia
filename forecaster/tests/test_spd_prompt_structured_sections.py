@@ -93,7 +93,10 @@ def test_hazard_grounding_renders_report_markdown_key() -> None:
     assert "signal one" in prompt_text
 
 
-def test_adversarial_check_renders_at_rc_level_1() -> None:
+def test_adversarial_check_renders_at_rc_level_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The adversarial experiment would withhold the block from this id; the
+    # RC-level gate is what is tested here, so the experiment is off.
+    monkeypatch.setenv("PYTHIA_ADVERSARIAL_WITHHELD_SHARE", "0")
     check = {
         "net_assessment": "strong_counter",
         "summary": "Counter-evidence indicates de-escalation.",

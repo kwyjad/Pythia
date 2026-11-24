@@ -95,4 +95,19 @@ def test_binary_calls_are_not_counted_as_missing_traces(tax):
 
 
 def test_the_version_moved():
-    assert fab.TAXONOMY_VERSION == "2.0"
+    assert fab.TAXONOMY_VERSION == "2.1"
+
+
+@pytest.mark.parametrize("text, klass", [
+    # Taxonomy 2.1 (Nov 2026): a truce or ceasefire that breaks is escalation.
+    # YEM_ACE_FATALITIES_2026-10 read de-escalation under 2.0.
+    ("September 2026 major escalation and truce collapse", "conflict_escalation"),
+    ("the ceasefire was violated repeatedly", "conflict_escalation"),
+    ("collapse of the truce in the east", "conflict_escalation"),
+    ("RSF broke the truce in El Fasher", "conflict_escalation"),
+    ("parties signed a ceasefire", "conflict_deescalation"),
+    ("talks toward a truce continue", "conflict_deescalation"),
+    ("the truce held through August", "conflict_deescalation"),
+])
+def test_a_broken_truce_is_escalation(tax, text, klass):
+    assert fab.classify_signal_full(text, tax)[0] == klass

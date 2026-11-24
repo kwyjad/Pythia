@@ -57,7 +57,7 @@ CASE_BYTES_CAP = 2 * 1024 * 1024
 #: set means the method has not yet reached the scored questions.
 VINTAGE_FLAGS = (
     "lineup_id", "base_rate_block_version", "rc_guidance", "advice_arm",
-    "recalibration_mode", "input_partial_month",
+    "adversarial_arm", "recalibration_mode", "input_partial_month",
 )
 #: Flag pairs where one is DEFINED from the other: identical arms are expected.
 DERIVED_FLAG_PAIRS = frozenset({frozenset({"base_rate_block_version", "base_rate_block_group"})})

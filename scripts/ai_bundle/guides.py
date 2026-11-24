@@ -238,8 +238,8 @@ question a later run did not ask again keeps its earlier forecast, and a test
 run never stands in (`pythia/tools/forecast_of_record.py`).
 `scores_flat.csv` keeps every run and says which is the record
 (`is_latest_run`), and `questions_index.csv` carries `n_runs`, `is_rerun`
-and `latest_run_id`. The experiment arms (`advice_arm`, `rc_shift_arm`, the
-prompt versions) are hashed on the question id, so a question has the same
+and `latest_run_id`. The experiment arms (`advice_arm`, `rc_shift_arm`, `adversarial_arm`,
+the prompt versions) are hashed on the question id, so a question has the same
 arm in every run of its epoch; every arm comparison here counts a question
 ONCE per epoch, from its forecast of record. To study one run on its own
 (the 1 Oct 2026 RC split, say), select it by `run_id` in `scores_flat.csv`,
@@ -569,9 +569,13 @@ score and RC level recorded for the cell, or `not assessed`.
 
 **`experiments.csv`** — for each flag holding more than one value
 (`lineup_id`, `base_rate_block_version`, `rc_guidance`, `advice_arm`,
-`rc_shift_arm`, `recalibration_mode`, `input_partial_month`), within
-(hazard, metric, track)
-and score type: each arm against the most common one. Arms hold different
+`rc_shift_arm`, `adversarial_arm`, `recalibration_mode`,
+`input_partial_month`), within (hazard, metric, track)
+and score type: each arm against the most common one, except
+`adversarial_arm`, where only `withheld` is read against `shown` (the
+adversarial counter-evidence block left out of the member prompt, or kept;
+`n/a` marks a question with no block to show and `none` one forecast before
+the experiment began on 13 December 2026). Arms hold different
 questions, so each question is first paired with climatology on its own
 horizons (primary minus `__ext_climatology`) and the arms are compared on
 that excess: question difficulty drops out. `correction` rows are genuinely
@@ -1062,6 +1066,11 @@ never uses a model call, because month-over-month comparison is worthless
 if the classes drift with the classifier. The taxonomy is versioned
 (`taxonomy_version` in the manifest); compare ledgers only within one
 version.
+
+Since taxonomy 2.1 (Nov 2026) a ceasefire or truce that collapses, is
+violated, breaks down, fails or ends reads `conflict_escalation`, never
+`conflict_deescalation`; a truce that holds or is being negotiated is still
+de-escalation.
 
 Since taxonomy 2.0 (Oct 2026) each row also carries `signal_class_secondary`,
 the next-highest distinct class that matched (blank when only one did), so
