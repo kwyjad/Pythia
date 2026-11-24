@@ -16,7 +16,9 @@ The **Archive Run to Drive** workflow (`.github/workflows/archive_to_drive.yml`)
 
 | Secret | Used by | Notes |
 |---|---|---|
-| `RCLONE_CONF_B64` | `archive_to_drive.yml` | Base64 of an `rclone.conf` holding exactly one remote, named `pythia_drive`. Decoded to a file in one step of each job and deleted at the end of the job. |
+| `RCLONE_CONF_B64` | `archive_to_drive.yml`, `publish_decks.yml` | Base64 of an `rclone.conf` holding exactly one remote, named `pythia_drive`. Decoded to a file in one step of each job and deleted at the end of the job. |
+
+The **Publish Slide Decks** workflow (`.github/workflows/publish_decks.yml`) uses the same remote to keep the eight slide decks in `Fred_archive/decks/`, each shared as "anyone with the link can view", for the About page. Without the secret it publishes the decks as direct downloads from the repository instead.
 
 ### One-time setup (Windows, PowerShell)
 

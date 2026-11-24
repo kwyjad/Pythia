@@ -537,6 +537,7 @@ After making any code changes, evaluate whether the following files need updatin
 - **CLAUDE.md** – Update if you've changed architecture, environment variables, failure modes, component behavior, workflow steps, or database schema. This is the authoritative reference for future Claude Code sessions.
 - **README.md** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
 - **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
+- **docs/decks/** – The eight Fred slide decks. Any change that earns a "Changes in this Version" entry in `docs/fred_overview.md` also requires checking the decks `docs/decks/manifest.json` maps to the touched sections or code paths; see "Deck editing" below.
 
 Do not update these files for trivial changes (e.g. formatting, minor refactors with no behavioral change). Use your judgment.
 
@@ -1326,6 +1327,21 @@ Key prompt files:
 
 Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overview.sh` first. This archives the current overview before changes so the About page can show historical versions. Commit the snapshot alongside the overview edits. A snapshot for today's date that already holds a DIFFERENT overview is never overwritten: the script writes `DATE-2` (then `-3`, ...), since the version key is a plain string to the About page (Oct 2026; before that a second edit on one day replaced the morning's "before" copy).
 
+## Deck editing
+
+The eight Fred slide decks live in `docs/decks/` under stable names (`0_overview.pptx` ... `7_interpreter.pptx`). They were built with PptxGenJS and the generator scripts are not in the repo, so **a deck is never rebuilt: its text is edited in place** (`ppt/slides/slideN.xml` and the matching notes slide), and its layout is left alone. `docs/decks/manifest.json` records, per deck, its title, file, the date and commit it was last checked against the code, and the `docs/fred_overview.md` sections (heading prefixes) and code paths it describes.
+
+**The rule.** Any change significant enough to earn a "Changes in this Version" entry in `docs/fred_overview.md` also requires checking the decks the manifest maps to the touched sections or code paths:
+- Where a slide is now wrong (a number, a model name, a schedule, a threshold, a source, a description of how a component works), fix it with `python -m scripts.decks.edit_deck <deck> --edits edits.json` (`--dump` lists every paragraph; `--render DIR` writes PNGs of the changed slides through LibreOffice when it is installed: look at them for text overflowing its box).
+- Update that deck's `last_checked` and `last_checked_commit` in `manifest.json`, and put the deck changes in the same PR as the code change.
+- Figures marked "invented for illustration" stay as they are.
+- A change that needs a new slide is not built: list it in the PR description under "Deck changes needing a new slide".
+- Keep replacement text about as long as the original, so it fits its box. Use no em dashes in new slide text.
+
+`edit_deck.py` edits `<a:t>` runs in place, keeping run formatting: the changed part of an edit (old and new with their shared prefix and suffix removed) is replaced inside its run, or across runs only when those runs share formatting; crossing a bold label into plain text is refused, so split such an edit at the boundary. An edit that matches nothing, or matches a different number of times than its `count` (default 1), is reported and nothing is written; the result must reopen with python-pptx before it replaces the deck. ci-lint runs `scripts/decks/check_deck_sync.py` on every PR: a WARNING (never a failure) when "Changes in this Version" changed and nothing under `docs/decks/` did, naming the mapped decks. Tests: `scripts/decks/tests/` (ci-lint).
+
+**Publishing.** `.github/workflows/publish_decks.yml` (push to `main` touching `docs/decks/**`, or dispatch; group `drive-archive`) runs `scripts/decks/publish_decks.py`: each deck is copied with rclone to `Fred_archive/decks/<file>` (drive.file scope, the archive's `RCLONE_CONF_B64` remote; rclone updates an existing file in place, so its Drive id and link stay; the id is read before and after and a change is warned about and the new id used), shared with `rclone link` (anyone with the link, reader; Drive's own answer is read from `--dump bodies` and a role other than reader falls back), and fetched with no credentials to confirm a signed-out reader gets the file. It writes `decks.json` (title, view and download links, file id, last-checked date and commit, size, sha256) and uploads it to the `pythia-data-latest` release. When Drive cannot be used (no secret, a refused copy or link) the decks are offered as direct downloads from this public repository at the published commit, and the run warns. The About page (`web/src/app/about/DecksPanel.tsx`, `web/src/lib/decks.ts`) reads decks.json from the release (`PYTHIA_DECKS_JSON_URL` overrides the URL), shows a row per deck with View, Download and the last-checked date, and says the decks are not available yet when the file is missing or empty.
+
 ## Code conventions
 
 - Copyright header on every file: `# Pythia / Copyright (c) 2025 Kevin Wyjad`
@@ -1841,6 +1857,7 @@ Track 2's stored `model_name` stays `track2_flash` regardless of which model bac
 | `mark_test_runs.yml` | Retroactive test data marking | Manual |
 | `build_dashboard_data.yml` | Dashboard data build | Triggered |
 | `publish_latest_data.yml` | Publish latest data (release) + interpreter PDF asset + inline DB inspection + the cycle's diagnostics in one zip (`pythia-cycle-diagnostics`) + its own `chain-diagnostics-publish_latest_data-<id>` + the Drive archive dispatch (last step) | Dispatch only: by Sibyl (forecast pipeline), by Calibration (scoring chain), manual |
+| `publish_decks.yml` | Copy the slide decks in `docs/decks/` to Drive (`Fred_archive/decks/`), share them view-only, and upload `decks.json` to the data release for the About page (see "Deck editing") | Push to `main` touching `docs/decks/**` + manual |
 | `archive_to_drive.yml` | Permanent copy of each chain in Google Drive: full cycle zip, loose summaries, `scored_bundle/`, `resolver_review/` and `forecast_review/` folders, verified zstd DB snapshot (forecast chain), snapshot thinning, Drive space check (see "Drive archive") | Dispatched by Publish + manual + weekly backfill Mon 05:23 UTC |
 | `purge_hs_run.yml` | Delete an HS run | Manual |
 | `probe_montandon.yml` | Montandon STAC evaluation spike (read-only; NOT in the DB concurrency group) | Manual |
