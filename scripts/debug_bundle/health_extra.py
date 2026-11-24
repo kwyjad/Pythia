@@ -109,13 +109,14 @@ def collect_adversarial(con: Any, hs_run_id: str | None, fc_run_id: str | None) 
     generated = {f"{r[0]}|{r[1]}" for r in con.execute(
         "SELECT DISTINCT upper(iso3), upper(hazard_code) FROM hs_adversarial_checks WHERE hs_run_id = ?",
         [hs_run_id]).fetchall()}
+    # hs_triage keys its HS run on ``run_id``; hs_adversarial_checks on ``hs_run_id``.
     rows = con.execute(
         """
         SELECT DISTINCT fe.question_id, upper(q.iso3), upper(q.hazard_code),
                COALESCE(t.regime_change_level, 0)
         FROM forecasts_ensemble fe
         JOIN questions q ON q.question_id = fe.question_id
-        LEFT JOIN hs_triage t ON t.hs_run_id = ? AND upper(t.iso3) = upper(q.iso3)
+        LEFT JOIN hs_triage t ON t.run_id = ? AND upper(t.iso3) = upper(q.iso3)
                               AND upper(t.hazard_code) = upper(q.hazard_code)
         WHERE fe.run_id = ? AND upper(q.metric) <> 'EVENT_OCCURRENCE'
         """, [hs_run_id, fc_run_id]).fetchall()

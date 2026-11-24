@@ -858,6 +858,13 @@ class Writer:
         sib = sh.get("sibyl") or {}
         if not sib:
             raise RuntimeError("no stage_health__sibyl.json sibyl block")
+        if sib.get("available") is False:
+            # Gated out (a test run, the kill switch, no eligible question) or
+            # died before persisting: say so rather than write a row of nulls.
+            reason = str(sib.get("reason") or "no sibyl_runs row for this run")
+            write_json(self.out / "sibyl_section.json", {"available": False, "reason": reason})
+            self.summary.append(f"- Sibyl wrote no run record: {reason}.")
+            return
         keep = ("sibyl_run_id", "model", "k", "n_selected", "n_forecast", "n_skipped", "by_status",
                 "budget_capped", "time_capped", "run_cost_usd", "run_hard_cap_usd", "degraded",
                 "tools", "research_depth")
