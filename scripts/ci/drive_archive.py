@@ -19,7 +19,11 @@ Layout under ``$DRIVE_ROOT`` (``Fred_archive``)::
                                                 report and interpreter report;
                                                 a scoring chain also gets
                                                 scored_bundle/ (the scored
-                                                bundle's report files, unzipped)
+                                                bundle's report files, unzipped);
+                                                a chain with a Resolver Update
+                                                also gets resolver_review/ (the
+                                                resolver review's inputs file
+                                                and the files it reads)
     db_snapshots/<YYYY>/                        pythia_resolver_db_*.duckdb.zst
                                                 and its .db_snapshot.json
 
@@ -32,6 +36,8 @@ Subcommands, each a step of the workflow:
 ``scored-bundle`` add only the missing ``scored_bundle/`` folder to a chain
                  already in Drive (read back from its zip; the zip and loose
                  files are never replaced).
+``resolver-review`` add only the missing ``resolver_review/`` folder the
+                 same way.
 ``housekeeping`` thin old DB snapshots, check Drive space, merge the legs'
                  reports into ``archive_report.json`` for the chain diagnostics.
 
@@ -661,6 +667,110 @@ def extract_scored_bundle(bundle_zip: Path, dest: Path, *, file_cap: int = SCORE
             "skipped": skipped, "total_bytes": total}
 
 
+# ---------------------------------------------------------------------------
+# The resolver review's inputs, unzipped beside a chain with a Resolver Update
+# ---------------------------------------------------------------------------
+
+#: The monthly resolver review is written by the same kind of session as the
+#: performance report, reading Drive as text. Its inputs sit mostly in the
+#: resolver debug bundle, a zip inside the chain zip; this folder holds a
+#: summary of them (``resolver_review_inputs.json``) and the files it reads.
+RESOLVER_REVIEW_DIR = "resolver_review"
+RESOLVER_REVIEW_INPUTS = "resolver_review_inputs.json"
+#: Lifted from the debug bundle, by path inside it. Never
+#: ``hazard/cell_ledger.csv`` (29 MB in November 2026): its counts are in the
+#: inputs file.
+RESOLVER_REVIEW_BUNDLE_FILES = (
+    "README.md", "checks/issues.md", "checks/contradictions.md", "checks/reconciliation.md",
+    "logs/log_index.md", "db/freshness.csv", "db/signature_before.json",
+    "db/signature_after.json", "db/queries/crisiswatch_editions.csv",
+    "db/queries/conflict_forecast_vintages.csv", "hazard/acceptance_report.md",
+    "hazard/figures_ledger.csv", "hazard/extraction_budget.csv",
+    "hazard/backcast_progress.csv", "hazard/conflict_displacement/cell_ledger.csv",
+    "config/connectors/known_issues.yml", "run/step_timings.csv", "run/workflow_run.json",
+)
+RESOLVER_REVIEW_NEVER = ("hazard/cell_ledger.csv",)
+#: Files lifted from the post-ingest stages' chain diagnostics, renamed
+#: ``<stage>__<file>``. ``reports/*.json`` takes every report.
+RESOLVER_REVIEW_STAGE_FILES: dict[str, tuple[str, ...]] = {
+    "compute_resolutions": ("summary.md", "issues.md", "reports/compute_resolutions.json"),
+    "compute_scores": ("summary.md", "issues.md", "reports/*.json"),
+    "compute_calibration": ("summary.md", "issues.md", "centroid_ema_updates.csv",
+                            "family_recalibration.csv", "calibration_weights.csv",
+                            "sibyl_calibration_steps.json"),
+    "publish_latest_data": ("summary.md", "issues.md"),
+}
+
+
+def _resolver_review_plan(src: Any) -> list[tuple[str, Path | None]]:
+    """(name in the folder, source path or None when absent), in order."""
+    plan: list[tuple[str, Path | None]] = []
+    for rel in RESOLVER_REVIEW_BUNDLE_FILES:
+        plan.append((rel.replace("/", "__"), src.bundle(rel)))
+    for slug, patterns in RESOLVER_REVIEW_STAGE_FILES.items():
+        d = src.chain_diag.get(slug)
+        for pat in patterns:
+            if d is not None and "*" in pat:
+                found = sorted(d.glob(pat))
+                if found:
+                    plan += [(f"{slug}__{p.name}", p) for p in found]
+                    continue
+            path = (d / pat) if d is not None else None
+            plan.append((f"{slug}__{Path(pat).name}", path if path is not None and path.is_file() else None))
+    plan.append(("resolver_inspect.md", src.resolver_inspect))
+    return plan
+
+
+def extract_resolver_review(staging: Path, dest: Path, work: Path, *,
+                            file_cap: int = SCORED_FILE_CAP, total_cap: int = SCORED_TOTAL_CAP,
+                            env: Mapping[str, str] | None = None) -> dict[str, Any] | None:
+    """Write ``resolver_review/`` for a chain holding a Resolver Update stage
+    (None for one that holds none). Same caps as ``scored_bundle/``: a file
+    over ``file_cap``, or one that would take the folder past ``total_cap``,
+    is named in ``SKIPPED.md`` with its size, as is any listed file absent.
+    The inputs file always goes in first. Scanned for credentials (raises
+    ``SecretLeak``)."""
+    from scripts.ci.build_cycle_diagnostics import scan_for_secrets
+    from scripts.ci import resolver_review_inputs as rri
+
+    src = rri.locate(staging, work)
+    if not src.has_resolver_update:
+        return None
+    dest.mkdir(parents=True, exist_ok=True)
+    rri.write_inputs_from(src, dest / RESOLVER_REVIEW_INPUTS)
+    total = (dest / RESOLVER_REVIEW_INPUTS).stat().st_size
+    written = [{"file": RESOLVER_REVIEW_INPUTS, "bytes": total}]
+    skipped: list[dict[str, Any]] = []
+    for name, path in _resolver_review_plan(src):
+        if path is None or not Path(path).is_file():
+            skipped.append({"file": name, "bytes": None, "reason": "not in this chain"})
+            continue
+        size = Path(path).stat().st_size
+        if size > file_cap:
+            skipped.append({"file": name, "bytes": size, "reason": f"over the {file_cap} byte per-file cap"})
+            continue
+        if total + size > total_cap:
+            skipped.append({"file": name, "bytes": size,
+                            "reason": f"would take the folder past the {total_cap} byte cap"})
+            continue
+        shutil.copy2(path, dest / name)
+        total += size
+        written.append({"file": name, "bytes": size})
+    for rel in RESOLVER_REVIEW_NEVER:
+        skipped.append({"file": rel.replace("/", "__"), "bytes": None,
+                        "reason": f"never copied: its counts are in {RESOLVER_REVIEW_INPUTS}"})
+    lines = ["# Files not copied into resolver_review/", "",
+             f"Caps: {file_cap} bytes per file, {total_cap} bytes in all.", "",
+             "| File | Bytes | Why |", "|---|---|---|"]
+    lines += [f"| `{s['file']}` | {s['bytes'] if s['bytes'] is not None else '-'} | {s['reason']} |"
+              for s in skipped]
+    (dest / "SKIPPED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    scan_for_secrets(dest, dict(os.environ if env is None else env))
+    shutil.rmtree(work, ignore_errors=True)
+    return {"folder": RESOLVER_REVIEW_DIR, "debug_bundle": src.debug_zip.name if src.debug_zip else None,
+            "files": written, "skipped": skipped, "total_bytes": total}
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -791,6 +901,10 @@ def run_leg(spec: Mapping[str, Any], *, gh: Any, repo: str, rclone: Rclone, work
     bundle = find_scored_bundle(staging)
     if bundle is not None:
         report["scored_bundle"] = extract_scored_bundle(bundle, run_dir / SCORED_BUNDLE_DIR, env=env)
+    review = extract_resolver_review(staging, run_dir / RESOLVER_REVIEW_DIR, work / "resolver_review",
+                                     env=env)
+    if review is not None:
+        report["resolver_review"] = review
     shutil.rmtree(staging, ignore_errors=True)
     if names.db_name and spec.get("chain", {}).get("sibyl_run_id"):
         sibyl = str(spec["chain"]["sibyl_run_id"])
@@ -926,6 +1040,88 @@ def cmd_scored_bundle(args: argparse.Namespace, *, gh: Any = None, rclone: Rclon
     return code
 
 
+def unpack_chain_zip(chain_zip: Path, dest: Path) -> Path:
+    """Unpack an archived chain zip into ``dest``: the result is laid out as
+    the staging tree ``build_cycle_diagnostics`` built it from."""
+    import zipfile
+
+    from scripts.ci.resolver_review_inputs import _safe_extract
+
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(chain_zip) as zf:
+        _safe_extract(zf, dest)
+    return dest
+
+
+def backfill_resolver_review(spec: Mapping[str, Any], *, rclone: Rclone, work: Path,
+                             env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Add the missing ``resolver_review/`` folder to a chain already in Drive.
+
+    Reads the chain zip back from Drive and uploads ONLY
+    ``<run_dir>/resolver_review/``. The zip, the loose files and any other
+    folder beside it are never replaced; a folder already in Drive is left
+    alone.
+    """
+    names = ArchiveNames(**spec["names"])
+    pid = str(spec.get("publish_run_id"))
+    report: dict[str, Any] = {"publish_run_id": pid, "names": dataclasses.asdict(names),
+                              "mode": "resolver_review_only", "status": "failed"}
+    rclone.assert_single_root()
+    zip_rel = f"{names.run_dir}/{names.zip_name}"
+    if not rclone.exists(zip_rel):
+        report["reason"] = f"{zip_rel} is not in Drive; run the normal archive leg instead"
+        return report
+    folder_rel = f"{names.run_dir}/{RESOLVER_REVIEW_DIR}"
+    already = rclone.list_files(folder_rel)
+    if already:
+        report.update(status="already_present", reason=f"{folder_rel} already holds {len(already)} file(s)")
+        return report
+    shutil.rmtree(work, ignore_errors=True)
+    local_zip = work / "chain" / names.zip_name
+    rclone.download(zip_rel, local_zip)
+    staging = unpack_chain_zip(local_zip, work / "staging")
+    upload = work / "upload"
+    review = extract_resolver_review(staging, upload / folder_rel, work / "review_work", env=env)
+    if review is None:
+        report.update(status="no_resolver_update", reason="the chain holds no Resolver Update stage")
+        shutil.rmtree(work, ignore_errors=True)
+        return report
+    report["resolver_review"] = review
+    rclone.upload_subtree(upload, folder_rel)
+    report["drive_paths"] = sorted(
+        f"{rclone.root}/{p.relative_to(upload).as_posix()}" for p in upload.rglob("*") if p.is_file())
+    report["status"] = "archived"
+    shutil.rmtree(work, ignore_errors=True)
+    return report
+
+
+def cmd_resolver_review(args: argparse.Namespace, *, gh: Any = None, rclone: Rclone | None = None) -> int:
+    gh = gh or _gh_cls()(args.repo)
+    rclone = rclone or Rclone(args.remote, args.root)
+    work = Path(args.work_dir)
+    try:
+        spec = plan_one(gh, args.repo, None, str(args.publish_run_id), include_test=True, work=work)
+        if spec.get("status") != "todo":
+            report = {**spec, "mode": "resolver_review_only"}
+            code = 1 if spec.get("status") == "failed" else 0
+        else:
+            report = backfill_resolver_review(spec, rclone=rclone, work=work / "review")
+            code = 1 if report.get("status") == "failed" else 0
+    except Exception as exc:  # noqa: BLE001
+        from scripts.ci.build_cycle_diagnostics import SecretLeak
+
+        report = {"publish_run_id": str(args.publish_run_id), "mode": "resolver_review_only",
+                  "status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        code = 2 if isinstance(exc, SecretLeak) else 1
+    if report.get("status") == "failed":
+        print(f"::error title=Drive resolver-review backfill failed::{report.get('reason')}")
+    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.report).write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
+    print(json.dumps({k: report.get(k) for k in ("status", "reason", "resolver_review", "drive_paths")},
+                     indent=2, default=str))
+    return code
+
+
 # ---------------------------------------------------------------------------
 # Housekeeping: thinning, space, the merged report
 # ---------------------------------------------------------------------------
@@ -1042,6 +1238,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--publish-run-id", required=True)
     p.add_argument("--work-dir", default="archive_work")
     p.add_argument("--report", default="archive_leg/scored_bundle.json")
+    p = sub.add_parser("resolver-review",
+                       help="add only the missing resolver_review/ folder to a chain already in Drive")
+    p.add_argument("--publish-run-id", required=True)
+    p.add_argument("--work-dir", default="archive_work")
+    p.add_argument("--report", default="archive_leg/resolver_review.json")
     p = sub.add_parser("housekeeping")
     p.add_argument("--plan", default="diagnostics/archive_plan.json")
     p.add_argument("--legs-dir", default="archive_legs")
@@ -1054,6 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_leg(args)
     if args.cmd == "scored-bundle":
         return cmd_scored_bundle(args)
+    if args.cmd == "resolver-review":
+        return cmd_resolver_review(args)
     return cmd_housekeeping(args)
 
 
