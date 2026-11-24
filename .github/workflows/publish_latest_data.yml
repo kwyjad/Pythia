@@ -939,6 +939,7 @@ jobs:
             --started-at "${CHAIN_STARTED_AT:-}" "${ARGS[@]}"
 
       - name: Gather the cycle's diagnostics into one zip
+        id: cycle_zip
         if: always()
         continue-on-error: true
         timeout-minutes: 45
@@ -959,6 +960,16 @@ jobs:
           path: cycle_out/cycle_diagnostics__*.zip
           retention-days: 14
           if-no-files-found: warn
+
+      # What happened after this run's chain diagnostics were written: the
+      # cycle zip and its size. The Drive archive reads it from this run's
+      # own chain-diagnostics artifact.
+      - name: Record the cycle zip in this run's chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          CYCLE_ZIP_OUTCOME: ${{ steps.cycle_zip.outcome }}
+        run: python -m scripts.ci.chain_diagnostics publish-post --cycle-dir cycle_out --out diagnostics/publish_latest_data/publish_post.json
 
       # Its own lineage on its own page too: the Drive archive walks the chain
       # back from this run, and lineage.json names the run it published.

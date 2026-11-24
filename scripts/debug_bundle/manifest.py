@@ -95,7 +95,7 @@ DESCRIPTIONS: dict[str, str] = {
     "run_comparison": "This run's key metrics beside the previous two production runs.",
     "workflow_logs": "Actions logs for the whole cycle: this run, the pipeline stages, and the poller ticks.",
     "code_snapshot": "Verbatim copies of the files most often implicated in a bad run, plus the commit range since the last production run.",
-    "stage_context": "The forecaster stage's own environment snapshot, DB signatures, conclusion and identifiers, carried forward from fc_collect_finalize — the bundle itself is built in the Sibyl job. MISSING.json means the pythia-stage-context artifact was never downloaded.",
+    "stage_context": "The forecaster stage's own environment snapshot, DB signatures, conclusion and identifiers, carried forward from fc_collect_finalize — the bundle itself is built in the Sibyl job. MISSING.json means the pythia-stage-context artifact was never downloaded. Since Nov 2026 stage_context/hs_rc_collect/ and stage_context/hs_finalize_fc_submit/ carry the two HS-side stages' own contexts (artifact pythia-stage-context-<stage>), each with a MISSING.json when its run or artifact could not be found.",
 }
 
 

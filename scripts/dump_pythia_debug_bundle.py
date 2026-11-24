@@ -3887,7 +3887,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     expected_hs = len(data.resolved_countries_sorted) * len(EXPECTED_HS_HAZARDS)
     missing_count = len(data.missing_hs_triage)
     if expected_hs == 0:
-        hs_status = "OK"
+        hs_status = "N/A"
         hs_detail = "no countries"
     elif missing_count == 0:
         hs_status = "OK"
@@ -4088,7 +4088,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         rc_g_status = "FAIL"
         rc_g_detail = f"{_rc_g_calls} calls, all returned 0 sources"
     else:
-        rc_g_status = "OK"
+        rc_g_status = "N/A"
         rc_g_detail = "no RC grounding calls in this run"
     if _rc_g_no_backend > 0:
         if rc_g_status == "OK":
@@ -4113,7 +4113,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         tg_status = "FAIL"
         tg_detail = f"{_tg_calls} calls, all returned 0 sources"
     else:
-        tg_status = "OK"
+        tg_status = "N/A"
         tg_detail = "no triage grounding calls in this run"
     _tg_no_backend = _no_backend_calls(data.triage_grounding_rows)
     if _tg_no_backend > 0:
@@ -4140,7 +4140,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         g_status = "WARN"
         g_detail = "no adversarial check calls"
     else:
-        g_status = "OK"
+        g_status = "N/A"
         g_detail = "disabled"
     checks.append({"subsystem": "Adversarial Checks", "status": g_status, "detail": g_detail})
 
@@ -4150,7 +4150,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     _synth_errors = int(_synth.get("n_errors") or 0)
     _synth_cost = float(_synth.get("cost_usd") or 0.0)
     if _synth_calls == 0:
-        synth_status = "OK"
+        synth_status = "N/A"
         synth_detail = "no synthesis calls in this run (no RC L1+ hazards or checks disabled)"
     elif _synth_errors == 0:
         synth_status = "OK"
@@ -4169,14 +4169,16 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     q_grounded = sum(1 for r in data.question_web_rows if r.get("grounded"))
     q_total = len(data.question_web_rows)
     if not data.retriever_enabled:
-        rg_status = "OK"
+        # Off by design: N/A, not OK. An OK here read as "research grounding
+        # works" in the forecast review (template rule A4.4).
+        rg_status = "N/A"
         rg_detail = (
             f"retriever disabled — using structured data injection"
             f" ({q_grounded}/{q_total} legacy grounded)" if q_total else
             "retriever disabled — using structured data injection"
         )
     elif q_total == 0:
-        rg_status = "OK" if not data.forecaster_run_id else "WARN"
+        rg_status = "N/A" if not data.forecaster_run_id else "WARN"
         rg_detail = "no research grounding" if not data.forecaster_run_id else "0 questions grounded"
     elif q_grounded == q_total:
         rg_status = "OK"
@@ -6848,6 +6850,29 @@ def emit_operational_files(
         LOG.warning("prompt cache summary failed: %s", exc)
         collected["prompt_cache_summary"] = {}
     _run_collector("env_and_config", ec_path, _env)
+
+    # --- two health lines the forecast review reads (Nov 2026) ------------
+    # Appended to the shared list, so the executive summary and the anomalies
+    # see them, and written back into the health report already on disk.
+    try:
+        from scripts.debug_bundle import health_extra
+
+        extra = [health_extra.prompt_cache_check(collected.get("prompt_cache_rows") or [])]
+        try:
+            counts = health_extra.collect_adversarial(con, data.hs_run_id, data.forecaster_run_id)
+            extra.append(health_extra.adversarial_check(counts))
+        except Exception as exc:  # noqa: BLE001
+            extra.append({"subsystem": "Adversarial Sync", "status": "WARN",
+                          "detail": f"could not be counted: {type(exc).__name__}: {exc}"})
+        if health_checks is not None:
+            health_checks.extend(extra)
+        hr = out_dir / f"health_report__{run}.json"
+        if hr.is_file():
+            payload = json.loads(hr.read_text(encoding="utf-8"))
+            payload.setdefault("health_checks", []).extend(extra)
+            hr.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("prompt cache / adversarial sync health lines failed: %s", exc)
 
     # --- code snapshot ---------------------------------------------------
     cs_path = out_dir / "code_snapshot" / "INDEX.json"

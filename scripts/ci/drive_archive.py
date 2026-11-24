@@ -1088,6 +1088,64 @@ def write_workflow_logs_index(gh: Any, repo: str, staging: Path) -> Path | None:
         return None
 
 
+def build_prompt_commits(gh: Any, repo: str, base: str | None, head: str | None,
+                         *, max_commits: int = 100) -> dict[str, Any]:
+    """Commits between ``base`` and ``head`` that touched a prompt file
+    (``forecast_review_inputs.PROMPT_PATHS``), from the GitHub compare API.
+    ``commits`` is None with a ``reason`` when the lookup cannot be made."""
+    from scripts.ci import forecast_review_inputs as fri
+
+    out: dict[str, Any] = {"base": base, "head": head, "paths": list(fri.PROMPT_PATHS), "commits": None}
+    if not base or not head:
+        out["reason"] = "no previous run commit" if not base else "no commit for this run"
+        return out
+    if base == head:
+        out.update(commits=[], n_commits_between=0)
+        return out
+    try:
+        cmp_ = gh.api(f"repos/{repo}/compare/{base}...{head}") or {}
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"compare API failed: {type(exc).__name__}: {exc}"[:300]
+        return out
+    commits = list(cmp_.get("commits") or [])
+    out["n_commits_between"] = cmp_.get("total_commits", len(commits))
+    files = [str(f.get("filename") or "") for f in cmp_.get("files") or []]
+    if not fri.touches_prompts(files):
+        out["commits"] = []
+        return out
+    found = []
+    for c in commits[-max_commits:]:
+        sha = str(c.get("sha") or "")
+        try:
+            detail = gh.api(f"repos/{repo}/commits/{sha}") or {}
+        except Exception as exc:  # noqa: BLE001
+            found.append({"sha": sha, "error": f"{type(exc).__name__}: {exc}"[:200]})
+            continue
+        hits = fri.touches_prompts(str(f.get("filename") or "") for f in detail.get("files") or [])
+        if hits:
+            msg = str((c.get("commit") or {}).get("message") or "").splitlines()
+            found.append({"sha": sha, "date": ((c.get("commit") or {}).get("committer") or {}).get("date"),
+                          "subject": msg[0] if msg else "", "files": hits})
+    out["commits"] = found
+    if len(commits) > max_commits:
+        out["note"] = f"only the newest {max_commits} of {len(commits)} commits were read"
+    return out
+
+
+def write_prompt_commits(gh: Any, repo: str, staging: Path, previous: Mapping[str, Any] | None) -> Path | None:
+    """Write ``prompt_commits.json`` into ``staging``. Never raises."""
+    from scripts.ci import forecast_review_inputs as fri
+
+    try:
+        base = None if not previous or previous.get("stub") else (previous.get("meta") or {}).get("commit")
+        payload = build_prompt_commits(gh, repo, base, fri.run_commit(staging))
+    except Exception as exc:  # noqa: BLE001
+        payload = {"commits": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
+    out = staging / fri.PROMPT_COMMITS
+    out.write_text(json.dumps(payload, indent=1, default=str) + "\n", encoding="utf-8")
+    return out
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -1225,6 +1283,7 @@ def run_leg(spec: Mapping[str, Any], *, gh: Any, repo: str, rclone: Rclone, work
     if is_forecast_chain(staging):
         write_workflow_logs_index(gh, repo, staging)
         previous = find_previous_review(rclone, names, work)
+        write_prompt_commits(gh, repo, staging, previous)
         report["forecast_review"] = extract_forecast_review(
             staging, run_dir / FORECAST_REVIEW_DIR, work / "forecast_review", previous=previous, env=env)
     shutil.rmtree(staging, ignore_errors=True)
@@ -1487,9 +1546,10 @@ def backfill_forecast_review(spec: Mapping[str, Any], *, rclone: Rclone, work: P
         report.update(status="not_a_forecast_chain", reason="the chain holds no forecast pipeline")
         shutil.rmtree(work, ignore_errors=True)
         return report
+    previous = find_previous_review(rclone, names, work)
     if gh is not None:
         write_workflow_logs_index(gh, repo, staging)
-    previous = find_previous_review(rclone, names, work)
+        write_prompt_commits(gh, repo, staging, previous)
     upload = work / "upload"
     review = extract_forecast_review(staging, upload / folder_rel, work / "review_work",
                                      previous=previous, env=env)

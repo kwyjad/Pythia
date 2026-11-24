@@ -122,6 +122,13 @@ jobs:
       - name: Record stage start
         run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
+      # Table counts at job start, so chain_diagnostics can say whether the
+      # Sibyl job changed any table ("did work" in the cycle summary).
+      - name: Chain diagnostics (before)
+        if: always()
+        continue-on-error: true
+        run: python -m scripts.ci.chain_diagnostics before --workflow sibyl --db data/resolver.duckdb
+
       # The gate and the Sibyl run are the only steps between the DB download
       # and the canonical upload that could go red, and a red here withheld
       # the whole month's forecasts from the release (Sibyl is the forecast
@@ -765,6 +772,30 @@ jobs:
             sibyl_stdout.txt
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Write chain diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN_STAGE: sibyl
+          CHAIN_JOB_STATUS: ${{ job.status }}
+          CHAIN_TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          CHAIN_DOWNLOADED_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          CHAIN_DOWNLOADED_SOURCE: ${{ steps.canonical_download.outputs.source }}
+        run: |
+          python -m scripts.ci.chain_diagnostics write --workflow sibyl \
+            --db data/resolver.duckdb --started-at "${STAGE_STARTED_AT:-}"
+
+      - name: Upload chain diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-diagnostics-sibyl-${{ github.run_id }}
+          path: diagnostics/sibyl
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: Refuse to upload over a newer canonical DB
         if: success()
