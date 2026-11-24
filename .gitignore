@@ -164,6 +164,8 @@ data/tmp/
 .DS_Store
 Thumbs.db
 diagnostics/
+# Source code, not run output: the NO_DATA breakdown lives here (Nov 2026).
+!scripts/diagnostics/
 resolver/diagnostics/
 ${RESOLVER_DATA_DIR}/
 **/staging/**/raw/
