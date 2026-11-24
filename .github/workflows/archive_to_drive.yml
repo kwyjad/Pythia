@@ -62,6 +62,11 @@ on:
         required: false
         default: false
         type: boolean
+      resolver_review_replace:
+        description: "With resolver_review_only: remove an existing resolver_review/ folder (only that folder) and write it again"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Weekly safety net: Mondays 05:23 UTC, backfill mode over 80 days.
     - cron: "23 5 * * 1"
@@ -335,14 +340,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IN_PUBLISH_RUN_ID: ${{ inputs.publish_run_id }}
+          IN_REPLACE: ${{ inputs.resolver_review_replace }}
         run: |
           set -euo pipefail
           if [ -z "${IN_PUBLISH_RUN_ID:-}" ]; then
             echo "::error::resolver_review_only needs publish_run_id."
             exit 1
           fi
-          python -m scripts.ci.drive_archive resolver-review --publish-run-id "${IN_PUBLISH_RUN_ID}" \
-            --report "archive_leg/resolver_review_${IN_PUBLISH_RUN_ID}.json"
+          ARGS=(--publish-run-id "${IN_PUBLISH_RUN_ID}" --report "archive_leg/resolver_review_${IN_PUBLISH_RUN_ID}.json")
+          if [ "${IN_REPLACE:-}" = "true" ]; then
+            ARGS+=(--replace)
+          fi
+          python -m scripts.ci.drive_archive resolver-review "${ARGS[@]}"
 
       - name: Upload the report
         if: always()

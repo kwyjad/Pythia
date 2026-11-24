@@ -335,6 +335,10 @@ class Rclone:
         self.run("copy", str(src), self.path(rel_dir), "--checksum")
         self.run("check", str(src), self.path(rel_dir), "--one-way", "--checksum")
 
+    def purge_dir(self, rel_dir: str) -> None:
+        """Remove ``rel_dir`` and everything in it (through the Drive trash)."""
+        self.run("purge", self.path(rel_dir))
+
     def delete(self, rel_file: str) -> None:
         # Drive's default is to move to the trash (rclone drive use_trash=true),
         # so a mistake can be undone for 30 days.
@@ -1054,13 +1058,15 @@ def unpack_chain_zip(chain_zip: Path, dest: Path) -> Path:
 
 
 def backfill_resolver_review(spec: Mapping[str, Any], *, rclone: Rclone, work: Path,
-                             env: Mapping[str, str] | None = None) -> dict[str, Any]:
+                             env: Mapping[str, str] | None = None,
+                             replace: bool = False) -> dict[str, Any]:
     """Add the missing ``resolver_review/`` folder to a chain already in Drive.
 
     Reads the chain zip back from Drive and uploads ONLY
     ``<run_dir>/resolver_review/``. The zip, the loose files and any other
     folder beside it are never replaced; a folder already in Drive is left
-    alone.
+    alone unless ``replace`` is set, which removes ``resolver_review/`` (and
+    nothing else) first and writes it again.
     """
     names = ArchiveNames(**spec["names"])
     pid = str(spec.get("publish_run_id"))
@@ -1073,7 +1079,7 @@ def backfill_resolver_review(spec: Mapping[str, Any], *, rclone: Rclone, work: P
         return report
     folder_rel = f"{names.run_dir}/{RESOLVER_REVIEW_DIR}"
     already = rclone.list_files(folder_rel)
-    if already:
+    if already and not replace:
         report.update(status="already_present", reason=f"{folder_rel} already holds {len(already)} file(s)")
         return report
     shutil.rmtree(work, ignore_errors=True)
@@ -1087,6 +1093,12 @@ def backfill_resolver_review(spec: Mapping[str, Any], *, rclone: Rclone, work: P
         shutil.rmtree(work, ignore_errors=True)
         return report
     report["resolver_review"] = review
+    if already:
+        # Only the folder this command writes, and only once its replacement
+        # is built: a chain zip that cannot be read leaves the old folder.
+        assert folder_rel.endswith("/" + RESOLVER_REVIEW_DIR)
+        rclone.purge_dir(folder_rel)
+        report["replaced_files"] = len(already)
     rclone.upload_subtree(upload, folder_rel)
     report["drive_paths"] = sorted(
         f"{rclone.root}/{p.relative_to(upload).as_posix()}" for p in upload.rglob("*") if p.is_file())
@@ -1105,7 +1117,8 @@ def cmd_resolver_review(args: argparse.Namespace, *, gh: Any = None, rclone: Rcl
             report = {**spec, "mode": "resolver_review_only"}
             code = 1 if spec.get("status") == "failed" else 0
         else:
-            report = backfill_resolver_review(spec, rclone=rclone, work=work / "review")
+            report = backfill_resolver_review(spec, rclone=rclone, work=work / "review",
+                                              replace=bool(getattr(args, "replace", False)))
             code = 1 if report.get("status") == "failed" else 0
     except Exception as exc:  # noqa: BLE001
         from scripts.ci.build_cycle_diagnostics import SecretLeak
@@ -1117,8 +1130,8 @@ def cmd_resolver_review(args: argparse.Namespace, *, gh: Any = None, rclone: Rcl
         print(f"::error title=Drive resolver-review backfill failed::{report.get('reason')}")
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.report).write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
-    print(json.dumps({k: report.get(k) for k in ("status", "reason", "resolver_review", "drive_paths")},
-                     indent=2, default=str))
+    print(json.dumps({k: report.get(k) for k in ("status", "reason", "replaced_files", "resolver_review",
+                                                 "drive_paths")}, indent=2, default=str))
     return code
 
 
@@ -1243,6 +1256,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--publish-run-id", required=True)
     p.add_argument("--work-dir", default="archive_work")
     p.add_argument("--report", default="archive_leg/resolver_review.json")
+    p.add_argument("--replace", action="store_true",
+                   help="remove an existing resolver_review/ folder (and nothing else) and write it again")
     p = sub.add_parser("housekeeping")
     p.add_argument("--plan", default="diagnostics/archive_plan.json")
     p.add_argument("--legs-dir", default="archive_legs")

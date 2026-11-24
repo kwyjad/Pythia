@@ -666,3 +666,51 @@ def test_a_skipped_step_is_not_a_step_that_did_nothing(tmp_path):
     out = rri.write_inputs(st, tmp_path / "o.json", tmp_path / "w")
     steps = [z["step"] for z in out["chain"]["resolver_update"]["zero_second_steps"]]
     assert steps == ["Phase 2.6: conflict displacement extraction"]
+
+
+class PurgingRclone(FakeRclone):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.purged: list[str] = []
+
+    def purge_dir(self, rel_dir):
+        self.purged.append(rel_dir)
+        shutil.rmtree(self.store / self.root / rel_dir)
+
+
+def test_replace_rewrites_only_resolver_review(tmp_path):
+    st = build_staging(tmp_path)
+    spec = _spec()
+    names = da.ArchiveNames(**spec["names"])
+    rc = PurgingRclone(tmp_path / "drive")
+    run_dir = tmp_path / "drive" / "Fred_archive" / names.run_dir
+    run_dir.mkdir(parents=True)
+    _chain_zip(st, run_dir / names.zip_name)
+    _w(run_dir / "scored_bundle" / "digest.md", "# d\n")
+    _w(run_dir / "resolver_review" / "stale.json", "{}")
+    before = {p.relative_to(run_dir).as_posix(): (p.stat().st_mtime_ns, p.read_bytes())
+              for p in run_dir.rglob("*") if p.is_file() and not p.is_relative_to(run_dir / "resolver_review")}
+
+    # Without replace the folder is left alone.
+    assert da.backfill_resolver_review(spec, rclone=rc, work=tmp_path / "a", env={})["status"] == "already_present"
+    assert rc.purged == []
+
+    out = da.backfill_resolver_review(spec, rclone=rc, work=tmp_path / "b", env={}, replace=True)
+    assert out["status"] == "archived" and out["replaced_files"] == 1
+    assert rc.purged == [f"{names.run_dir}/resolver_review"]
+    assert not (run_dir / "resolver_review" / "stale.json").exists()
+    assert (run_dir / "resolver_review" / da.RESOLVER_REVIEW_INPUTS).is_file()
+    for rel, val in before.items():
+        assert (run_dir / rel).stat().st_mtime_ns == val[0] and (run_dir / rel).read_bytes() == val[1]
+
+
+def test_replace_keeps_the_old_folder_when_the_zip_cannot_be_read(tmp_path):
+    spec = _spec()
+    names = da.ArchiveNames(**spec["names"])
+    rc = PurgingRclone(tmp_path / "drive")
+    run_dir = tmp_path / "drive" / "Fred_archive" / names.run_dir
+    _w(run_dir / names.zip_name, b"not a zip")
+    _w(run_dir / "resolver_review" / "old.json", "{}")
+    with pytest.raises(zipfile.BadZipFile):
+        da.backfill_resolver_review(spec, rclone=rc, work=tmp_path / "b", env={}, replace=True)
+    assert (run_dir / "resolver_review" / "old.json").is_file()
