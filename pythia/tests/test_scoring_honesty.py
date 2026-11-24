@@ -300,3 +300,34 @@ def test_compute_resolutions_stamps_the_acled_snapshot_and_a_vintage(
     con.close()
     assert [(r[0], str(r[1])) for r in res] == [(412.0, "2026-09-28")]
     assert vint == [("first", 412.0)]
+
+
+def test_event_outcomes_keep_first_d60_and_d90() -> None:
+    """Nov 2026: EVENT_OCCURRENCE kept no history, so a revised GDACS alert
+    list changed an outcome with no trace."""
+    assert cr.vintage_milestones("FL", "EVENT_OCCURRENCE") == cr.VINTAGE_MILESTONES
+    con = duckdb.connect(":memory:")
+    cr._ensure_vintage_table(con)
+    kw = dict(question_id="PHL_TC_EVENT_OCCURRENCE_2026-11", horizon_m=1,
+              observed_month="2026-10", source_desc="facts_resolved:GDACS:2026-10",
+              is_test=False, source_ts=None,
+              milestones=cr.vintage_milestones("TC", "EVENT_OCCURRENCE"))
+    assert cr.record_vintages(con, value=0, today=date(2026, 11, 11), **kw) == ["first"]
+    assert cr.record_vintages(con, value=1, today=date(2027, 1, 11), **kw) == ["d60"]
+    assert cr.reading_label("TC", "EVENT_OCCURRENCE", "2026-10", date(2027, 1, 11)) == "d60"
+
+
+def test_a_changed_event_outcome_is_counted() -> None:
+    con = duckdb.connect(":memory:")
+    cr._ensure_vintage_table(con)
+    con.execute("CREATE TABLE questions (question_id TEXT, metric TEXT)")
+    con.execute("CREATE TABLE resolutions (question_id TEXT, horizon_m INTEGER, value DOUBLE)")
+    con.execute("INSERT INTO questions VALUES ('E1', 'EVENT_OCCURRENCE'), "
+                "('E2', 'EVENT_OCCURRENCE'), ('F1', 'FATALITIES')")
+    con.execute("INSERT INTO resolutions VALUES ('E1', 1, 1), ('E2', 1, 0), ('F1', 1, 40)")
+    for qid, value in (("E1", 0), ("E2", 0), ("F1", 10)):
+        cr.record_vintages(con, question_id=qid, horizon_m=1, observed_month="2026-10",
+                           value=value, source_desc="x", source_ts=None,
+                           today=date(2026, 11, 11), is_test=False)
+    # E1 moved 0 -> 1; E2 did not; F1 moved but is not an event outcome.
+    assert cr.count_event_outcomes_changed(con) == 1
