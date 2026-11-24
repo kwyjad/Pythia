@@ -35,6 +35,7 @@ def _env_truthy(value: str | None) -> bool:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
+from resolver.common.logs import env_log_level
 from resolver.ingestion.diagnostics_emitter import (
     finalize_run as diagnostics_finalize_run,
     start_run as diagnostics_start_run,
@@ -288,7 +289,7 @@ def try_with_optional_debug(
     *,
     timeout: int | None = None,
 ) -> int:
-    log_level = env.get("LOG_LEVEL", "INFO").upper()
+    log_level = env_log_level("LOG_LEVEL", environ=env)
     if log_path.exists():
         try:
             log_path.unlink()
@@ -362,7 +363,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     raw_timeout = env.get("CONNECTOR_TIMEOUT", "900").strip()
     connector_timeout: int | None = int(raw_timeout) if raw_timeout else None
 
-    if env.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
+    if env_log_level("LOG_LEVEL", environ=env) == "DEBUG":
         env.setdefault("PYTHONDEVMODE", "1")
         env.setdefault("PYTHONWARNINGS", "default")
 

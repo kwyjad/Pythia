@@ -60,6 +60,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
+from resolver.common.logs import env_log_level
 
 from resolver.hazard_resolution.base_rates import backcast_window, last_frozen_month
 from resolver.hazard_resolution.extract import SHARE_OVERRIDE_ENV as _SHARE_OVERRIDE_ENV
@@ -1237,7 +1238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dry-run", action="store_true",
         help="Plan and log the months without writing anything",
     )
-    parser.add_argument("--log-level", default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"))
+    parser.add_argument("--log-level", default=env_log_level("RESOLVER_LOG_LEVEL"))
     args = parser.parse_args(argv)
 
     logging.basicConfig(

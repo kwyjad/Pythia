@@ -72,6 +72,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
+from resolver.common.logs import env_log_level
 
 # schema is stdlib-only, so importing it at module scope keeps the CLI's
 # start-up as light as the deferred imports below intend.
@@ -1135,7 +1136,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--log-level",
-        default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"),
+        default=env_log_level("RESOLVER_LOG_LEVEL"),
         help="Logging level (default: INFO)",
     )
     args = parser.parse_args(argv)

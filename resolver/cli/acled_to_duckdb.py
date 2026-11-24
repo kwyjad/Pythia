@@ -15,6 +15,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+from resolver.common.logs import env_log_level
 
 import pandas as pd
 
@@ -353,7 +354,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--log-level",
-        default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"),
+        default=env_log_level("RESOLVER_LOG_LEVEL"),
         help="Set logging level (default: %(default)s)",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)

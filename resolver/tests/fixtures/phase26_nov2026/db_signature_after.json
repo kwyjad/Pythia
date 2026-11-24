@@ -1,0 +1,16 @@
+{
+  "all_counts": {
+    "conflict_displacement_candidates": 117,
+    "conflict_displacement_cell_ledger": 1128,
+    "conflict_doc_extractions": 2999,
+    "dtm_conflict_lower_bounds": 106,
+    "dtm_conflict_rounds": 346,
+    "facts_resolved": 81872,
+    "haz_raw_population": 245,
+    "haz_resolutions": 153586,
+    "haz_triggers": 157659,
+    "hdx_signals": 2825,
+    "seasonal_forecasts": 91997
+  },
+  "note": "Trimmed from resolver-debug-bundle-42999258374 (Resolver Update, scheduled, 11 Nov 2026): the tables resolver/diagnostics/writer_steps.py declares."
+}

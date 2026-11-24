@@ -17,6 +17,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Run as a file path (python scripts/local/run_dtm_ingest.py), the repo root
+# is not on sys.path, so put it there before importing the resolver.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from resolver.common.logs import env_log_level  # noqa: E402
+
 
 def _compute_backfill_window(months: int = 36) -> tuple[str, str]:
     """Compute a rolling backfill window ending with the last full month.
@@ -86,7 +94,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--log-level",
-        default=os.getenv("LOG_LEVEL", "INFO"),
+        default=env_log_level("LOG_LEVEL"),
         help="Log level for downstream commands (default: LOG_LEVEL env or 'INFO').",
     )
     parser.add_argument(
