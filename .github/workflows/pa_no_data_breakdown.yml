@@ -1,0 +1,93 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: why flood and cyclone PA cells ended NO_DATA
+# (scripts/diagnostics/pa_no_data_breakdown.py, Nov 2026). Reads the canonical
+# DB, checks its SHA-256 is unchanged afterwards, and writes nothing back, so
+# it is not in the pythia-resolver-db concurrency group and can never queue
+# behind or block a pipeline stage. It changes no rule or threshold.
+name: PA NO_DATA breakdown
+
+on:
+  workflow_dispatch:
+    inputs:
+      window:
+        description: "Months to break down (YYYY-MM:YYYY-MM)"
+        required: false
+        default: "2025-09:2026-08"
+        type: string
+      db_run_id:
+        description: "Optional: force the canonical DB from a specific Actions run ID"
+        required: false
+        default: ""
+        type: string
+  pull_request:
+    paths:
+      - "scripts/diagnostics/pa_no_data_breakdown.py"
+      - ".github/workflows/pa_no_data_breakdown.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  breakdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pip install -r python_library_requirements.txt
+          pip install "duckdb>=1.4,<2"
+
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          include-failed-runs-from: |
+            Hazard Backcast
+            Resolver Update
+
+      - name: Run the breakdown
+        env:
+          IN_WINDOW: ${{ inputs.window || '2025-09:2026-08' }}
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m scripts.diagnostics.pa_no_data_breakdown --db data/resolver.duckdb \
+            --hazard flood --hazard cyclone --window "${IN_WINDOW}" \
+            --out-dir diagnostics/pa_no_data_breakdown
+
+      - name: Print the report
+        if: always()
+        run: |
+          f=diagnostics/pa_no_data_breakdown/pa_no_data_breakdown.md
+          if [ -f "$f" ]; then
+            cat "$f"
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+            cat diagnostics/pa_no_data_breakdown/pa_no_data_breakdown.json
+          else
+            echo "The breakdown produced no report; check the previous step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the breakdown
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pa-no-data-breakdown
+          path: diagnostics/pa_no_data_breakdown/
+          if-no-files-found: warn
+          retention-days: 14

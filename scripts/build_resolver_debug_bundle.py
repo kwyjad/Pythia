@@ -1712,8 +1712,54 @@ class BundleBuilder:
         fetches = self._source_fetches(dest)
         self._crisiswatch_backfill(dest)
         conflict = self._conflict_displacement(dest)
+        no_data = self._pa_no_data(dest)
         return {"cells": cells, "figures": figures, "source_fetches": fetches,
-                "conflict_displacement": conflict}
+                "conflict_displacement": conflict, "pa_no_data": no_data}
+
+    #: Seconds the NO_DATA breakdown may spend replaying cached extractions
+    #: per hazard. Cells past it are counted from their stored reasons.
+    PA_NO_DATA_REPLAY_BUDGET_SEC = 240.0
+
+    def _pa_no_data(self, dest: Path) -> dict[str, Any]:
+        """Why flood and cyclone cells in the acceptance window ended NO_DATA.
+
+        The headline of ``scripts/diagnostics/pa_no_data_breakdown.py`` over
+        the last twelve frozen months: NO_DATA by what triggered the cell,
+        and the three rejection reasons that alone stood between a cell's
+        nearest-miss figure and an answer. Run the script itself for the
+        per-cell CSV and the full report.
+        """
+
+        if self.con is None or not {"haz_resolutions", "haz_triggers"} <= set(self.tables()):
+            write_json(dest / "pa_no_data_breakdown.json",
+                       {"stub": True, "reason": "no haz_resolutions or haz_triggers table"})
+            return {}
+        try:
+            from resolver.hazard_resolution.acceptance import months_window
+            from resolver.hazard_resolution.rulebook import load_rulebook
+            from scripts.diagnostics import pa_no_data_breakdown as nd
+
+            rulebook = load_rulebook()
+            first, last = months_window(rulebook, 12)
+            out: dict[str, Any] = {"window": [first, last]}
+            for hazard in ("FL", "TC"):
+                breakdown = nd.build_breakdown(
+                    self.con, hazard=hazard, first=first, last=last, rulebook=rulebook,
+                    replay=True, replay_budget_sec=self.PA_NO_DATA_REPLAY_BUDGET_SEC,
+                )
+                out[hazard] = {
+                    **nd.headline(breakdown),
+                    "rungs": breakdown["rungs"],
+                    "by_country_top10": dict(list(breakdown["by_country"].items())[:10]),
+                    "freeze": {k: v for k, v in breakdown["freeze"].items()
+                               if k != "winning_figure_publication_lag"},
+                }
+        except Exception as exc:  # noqa: BLE001 - a collector must not fail the phase
+            self.problem(f"pa_no_data breakdown failed: {exc}")
+            write_json(dest / "pa_no_data_breakdown.json", {"stub": True, "reason": str(exc)})
+            return {}
+        write_json(dest / "pa_no_data_breakdown.json", redact_obj(out, self.secrets))
+        return out
 
     #: The conflict displacement sources' tables (Oct 2026, Part A): recorded
     #: and reported only; nothing resolves on them yet.
@@ -5702,7 +5748,8 @@ class BundleBuilder:
             "| `logs/` | the phase logs, plus a normalised error histogram |",
             "| `http/` | every outbound call: URL, status, timing, response envelope |",
             "| `db/` | table counts before and after, freshness per table, fixed queries |",
-            "| `hazard/` | per-cell and per-figure ledgers, extraction spend, backcast state |",
+            "| `hazard/` | per-cell and per-figure ledgers, extraction spend, backcast state, "
+            "and `pa_no_data_breakdown.json` (why flood and cyclone cells ended NO_DATA) |",
             "| `config/` | the rulebook, connector configs and workflows, verbatim |",
             "| `code/` | the source files that participated, verbatim |",
             "| `checks/` | the issue register, contradictions and reconciliation |",

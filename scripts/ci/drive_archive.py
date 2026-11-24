@@ -691,6 +691,7 @@ RESOLVER_REVIEW_BUNDLE_FILES = (
     "db/queries/conflict_forecast_vintages.csv", "hazard/acceptance_report.md",
     "hazard/figures_ledger.csv", "hazard/extraction_budget.csv",
     "hazard/backcast_progress.csv", "hazard/conflict_displacement/cell_ledger.csv",
+    "hazard/pa_no_data_breakdown.json",
     "config/connectors/known_issues.yml", "run/step_timings.csv", "run/workflow_run.json",
 )
 RESOLVER_REVIEW_NEVER = ("hazard/cell_ledger.csv",)
