@@ -403,3 +403,34 @@ class TestStorageVersion:
         path.write_bytes(b"not a database" * 10)
         with pytest.raises(ValueError):
             brd.storage_version_of(path)
+
+
+class TestReleaseReport:
+    """Nov 2026: the inspect report on the release copy called four tables
+    absent that the canonical DB held. The build now records what it dropped,
+    with canonical row counts, for the report to cite."""
+
+    def test_dropped_tables_carry_their_canonical_counts(self, tmp_path):
+        src = _src(tmp_path)
+        con = duckdb.connect(str(src))
+        con.execute("CREATE TABLE acled_political_events (iso3 TEXT)")
+        con.execute("INSERT INTO acled_political_events VALUES ('SOM'), ('ETH')")
+        con.close()
+        stats = brd.build_release_db(str(src), str(tmp_path / "out.duckdb"))
+        assert stats["canonical_counts"]["acled_political_events"] == 2
+        assert stats["canonical_counts"]["haz_resolutions"] == 1
+        assert "questions" not in stats["canonical_counts"]
+        assert stats["canonical_table_count"] == 9
+
+    def test_report_json_is_written(self, tmp_path):
+        import json
+
+        src = _src(tmp_path)
+        report = tmp_path / "release_build.json"
+        assert brd.main([
+            "--src", str(src), "--out", str(tmp_path / "out.duckdb"),
+            "--report-json", str(report),
+        ]) == 0
+        data = json.loads(report.read_text())
+        assert data["canonical_counts"]["haz_triggers"] == 200
+        assert "haz_triggers" in data["dropped_tables"]

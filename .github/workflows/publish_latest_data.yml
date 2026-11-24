@@ -289,9 +289,11 @@ jobs:
           python -c "import duckdb" 2>/dev/null || pip install "duckdb>=1.4,<2" >/dev/null
           rm -f data_out/resolver.duckdb.wal
           mv data_out/resolver.duckdb data_out/resolver.canonical.duckdb
+          mkdir -p diagnostics
           python -m scripts.ci.build_release_db \
             --src data_out/resolver.canonical.duckdb \
-            --out data_out/resolver.duckdb
+            --out data_out/resolver.duckdb \
+            --report-json diagnostics/release_build.json
           rm -f data_out/resolver.canonical.duckdb
           ls -lh data_out/resolver.duckdb
 
@@ -806,13 +808,21 @@ jobs:
       - name: Inspect published DB
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         continue-on-error: true
+        env:
+          SOURCE_RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
+          SOURCE_KIND: ${{ steps.resolve_run.outputs.source }}
         run: |
           set -euo pipefail
           python -c "import duckdb" 2>/dev/null || pip install "duckdb>=1.4,<2" >/dev/null
           rm -f data_out/resolver.duckdb.wal
+          # The report reads the RELEASE copy, which drops licensed and
+          # internal tables on purpose; the build report names them with
+          # their canonical row counts so none reads "(no table)".
           python -m scripts.ci.inspect_resolver_db \
             --db data_out/resolver.duckdb \
-            --out resolver_inspect.md
+            --out resolver_inspect.md \
+            --source-label "release copy built from pythia-resolver-db of run ${SOURCE_RUN_ID} (${SOURCE_KIND})" \
+            --release-build-json diagnostics/release_build.json
 
       - name: Upload resolver inspection artifact
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}

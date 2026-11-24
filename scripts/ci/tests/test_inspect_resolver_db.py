@@ -250,3 +250,35 @@ def test_haz_machine_section_renders_counts(tmp_path):
     assert "haz_base_rates_occurrence" in out and "FL: 1 countries" in out
     assert "1 extraction rows" in out
     assert "### Backcast progress" in out
+
+
+def test_a_table_the_release_drops_is_not_called_absent(tmp_path):
+    """Nov 2026: the report on the release copy marked ACLED political events
+    and three ACAPS tables "(no table)" while the canonical DB held them."""
+
+    import json
+
+    import duckdb
+
+    db = tmp_path / "release.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE questions (question_id TEXT)")
+    con.close()
+    build = tmp_path / "release_build.json"
+    build.write_text(json.dumps({
+        "dropped_tables": ["acled_political_events", "acaps_risk_radar"],
+        "canonical_counts": {"acled_political_events": 5257, "acaps_risk_radar": 42},
+        "canonical_table_count": 98,
+    }))
+    out = build_report(
+        db, source_label="release copy built from pythia-resolver-db of run 123",
+        release_build_json=build,
+    )
+    assert "**Database read:** the PUBLISHED release copy" in out
+    assert "run 123" in out and "1 tables (canonical: 98 tables)" in out
+    line = next(l for l in out.splitlines() if l.startswith("| ACLED political events |"))
+    assert "(no table)" not in line
+    assert "not in the published DB" in line and "5,257" in line
+    # A table the release does NOT drop is still reported missing plainly.
+    hdx = next(l for l in out.splitlines() if l.startswith("| HDX Signals |"))
+    assert "(no table)" in hdx
