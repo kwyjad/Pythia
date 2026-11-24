@@ -65,8 +65,8 @@ export default async function PerformancePage({
       </div>
 
       {loadError ? (
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          {loadError}
+        <div className="rounded-lg border border-amber-600 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {loadError} The scores API did not answer, and every figure on this page comes from it. Try again in a minute.
         </div>
       ) : (
         <PerformancePanel

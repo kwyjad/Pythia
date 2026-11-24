@@ -6,6 +6,7 @@ import InfoTooltip from "../../components/InfoTooltip";
 import KpiCard from "../../components/KpiCard";
 import { apiGet } from "../../lib/api";
 import { formatModelName } from "../../lib/model_names";
+import { CHART_COLORS, CardHeader, ChartFrame, ChartLegend } from "./chart_kit";
 import type {
   SibylComparisonPair,
   SibylComparisonResponse,
@@ -13,16 +14,14 @@ import type {
   SibylComparisonStat,
 } from "../../lib/types";
 
-// ---------------------------------------------------------------------------
-// Palette (validated dataviz palette, light surface — matches CostsClient).
+// Colours come from the shared chart kit (validated palette, light surface).
 // Green = Sibyl better, red = Sibyl worse (all three scores are lower-is-better).
-// ---------------------------------------------------------------------------
-const SIBYL_COLOR = "#4a3aa7"; // indigo — same hue Sibyl uses on /costs and /sibyl
-const BASELINE_COLOR = "#2a78d6"; // blue
-const BETTER = "#008300"; // green
-const WORSE = "#e34948"; // red
-const AXIS = "#c9c9c2";
-const GRID = "#e7e7e1";
+const SIBYL_COLOR = CHART_COLORS.sibyl;
+const BASELINE_COLOR = CHART_COLORS.ensemble;
+const BETTER = CHART_COLORS.better;
+const WORSE = CHART_COLORS.worse;
+const AXIS = CHART_COLORS.axis;
+const GRID = CHART_COLORS.grid;
 
 type Props = {
   data: SibylComparisonResponse;
@@ -109,8 +108,8 @@ function SkillScatter({ points }: { points: QuestionPoint[] }) {
   const volMax = Math.max(1, ...points.map((p) => p.volatility ?? 0));
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img"
-         aria-label="Sibyl versus baseline Brier scatter">
+    <ChartFrame width={W} height={H}
+         label={`Scatter of ${points.length} questions: Sibyl Brier against baseline Brier. Points below the diagonal are questions Sibyl scored better.`}>
       {/* grid + ticks */}
       {ticks.map((t) => (
         <g key={`gx-${t}`}>
@@ -140,51 +139,76 @@ function SkillScatter({ points }: { points: QuestionPoint[] }) {
       <text x={M.l + iw / 2} y={H - 4} textAnchor="middle" fontSize={10} fill="#6a6a62">Baseline Brier →</text>
       <text x={12} y={M.t + ih / 2} textAnchor="middle" fontSize={10} fill="#6a6a62"
             transform={`rotate(-90 12 ${M.t + ih / 2})`}>Sibyl Brier →</text>
-    </svg>
+    </ChartFrame>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Chart 2 — Per-question dumbbell (sorted by Δ). Baseline vs Sibyl dot joined
-// by a segment colored by winner.
+// Chart 2 — Per-question dumbbell, sorted by Δ Brier so the biggest wins sit at
+// the top and the biggest losses at the bottom. Baseline vs Sibyl dot joined by
+// a segment coloured by the winner. The rows scroll inside a capped box; the
+// axis stays pinned above them.
 // ---------------------------------------------------------------------------
+const DUMBBELL_MAX_HEIGHT = 420;
+
 function Dumbbell({ points }: { points: QuestionPoint[] }) {
   const rowH = 22;
-  const W = 360;
-  const M = { t: 8, r: 12, b: 24, l: 96 };
-  const ih = points.length * rowH;
-  const H = M.t + ih + M.b;
+  const W = 400;
+  const M = { r: 14, l: 96 };
   const iw = W - M.l - M.r;
   const dom = Math.ceil(Math.max(0.1, ...points.map((p) => Math.max(p.sibyl, p.standard))) * 10) / 10;
   const sx = (v: number) => M.l + (v / dom) * iw;
+  const ticks = [0, dom / 2, dom].map((t) => Number(t.toFixed(2)));
+  const H = points.length * rowH + 8;
+  const sorted = [...points].sort((a, b) => a.delta - b.delta);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Per-question Sibyl vs baseline Brier">
-      {[0, dom / 2, dom].map((t) => (
-        <g key={t}>
-          <line x1={sx(t)} y1={M.t} x2={sx(t)} y2={M.t + ih} stroke={GRID} strokeWidth={1} />
-          <text x={sx(t)} y={H - 8} textAnchor="middle" fontSize={9} fill="#8a8a82">{Number(t.toFixed(2))}</text>
-        </g>
-      ))}
-      {points.map((p, i) => {
-        const y = M.t + i * rowH + rowH / 2;
-        const win = p.delta < 0 ? BETTER : p.delta > 0 ? WORSE : "#8a8a82";
-        return (
-          <g key={p.question_id}>
-            <text x={M.l - 6} y={y + 3} textAnchor="end" fontSize={9} fill="#4a4a44">
-              {p.iso3 ?? p.question_id.slice(0, 6)} {p.hazard_code}
-            </text>
-            <line x1={sx(p.standard)} y1={y} x2={sx(p.sibyl)} y2={y} stroke={win} strokeWidth={2.5} />
-            <circle cx={sx(p.standard)} cy={y} r={4.5} fill={BASELINE_COLOR}>
-              <title>{`${p.question_id} — Baseline ${fmt4(p.standard)}`}</title>
-            </circle>
-            <circle cx={sx(p.sibyl)} cy={y} r={4.5} fill={SIBYL_COLOR}>
-              <title>{`${p.question_id} — Sibyl ${fmt4(p.sibyl)} (Δ ${fmt4(p.delta)})`}</title>
-            </circle>
-          </g>
-        );
-      })}
-    </svg>
+    <div className="mx-auto" style={{ maxWidth: 560 }}>
+      <div
+        className="overflow-y-auto rounded border border-fred-border"
+        style={{ maxHeight: DUMBBELL_MAX_HEIGHT }}
+        tabIndex={0}
+        aria-label="Per-question comparison, scrollable"
+      >
+        <div className="sticky top-0 z-10 bg-fred-surface">
+          <svg viewBox={`0 0 ${W} 22`} preserveAspectRatio="xMidYMid meet" className="block h-auto w-full"
+               aria-hidden="true">
+            {ticks.map((t) => (
+              <text key={t} x={sx(t)} y={14} textAnchor="middle" fontSize={9} fill="#6a6a62">{t}</text>
+            ))}
+            <text x={M.l - 6} y={14} textAnchor="end" fontSize={9} fill="#6a6a62">Brier →</text>
+            <line x1={M.l} x2={M.l + iw} y1={21} y2={21} stroke={AXIS} strokeWidth={1} />
+          </svg>
+        </div>
+        <ChartFrame width={W} height={H} maxHeight={null}
+                    label={`Per-question Brier for ${sorted.length} questions, baseline against Sibyl, sorted from Sibyl's largest win to its largest loss.`}>
+          {ticks.map((t) => (
+            <line key={t} x1={sx(t)} y1={0} x2={sx(t)} y2={H} stroke={GRID} strokeWidth={1} />
+          ))}
+          {sorted.map((p, i) => {
+            const y = 4 + i * rowH + rowH / 2;
+            const win = p.delta < 0 ? BETTER : p.delta > 0 ? WORSE : "#8a8a82";
+            return (
+              <g key={p.question_id}>
+                <text x={M.l - 6} y={y + 3} textAnchor="end" fontSize={9} fill="#4a4a44">
+                  {p.iso3 ?? p.question_id.slice(0, 6)} {p.hazard_code}
+                </text>
+                <line x1={sx(p.standard)} y1={y} x2={sx(p.sibyl)} y2={y} stroke={win} strokeWidth={2.5} />
+                <circle cx={sx(p.standard)} cy={y} r={4.5} fill={BASELINE_COLOR}>
+                  <title>{`${p.question_id} — Baseline ${fmt4(p.standard)}`}</title>
+                </circle>
+                <circle cx={sx(p.sibyl)} cy={y} r={4.5} fill={SIBYL_COLOR}>
+                  <title>{`${p.question_id} — Sibyl ${fmt4(p.sibyl)} (Δ ${fmt4(p.delta)})`}</title>
+                </circle>
+              </g>
+            );
+          })}
+        </ChartFrame>
+      </div>
+      <p className="mt-1 text-[11px] text-fred-muted">
+        Top: Sibyl&apos;s largest wins. Bottom: its largest losses. {sorted.length} questions; scroll for more.
+      </p>
+    </div>
   );
 }
 
@@ -211,7 +235,8 @@ function DivergenceSkill({ points }: { points: QuestionPoint[] }) {
   const xMed = sorted[Math.floor(sorted.length / 2)];
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Divergence versus skill delta">
+    <ChartFrame width={W} height={H}
+         label="Scatter of Sibyl's divergence from the standard track against its Brier difference; points below the zero line are Sibyl wins.">
       {/* y=0 line (equal skill) */}
       <line x1={M.l} y1={sy(0)} x2={M.l + iw} y2={sy(0)} stroke={AXIS} strokeWidth={1.5} />
       {/* x median */}
@@ -229,7 +254,7 @@ function DivergenceSkill({ points }: { points: QuestionPoint[] }) {
       <text x={M.l + iw / 2} y={H - 4} textAnchor="middle" fontSize={10} fill="#6a6a62">JS divergence vs standard →</text>
       <text x={12} y={M.t + ih / 2} textAnchor="middle" fontSize={10} fill="#6a6a62"
             transform={`rotate(-90 12 ${M.t + ih / 2})`}>Δ Brier (Sibyl − Base)</text>
-    </svg>
+    </ChartFrame>
   );
 }
 
@@ -252,7 +277,8 @@ function CostEffect({ points }: { points: QuestionPoint[] }) {
   const sy = (d: number) => M.t + ih / 2 - (d / dMax) * (ih / 2);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label="Cost versus skill delta">
+    <ChartFrame width={W} height={H}
+         label="Scatter of Sibyl's research cost per question against its Brier difference; points below the zero line are Sibyl wins.">
       <line x1={M.l} y1={sy(0)} x2={M.l + iw} y2={sy(0)} stroke={AXIS} strokeWidth={1.5} />
       {pts.map((p) => {
         const fill = p.delta < 0 ? BETTER : p.delta > 0 ? WORSE : "#8a8a82";
@@ -266,7 +292,7 @@ function CostEffect({ points }: { points: QuestionPoint[] }) {
       <text x={M.l + iw / 2} y={H - 4} textAnchor="middle" fontSize={10} fill="#6a6a62">Sibyl cost / question ($) →</text>
       <text x={12} y={M.t + ih / 2} textAnchor="middle" fontSize={10} fill="#6a6a62"
             transform={`rotate(-90 12 ${M.t + ih / 2})`}>Δ Brier (Sibyl − Base)</text>
-    </svg>
+    </ChartFrame>
   );
 }
 
@@ -276,8 +302,14 @@ function CostEffect({ points }: { points: QuestionPoint[] }) {
 function SummaryBars({ spd }: { spd: Record<string, SibylComparisonStat> }) {
   const order = ["brier", "log", "crps"].filter((k) => spd[k]);
   if (!order.length) return null;
+  const label =
+    "Mean score for Sibyl and the baseline on each scoring rule: " +
+    order
+      .map((st) => `${st} Sibyl ${fmt4(spd[st].sibyl_mean)}, baseline ${fmt4(spd[st].standard_mean)}`)
+      .join("; ") +
+    ". Lower is better.";
   return (
-    <div className="space-y-3">
+    <div className="mx-auto max-w-[560px] space-y-3" role="img" aria-label={label}>
       {order.map((st) => {
         const s = spd[st];
         const maxV = Math.max(s.sibyl_mean ?? 0, s.standard_mean ?? 0, 0.001);
@@ -313,23 +345,42 @@ function SummaryBars({ spd }: { spd: Record<string, SibylComparisonStat> }) {
   );
 }
 
-const ChartCard = ({ title, tip, children }: { title: string; tip?: string; children: React.ReactNode }) => (
-  <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 shadow-fredCard">
-    <div className="mb-2 flex items-center gap-1 text-sm font-medium text-fred-text">
-      {title}
-      {tip ? <InfoTooltip text={tip} /> : null}
-    </div>
+const ChartCard = ({
+  title,
+  tip,
+  legend,
+  children,
+}: {
+  title: string;
+  tip?: string;
+  legend?: React.ReactNode;
+  children: React.ReactNode;
+}) => (
+  <div className="rounded-lg border border-fred-border bg-fred-surface p-4 shadow-fredCard">
+    <CardHeader title={title} tip={tip} as="h3" />
     {children}
+    {legend ? <div className="mx-auto mt-2 max-w-[560px]">{legend}</div> : null}
   </div>
 );
 
-const Legend = () => (
-  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-fred-muted">
-    <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: SIBYL_COLOR }} />Sibyl</span>
-    <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: BASELINE_COLOR }} />Baseline</span>
-    <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: BETTER }} />Sibyl better</span>
-    <span className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: WORSE }} />Sibyl worse</span>
-  </div>
+// Each chart carries the legend for the marks it draws, inside its own card,
+// so a chart, its title and its legend fit in one viewport together.
+const WIN_LOSS_LEGEND = (
+  <ChartLegend
+    items={[
+      { label: "Sibyl better (below the line)", color: BETTER },
+      { label: "Sibyl worse", color: WORSE },
+    ]}
+  />
+);
+const DUMBBELL_LEGEND = (
+  <ChartLegend
+    items={[
+      { label: "Baseline", color: BASELINE_COLOR },
+      { label: "Sibyl", color: SIBYL_COLOR },
+      { label: "Segment: winner (green Sibyl, red baseline)", color: BETTER, kind: "line" },
+    ]}
+  />
 );
 
 // ---------------------------------------------------------------------------
@@ -556,23 +607,21 @@ export default function SibylComparison({ data: initial, includeTest }: Props) {
 
               <SibylVariantsTable variants={data.variants} />
 
-              <Legend />
-
               {/* Charts */}
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <ChartCard title="Head-to-head skill (Brier)" tip="Each dot is a covered question. Below the 45° line means Sibyl's Brier is lower (better). Dot size ∝ volatility.">
+                <ChartCard legend={WIN_LOSS_LEGEND} title="Head-to-head skill (Brier)" tip="Each dot is a covered question. Below the 45° line means Sibyl's Brier is lower (better). Dot size ∝ volatility.">
                   <SkillScatter points={points} />
                 </ChartCard>
-                <ChartCard title="Per-question comparison" tip="Baseline (blue) vs Sibyl (indigo) mean Brier per question, sorted by margin. Segment colored by winner.">
+                <ChartCard legend={DUMBBELL_LEGEND} title="Per-question comparison" tip="Baseline (blue) vs Sibyl (indigo) mean Brier per question, sorted by Δ Brier: Sibyl's biggest wins at the top, its biggest losses at the bottom. Segment coloured by the winner. Scrolls inside the card.">
                   <Dumbbell points={points} />
                 </ChartCard>
                 <ChartCard title="Score-type summary" tip="Mean Sibyl vs baseline for each scoring rule on the covered set, with win rate.">
                   <SummaryBars spd={spd} />
                 </ChartCard>
-                <ChartCard title="Does divergence help?" tip="Does diverging more from the standard track (higher JS divergence) correlate with beating it? Points below the equal-skill line are Sibyl wins.">
+                <ChartCard legend={WIN_LOSS_LEGEND} title="Does divergence help?" tip="Does diverging more from the standard track (higher JS divergence) correlate with beating it? Points below the equal-skill line are Sibyl wins.">
                   <DivergenceSkill points={points} />
                 </ChartCard>
-                <ChartCard title="Cost-effectiveness" tip="Sibyl's per-question research cost against how much it beat the baseline. Below the line = a win; far right = expensive.">
+                <ChartCard legend={WIN_LOSS_LEGEND} title="Cost-effectiveness" tip="Sibyl's per-question research cost against how much it beat the baseline. Below the line = a win; far right = expensive.">
                   <CostEffect points={points} />
                 </ChartCard>
               </div>

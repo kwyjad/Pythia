@@ -325,9 +325,58 @@ export type ResolutionRatesResponse = {
   rows: ResolutionRateRow[];
 };
 
+/** A left model against a right model on the cells BOTH scored (Nov 2026).
+ *  ``model_*`` is the left side, ``reference_*`` the right; ``month`` only in
+ *  the time series. Lower is better for every score type. */
+export type PairedScoreRow = {
+  month?: string;
+  model_name: string;
+  reference: string;
+  score_family: ScoreFamily;
+  score_type: string;
+  n_samples: number;
+  n_questions: number;
+  model_avg: number | null;
+  model_median: number | null;
+  reference_avg: number | null;
+  reference_median: number | null;
+};
+
+/** A model the current profile forecasts with, named as scores names it. */
+export type ActiveModel = {
+  model_id: string;
+  model_name: string;
+  role: "ensemble" | "track2";
+};
+
+export type PerformanceTimeseriesRow = {
+  month: string;
+  score_family: ScoreFamily;
+  score_type: string;
+  model_name: string;
+  n_samples: number;
+  n_questions: number;
+  avg_value: number | null;
+  median_value: number | null;
+};
+
+export type PerformanceTimeseriesResponse = {
+  month_basis: "forecast_month";
+  rows: PerformanceTimeseriesRow[];
+  paired_rows: PairedScoreRow[];
+};
+
 export type PerformanceScoresResponse = {
   summary_rows: PerformanceSummaryRow[];
   run_rows: PerformanceRunRow[];
+  /** One row per (family, score type, model) across every hazard, with a
+   *  true SQL median. */
+  overall_rows?: PerformanceSummaryRow[];
+  /** Ensemble aggregates against each external reference, paired. */
+  reference_rows?: PairedScoreRow[];
+  /** Every model against __ext_climatology, paired. */
+  skill_rows?: PairedScoreRow[];
+  active_models?: ActiveModel[];
   track_counts?: {
     track1: number;
     track2: number;

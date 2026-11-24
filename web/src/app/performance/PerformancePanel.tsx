@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import InfoTooltip from "../../components/InfoTooltip";
 import KpiCard from "../../components/KpiCard";
@@ -14,10 +15,31 @@ import {
   TOOLTIP_EXTERNAL_BENCHMARK,
   TOOLTIP_LOG,
   TOOLTIP_SAMPLES,
+  TOOLTIP_ACTIVE_MODEL,
+  TOOLTIP_LOWER_IS_BETTER,
+  TOOLTIP_MODELS_KPI,
+  TOOLTIP_PAIRED_REFERENCE,
+  TOOLTIP_SKILL_BAR,
   ACE_PA_INDICATIVE_NOTE,
   isAcePa,
 } from "../../lib/score_glossary";
+import {
+  SCORE_TYPES,
+  SCORE_TYPE_LABELS,
+  headlineCell,
+  isIndividualForecaster,
+  modelSkill,
+  pairedValue,
+  pickBestReference,
+  referenceLabel,
+  skillBarGeometry,
+  type HeadlineCell,
+  type ScoreType,
+  type SkillInfo,
+  type Stat,
+} from "../../lib/performance_data";
 import type {
+  PairedScoreRow,
   PerformanceRunRow,
   PerformanceScoresResponse,
   PerformanceSummaryRow,
@@ -27,7 +49,15 @@ import type {
   SibylComparisonResponse,
 } from "../../lib/types";
 import AboutScores from "./AboutScores";
+import ScoresOverTime from "./ScoresOverTime";
 import SibylComparison from "./SibylComparison";
+import {
+  CHART_COLORS,
+  CardHeader,
+  HeaderSelect,
+  SegmentedToggle,
+  Skeleton,
+} from "./chart_kit";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,7 +94,13 @@ type PivotedRow = {
   n_samples: number;
   n_questions_binary: number;
   n_samples_binary: number;
+  /** Detailed Scores only: what the row is (drives the badge and muting). */
+  status?: RowStatus;
+  /** Paired skill vs climatology; null where none is drawn. */
+  skill?: SkillInfo | null;
 };
+
+type RowStatus = "active" | "retired" | "aggregate" | "reference" | "other";
 
 // Aggregated row used by the By Run view after pivoting.
 type RunPivotedRow = {
@@ -245,9 +281,16 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     render: (row) => {
       const isExternal = row.key.startsWith("__ext_");
       const isSibyl = row.key === "sibyl";
+      const retired = row.status === "retired";
       return (
-        <span className={`font-medium ${isExternal ? "text-amber-400" : "text-fred-text"}`}>
+        <span
+          className={`font-medium ${
+            isExternal ? "text-amber-800" : retired ? "text-fred-muted" : "text-fred-text"
+          }`}
+        >
+          {row.status === "active" ? <ActiveBadge /> : null}
           {row.label}
+          {retired ? <span className="ml-1.5 text-[10px] uppercase tracking-wide">retired</span> : null}
           {isExternal ? (
             <InfoTooltip text={TOOLTIP_EXTERNAL_BENCHMARK} />
           ) : null}
@@ -354,6 +397,77 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     render: (row) => formatInt(row.n_samples),
   },
 ];
+
+/** "Active" badge: a filled dot plus the word, so the meaning never rests on colour. */
+function ActiveBadge() {
+  return (
+    <span
+      title={TOOLTIP_ACTIVE_MODEL}
+      className="mr-1.5 inline-flex items-center gap-1 rounded-sm border border-fred-primary/40 bg-fred-primary/10 px-1.5 py-0.5 align-middle text-[10px] font-semibold uppercase tracking-wide text-fred-primary"
+    >
+      <span aria-hidden="true" className="inline-block h-1.5 w-1.5 rounded-full bg-fred-primary" />
+      Active
+    </span>
+  );
+}
+
+/** Inline skill bar centred on zero: right and green beats climatology, left
+ *  and red loses to it, hatched below SKILL_LOW_N paired questions. */
+function SkillBar({ info }: { info: SkillInfo }) {
+  const g = skillBarGeometry(info.skill);
+  const color = g.side === "neg" ? CHART_COLORS.worse : CHART_COLORS.better;
+  const pct = `${info.skill >= 0 ? "+" : "−"}${Math.abs(info.skill * 100).toFixed(0)}%`;
+  const fill = info.lowN
+    ? `repeating-linear-gradient(45deg, ${color} 0 3px, rgba(255,255,255,0.9) 3px 6px)`
+    : color;
+  return (
+    <span
+      role="img"
+      aria-label={`Skill vs climatology ${pct} on ${info.n} paired questions${info.lowN ? ", low n" : ""}`}
+      className="inline-flex items-center gap-2"
+    >
+      <span className="relative inline-block h-3 w-32 rounded-sm bg-fred-bg">
+        <span className="absolute inset-y-0 left-1/2 w-px bg-fred-muted" aria-hidden="true" />
+        {g.side !== "zero" ? (
+          <span
+            aria-hidden="true"
+            className="absolute inset-y-0 rounded-sm"
+            style={{
+              width: `${g.widthPct}%`,
+              left: g.side === "pos" ? "50%" : `${50 - g.widthPct}%`,
+              background: fill,
+              border: info.lowN ? `1px solid ${color}` : undefined,
+            }}
+          />
+        ) : null}
+      </span>
+      <span className="w-10 text-right text-xs tabular-nums text-fred-text">{pct}</span>
+      <span className="text-[10px] text-fred-muted">
+        n={info.n}
+        {info.lowN ? " · low n" : ""}
+      </span>
+    </span>
+  );
+}
+
+const SKILL_COLUMN: SortableColumn<PivotedRow> = {
+  key: "skill",
+  label: (
+    <span className="inline-flex items-center gap-1">
+      Skill vs climatology <InfoTooltip text={TOOLTIP_SKILL_BAR} />
+    </span>
+  ),
+  sortValue: (row) => row.skill?.skill ?? null,
+  defaultSortDirection: "desc",
+  render: (row) =>
+    row.skill ? (
+      <SkillBar info={row.skill} />
+    ) : (
+      <span className="text-xs text-fred-muted">
+        {row.status === "retired" ? "retired" : "\u2014"}
+      </span>
+    ),
+};
 
 const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
   {
@@ -463,20 +577,120 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
 // Component
 // ---------------------------------------------------------------------------
 
+/** A headline value with its paired reference line, or "n/a" with the reason. */
+function HeadlineValue({
+  cell,
+  family,
+  best,
+  stat,
+  large,
+}: {
+  cell: HeadlineCell;
+  family: ScoreFamily;
+  best: PairedScoreRow | null;
+  stat: Stat;
+  large: boolean;
+}) {
+  const famLabel = family === "spd" ? "SPD" : "Binary";
+  const valueCls = large ? "text-2xl font-semibold text-fred-primary" : "text-base font-semibold text-fred-text";
+  const value =
+    cell.kind === "value" ? (
+      <span className={valueCls}>{formatScore(cell.value)}</span>
+    ) : (
+      <span className={`${valueCls} inline-flex items-center gap-1 text-fred-muted`}>
+        n/a <InfoTooltip text={cell.reason} />
+      </span>
+    );
+  let refLine: React.ReactNode = null;
+  if (cell.kind === "value" && best) {
+    const m = pairedValue(best, "model", stat);
+    const r = pairedValue(best, "reference", stat);
+    if (m != null && r != null) {
+      const better = m < r;
+      const tie = Math.abs(m - r) < 1e-12;
+      refLine = (
+        <div
+          className={`text-xs ${tie ? "text-fred-muted" : better ? "text-emerald-800" : "text-red-800"}`}
+          title={TOOLTIP_PAIRED_REFERENCE}
+        >
+          {tie ? "=" : better ? "▼ beats" : "▲ trails"} {referenceLabel(best.reference)}{" "}
+          {formatScore3(r)}{" "}
+          <span className="text-fred-muted">
+            (ens {formatScore3(m)}, {best.n_questions} q paired)
+          </span>
+        </div>
+      );
+    }
+  }
+  return (
+    <div className="leading-tight">
+      <div className="flex items-baseline gap-2">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-fred-muted">{famLabel}</span>
+        {value}
+      </div>
+      {refLine}
+    </div>
+  );
+}
+
+const formatScore3 = (v: number | null | undefined) =>
+  v == null || !Number.isFinite(v) ? "—" : v.toFixed(3);
+
+const SCORE_TOOLTIPS: Record<ScoreType, string> = {
+  brier: `${TOOLTIP_BRIER_SPD}\n\n${TOOLTIP_BRIER_BINARY}`,
+  log: TOOLTIP_LOG,
+  crps: TOOLTIP_CRPS,
+};
+
+/** Pivot rows for the overall (cross-hazard) block, keyed by model. */
+function overallAsSummary(
+  overall: PerformanceSummaryRow[] | undefined,
+  summary: PerformanceSummaryRow[],
+): PerformanceSummaryRow[] {
+  if (overall && overall.length) return overall;
+  // An older API: rebuild sample-weighted means from the per-hazard rows.
+  // Medians cannot be rebuilt without a median of medians, so they stay null.
+  const groups = new Map<string, PerformanceSummaryRow[]>();
+  for (const r of summary) {
+    const k = `${familyOf(r)}|${r.score_type}|${r.model_name ?? ""}`;
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  const out: PerformanceSummaryRow[] = [];
+  for (const [k, rows] of groups) {
+    const [fam, st, model] = k.split("|");
+    const a = aggregateScore(rows, st, fam as ScoreFamily);
+    out.push({
+      hazard_code: "*",
+      metric: "*",
+      score_family: fam as ScoreFamily,
+      score_type: st,
+      model_name: model || null,
+      n_samples: a.nSamples,
+      n_questions: a.nQuestions,
+      avg_value: a.avg,
+      median_value: null,
+    });
+  }
+  return out;
+}
+
 export default function PerformancePanel({
   initialData,
   initialSibyl,
   includeTest,
 }: PerformancePanelProps) {
+  const searchParams = useSearchParams();
   const [pageTab, setPageTab] = useState<PageTab>("dashboard");
   const [view, setView] = useState<ViewMode>("total");
   const [metric, setMetric] = useState<string | null>(null);
   const [track, setTrack] = useState<number | null>(null);
   const [data, setData] = useState<PerformanceScoresResponse>(initialData);
   const [loading, setLoading] = useState(false);
-  const [resolutionRates, setResolutionRates] = useState<ResolutionRateRow[]>(
-    [],
+  const [resolutionRates, setResolutionRates] = useState<ResolutionRateRow[] | null>(null);
+  const [headlineStat, setHeadlineStat] = useState<Stat>(
+    searchParams?.get("stat") === "median" ? "median" : "avg",
   );
+  const [skillMetric, setSkillMetric] = useState<ScoreType>("brier");
 
   // Fetch resolution rates on mount
   useEffect(() => {
@@ -484,7 +698,7 @@ export default function PerformancePanel({
       include_test: includeTest || undefined,
     })
       .then((res) => setResolutionRates(res.rows ?? []))
-      .catch(() => {});
+      .catch(() => setResolutionRates([]));
   }, [includeTest]);
 
   // ---- Detect available ensemble models ------------------------------------
@@ -499,8 +713,10 @@ export default function PerformancePanel({
     return Array.from(names).sort();
   }, [data]);
 
+  // The one ensemble selector the page has: the headline cards, the time
+  // series and the By Hazard / By Run tables all read it. Kept in the URL.
   const [selectedEnsemble, setSelectedEnsemble] = useState<string | null>(
-    null,
+    searchParams?.get("ensemble") ?? null,
   );
 
   const activeEnsemble = useMemo(() => {
@@ -509,6 +725,16 @@ export default function PerformancePanel({
     }
     return pickDefaultEnsemble(ensembleModels);
   }, [selectedEnsemble, ensembleModels]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (selectedEnsemble) url.searchParams.set("ensemble", selectedEnsemble);
+    else url.searchParams.delete("ensemble");
+    if (headlineStat === "median") url.searchParams.set("stat", "median");
+    else url.searchParams.delete("stat");
+    window.history.replaceState(window.history.state, "", url.toString());
+  }, [selectedEnsemble, headlineStat]);
 
   // ---- Fetch when metric changes -------------------------------------------
 
@@ -544,33 +770,84 @@ export default function PerformancePanel({
     await refetchScores(metric, newTrack);
   };
 
-  // ---- KPI cards -----------------------------------------------------------
+  // ---- Coverage KPIs -------------------------------------------------------
 
   const kpiStats = useMemo(() => {
-    const ensembleRows = activeEnsemble
-      ? data.summary_rows.filter(
-          (r) => r.model_name === activeEnsemble && !isExternalBenchmark(r.model_name),
-        )
-      : data.summary_rows.filter(
-          (r) => isEnsembleModel(r.model_name) && !isExternalBenchmark(r.model_name),
-        );
     const allHazards = new Set(data.summary_rows.map((r) => r.hazard_code));
-    const allModels = new Set(
-      data.summary_rows.map((r) => r.model_name).filter(Boolean),
+    const forecasters = new Set(
+      data.summary_rows
+        .map((r) => r.model_name)
+        .filter((m): m is string => isIndividualForecaster(m)),
     );
-    const allRuns = new Set(data.run_rows.map((r) => r.forecaster_run_id ?? r.hs_run_id));
-    const brierSpd = aggregateScore(ensembleRows, "brier", "spd");
-    const brierBinary = aggregateScore(ensembleRows, "brier", "binary");
-    return {
-      hazards: allHazards.size,
-      models: allModels.size,
-      runs: allRuns.size,
-      totalQuestions: brierSpd.nQuestions,
-      totalQuestionsBinary: brierBinary.nQuestions,
-      overallBrierSpd: brierSpd.avg,
-      overallBrierBinary: brierBinary.avg,
-    };
-  }, [data, activeEnsemble]);
+    return { hazards: allHazards.size, models: forecasters.size };
+  }, [data]);
+
+  // ---- Headline skill cards -----------------------------------------------
+
+  const overall = useMemo(
+    () => overallAsSummary(data.overall_rows, data.summary_rows),
+    [data],
+  );
+  const referenceRows = useMemo(() => data.reference_rows ?? [], [data]);
+
+  const headline = useMemo(
+    () =>
+      SCORE_TYPES.map((st) => ({
+        st,
+        spd: headlineCell(overall, "spd", activeEnsemble, st, headlineStat),
+        binary: headlineCell(overall, "binary", activeEnsemble, st, headlineStat),
+        bestSpd: pickBestReference(referenceRows, "spd", activeEnsemble, st, headlineStat),
+        bestBinary: pickBestReference(referenceRows, "binary", activeEnsemble, st, headlineStat),
+      })),
+    [overall, referenceRows, activeEnsemble, headlineStat],
+  );
+
+  // ---- Model status and skill for the Detailed Scores rows -----------------
+
+  const activeNames = useMemo(
+    () => new Set((data.active_models ?? []).map((m) => m.model_name)),
+    [data],
+  );
+  const knowsActive = (data.active_models ?? []).length > 0;
+
+  const statusOf = (key: string): RowStatus => {
+    if (activeNames.has(key)) return "active";
+    if (key.startsWith("__ext_")) return "reference";
+    if (isEnsembleModel(key) || key.startsWith("track2_") || key === "sibyl") return "aggregate";
+    if (knowsActive && isIndividualForecaster(key)) return "retired";
+    return "other";
+  };
+
+  const decorate = (rows: PivotedRow[]): PivotedRow[] =>
+    rows.map((r) => {
+      const status = statusOf(r.key);
+      const showSkill = status === "active" || (status === "aggregate" && isEnsembleModel(r.key));
+      return {
+        ...r,
+        status,
+        skill: showSkill ? modelSkill(data.skill_rows ?? [], r.key, skillMetric) : null,
+      };
+    });
+
+  /** Replace the cross-hazard medians (a median of medians when built from
+   *  per-hazard rows) with the API's true per-model medians. */
+  const withTrueMedians = (rows: PivotedRow[]): PivotedRow[] => {
+    if (!data.overall_rows?.length) return rows;
+    const find = (model: string, fam: ScoreFamily, st: string) =>
+      data.overall_rows?.find(
+        (o) => o.model_name === model && (o.score_family ?? "spd") === fam && o.score_type === st,
+      );
+    return rows.map((r) => ({
+      ...r,
+      median_brier: find(r.key, "spd", "brier")?.median_value ?? r.median_brier,
+      median_brier_binary: find(r.key, "binary", "brier")?.median_value ?? r.median_brier_binary,
+      median_log: find(r.key, "spd", "log")?.median_value ?? r.median_log,
+      median_crps: find(r.key, "spd", "crps")?.median_value ?? r.median_crps,
+    }));
+  };
+
+  const pinActiveFirst = (row: PivotedRow): number =>
+    row.status === "active" ? 0 : row.status === "aggregate" ? 1 : row.status === "retired" ? 3 : 2;
 
   // ---- Helper to build pivoted rows from summary data ----------------------
 
@@ -616,12 +893,17 @@ export default function PerformancePanel({
 
   const totalRows = useMemo(
     (): PivotedRow[] =>
-      buildPivoted(
-        data.summary_rows,
-        (r) => r.model_name ?? "__null__",
-        (k) => displayModelName(k === "__null__" ? null : k),
+      decorate(
+        withTrueMedians(
+          buildPivoted(
+            data.summary_rows,
+            (r) => r.model_name ?? "__null__",
+            (k) => displayModelName(k === "__null__" ? null : k),
+          ),
+        ),
       ),
-    [data],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, skillMetric],
   );
 
   // ---- By Hazard view ------------------------------------------------------
@@ -691,14 +973,16 @@ export default function PerformancePanel({
       (r) => r.model_name ?? "__null__",
       (k) => displayModelName(k === "__null__" ? null : k),
     );
-    // Sort: ensembles first, then regular models, then external benchmarks last
-    return pivoted.sort((a, b) => {
-      const aExt = a.key.startsWith("__ext_") ? 2 : isEnsembleModel(a.key === "__null__" ? null : a.key) ? 0 : 1;
-      const bExt = b.key.startsWith("__ext_") ? 2 : isEnsembleModel(b.key === "__null__" ? null : b.key) ? 0 : 1;
-      if (aExt !== bExt) return aExt - bExt;
-      return a.label.localeCompare(b.label);
-    });
-  }, [data]);
+    // The table pins active models first (pinActiveFirst) and then sorts by
+    // the selected column; this order only breaks ties.
+    return decorate(withTrueMedians(pivoted)).sort((a, b) => a.label.localeCompare(b.label));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, skillMetric]);
+
+  const modelColumns = useMemo(
+    () => [PIVOTED_COLUMNS[0], SKILL_COLUMN, ...PIVOTED_COLUMNS.slice(1)],
+    [],
+  );
 
   // ---- Render --------------------------------------------------------------
 
@@ -710,7 +994,8 @@ export default function PerformancePanel({
   // these anymore, so their tiles would always sit at 0% and create the
   // impression of broken calibration.
   const BLOCKED_HAZARDS = new Set(["DI", "HW", "CU", "ACO"]);
-  const visibleResolutionRates = resolutionRates.filter(
+  const ratesLoading = resolutionRates === null;
+  const visibleResolutionRates = (resolutionRates ?? []).filter(
     (row) => !BLOCKED_HAZARDS.has(row.hazard_code.toUpperCase()),
   );
 
@@ -737,10 +1022,32 @@ export default function PerformancePanel({
       ? (data.track_counts.track1 ?? 0) + (data.track_counts.track2 ?? 0)
       : 0);
 
+  const ensembleOptions = ensembleModels.map((m) => ({ value: m, label: formatModelName(m) }));
+  const ensembleSelector =
+    ensembleOptions.length > 0 ? (
+      <HeaderSelect
+        id="perf-ensemble"
+        label="Ensemble"
+        value={activeEnsemble ?? ""}
+        onChange={(v) => setSelectedEnsemble(v || null)}
+        options={ensembleOptions}
+      />
+    ) : null;
+
+  const coverageColor = (rate: number | null, allPending: boolean) =>
+    allPending || rate == null
+      ? "text-fred-muted"
+      : rate >= 0.9
+        ? "text-emerald-800"
+        : rate >= 0.5
+          ? "text-amber-800"
+          : "text-red-800";
+
   return (
     <div className="space-y-6">
       {/* Top-level page tabs: live dashboard vs. scoring methodology */}
-      <div className="flex gap-1 rounded-lg border border-fred-secondary bg-fred-bg/40 p-1">
+      <div role="tablist" aria-label="Performance page"
+           className="flex gap-1 rounded-lg border border-fred-border bg-fred-bg p-1">
         {(
           [
             { key: "dashboard", label: "Dashboard" },
@@ -750,10 +1057,12 @@ export default function PerformancePanel({
           <button
             key={key}
             type="button"
-            className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            role="tab"
+            aria-selected={pageTab === key}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-fred-primary ${
               pageTab === key
-                ? "bg-fred-primary text-fred-bg"
-                : "text-fred-text hover:bg-fred-bg/60"
+                ? "bg-fred-primary text-white"
+                : "text-fred-text hover:bg-fred-surface"
             }`}
             onClick={() => setPageTab(key)}
           >
@@ -766,18 +1075,15 @@ export default function PerformancePanel({
 
       {pageTab === "dashboard" ? (
         <>
-      {/* Summary KPI cards */}
-      <section className="rounded-lg border border-fred-secondary bg-fred-surface/50 p-4">
-        <div className="mb-3 flex items-baseline justify-between">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
-            Summary
-          </h2>
+      {/* Summary: coverage row, then the ensemble skill row */}
+      <section className="space-y-4 rounded-lg border border-fred-border bg-fred-surface p-4 shadow-fredCard">
+        <CardHeader title="Summary">
           <span className="text-xs text-fred-muted">
             Counts cover every question in the database, including legacy
             questions before the Track 1/2 split.
           </span>
-        </div>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        </CardHeader>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
           <KpiCard
             label={
               <span className="inline-flex items-center gap-1">
@@ -792,7 +1098,13 @@ export default function PerformancePanel({
                 />
               </span>
             }
-            value={`${formatInt(coverageTotals.resolved)} / ${formatInt(coverageTotals.eligible)}`}
+            value={
+              ratesLoading ? (
+                <Skeleton className="mt-1 h-7 w-24" />
+              ) : (
+                `${formatInt(coverageTotals.resolved)} / ${formatInt(coverageTotals.eligible)}`
+              )
+            }
           />
           <KpiCard
             label={
@@ -826,47 +1138,94 @@ export default function PerformancePanel({
             value={`T1 ${formatInt(data.track_counts?.track1 ?? 0)} / T2 ${formatInt(data.track_counts?.track2 ?? 0)}`}
           />
           <KpiCard label="Hazards" value={formatInt(kpiStats.hazards)} />
-          <KpiCard label="Models" value={formatInt(kpiStats.models)} />
           <KpiCard
             label={
               <span className="inline-flex items-center gap-1">
-                Ensemble Brier{" "}
-                <InfoTooltip
-                  text={
-                    "Average ensemble Brier score, split by family because the " +
-                    "two scales are not comparable. SPD = multiclass " +
-                    "(PA/FATALITIES/PHASE3PLUS_IN_NEED, range 0-2). Binary = " +
-                    "EVENT_OCCURRENCE (range 0-1, near-zero for rare events " +
-                    "correctly forecast as unlikely). Lower is better."
-                  }
-                />
+                Models <InfoTooltip text={TOOLTIP_MODELS_KPI} />
               </span>
             }
             value={
-              <span className="inline-flex flex-col leading-tight">
-                <span>SPD {formatScore(kpiStats.overallBrierSpd)}</span>
-                <span className="text-fred-muted">
-                  Binary {formatScore(kpiStats.overallBrierBinary)}
-                </span>
+              <span className="inline-flex items-baseline gap-2">
+                {formatInt(kpiStats.models)}
+                {knowsActive ? (
+                  <span className="text-xs font-normal text-fred-muted">
+                    {formatInt(data.active_models?.filter((m) => m.role === "ensemble").length ?? 0)} in the current ensemble
+                  </span>
+                ) : null}
               </span>
             }
           />
         </div>
+
+        <div>
+          <CardHeader
+            as="h3"
+            title={`Ensemble skill${activeEnsemble ? ` · ${formatModelName(activeEnsemble)}` : ""}`}
+            tip={`${TOOLTIP_LOWER_IS_BETTER}\n\n${TOOLTIP_PAIRED_REFERENCE}`}
+          >
+            <span className="text-xs text-fred-muted">Lower is better for all three.</span>
+            {ensembleSelector}
+            <SegmentedToggle
+              label="Statistic"
+              value={headlineStat}
+              onChange={setHeadlineStat}
+              options={[
+                { value: "avg", label: "Average" },
+                { value: "median", label: "Median" },
+              ]}
+            />
+          </CardHeader>
+          {loading ? (
+            <div className="grid gap-4 md:grid-cols-3">
+              {SCORE_TYPES.map((st) => (
+                <Skeleton key={st} className="h-28" />
+              ))}
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-3">
+              {headline.map((h) => (
+                <div key={h.st} className="rounded-lg border border-fred-border bg-fred-surface p-4 shadow-fredCard">
+                  <div className="mb-2 flex items-center gap-1 text-xs uppercase tracking-wide text-fred-muted">
+                    {SCORE_TYPE_LABELS[h.st]} <InfoTooltip text={SCORE_TOOLTIPS[h.st]} />
+                  </div>
+                  <div className="space-y-2">
+                    <HeadlineValue cell={h.spd} family="spd" best={h.bestSpd} stat={headlineStat} large />
+                    <HeadlineValue cell={h.binary} family="binary" best={h.bestBinary} stat={headlineStat} large={false} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </section>
 
+      <ScoresOverTime
+        includeTest={includeTest}
+        metricFilter={metric}
+        track={track}
+        ensemble={activeEnsemble}
+        referenceRows={referenceRows}
+      />
+
       {/* Resolution Coverage Summary */}
-      {visibleResolutionRates.length > 0 && (
-        <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
-          <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
-              Resolution Coverage
-            </h2>
+      {ratesLoading ? (
+        <section className="rounded-lg border border-fred-border bg-fred-surface p-4 shadow-fredCard">
+          <CardHeader title="Resolution Coverage" />
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-16" />
+            ))}
+          </div>
+        </section>
+      ) : visibleResolutionRates.length > 0 ? (
+        <section className="rounded-lg border border-fred-border bg-fred-surface p-4 shadow-fredCard">
+          <CardHeader title="Resolution Coverage">
             <span className="text-xs text-fred-muted">
               Eligible {formatInt(coverageTotals.eligible)} · Resolved{" "}
               {formatInt(coverageTotals.resolved)} · Pending (too new){" "}
               {formatInt(coverageTotals.pending)}
             </span>
-          </div>
+          </CardHeader>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {visibleResolutionRates.map((row) => {
               const pending = row.pending_too_new ?? 0;
@@ -881,15 +1240,7 @@ export default function PerformancePanel({
                 eligible > 0 ? row.resolved_questions / eligible : null;
               const isAllPending =
                 row.total_questions > 0 && eligible === 0 && pending > 0;
-              const colorClass = isAllPending
-                ? "text-fred-muted"
-                : eligibleRate == null
-                  ? "text-fred-muted"
-                  : eligibleRate >= 0.9
-                    ? "text-green-500"
-                    : eligibleRate >= 0.5
-                      ? "text-yellow-500"
-                      : "text-red-500";
+              const colorClass = coverageColor(eligibleRate, isAllPending);
               const metricLabel =
                 row.metric === "EVENT_OCCURRENCE"
                   ? "Binary (event)"
@@ -898,12 +1249,12 @@ export default function PerformancePanel({
                     : row.metric;
               const pctLabel =
                 eligibleRate == null
-                  ? "—"
+                  ? "No eligible questions"
                   : `${(eligibleRate * 100).toFixed(1)}% scored`;
               return (
                 <div
                   key={`${row.hazard_code}-${row.metric}`}
-                  className="rounded border border-fred-secondary bg-fred-surface px-3 py-2"
+                  className="rounded border border-fred-border bg-fred-surface px-3 py-2"
                   title={
                     isAllPending
                       ? `${pending} questions in this group are from the latest forecast epoch — their earliest horizon hasn't reached the resolution calendar cutoff yet.`
@@ -941,7 +1292,7 @@ export default function PerformancePanel({
             })}
           </div>
         </section>
-      )}
+      ) : null}
 
       {/* Sibyl deep-research track: understand it + head-to-head vs the ensemble */}
       {initialSibyl ? (
@@ -949,103 +1300,89 @@ export default function PerformancePanel({
       ) : null}
 
       {/* Detailed Scores: filters + table grouped together */}
-      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
-            Detailed Scores
-          </h2>
-          {loading ? (
-            <span className="text-xs text-fred-muted">Loading…</span>
+      <section className="rounded-lg border border-fred-border bg-fred-surface p-4 shadow-fredCard">
+        <CardHeader title="Detailed Scores">
+          {/* View selector tabs */}
+          <SegmentedToggle
+            label="Detailed scores view"
+            value={view}
+            onChange={setView}
+            options={VIEW_LABELS.map(({ key, label }) => ({ value: key, label }))}
+          />
+          <HeaderSelect
+            id="perf-metric"
+            label="Metric"
+            value={metric ?? ""}
+            onChange={(v) => handleMetricChange(v || null)}
+            options={[
+              { value: "", label: "All Metrics" },
+              { value: "PA", label: "People Affected (PA)" },
+              { value: "FATALITIES", label: "Fatalities" },
+              { value: "EVENT_OCCURRENCE", label: "Event Occurrence (binary)" },
+              { value: "PHASE3PLUS_IN_NEED", label: "Phase 3+ (IPC)" },
+            ]}
+          />
+          <HeaderSelect
+            id="perf-track"
+            label="Track"
+            value={track != null ? String(track) : ""}
+            onChange={(v) => handleTrackChange(v ? Number(v) : null)}
+            options={[
+              { value: "", label: "All Tracks" },
+              { value: "1", label: "Track 1" },
+              { value: "2", label: "Track 2" },
+            ]}
+          />
+          {view === "total" || view === "by_model" ? (
+            <HeaderSelect
+              id="perf-skill-metric"
+              label="Skill on"
+              value={skillMetric}
+              onChange={(v) => setSkillMetric(v as ScoreType)}
+              options={SCORE_TYPES.map((t) => ({ value: t, label: SCORE_TYPE_LABELS[t] }))}
+            />
           ) : null}
-        </div>
+        </CardHeader>
+        <p className="mb-3 text-xs text-fred-muted">
+          Metric and Track filter the whole page. Ensemble for the By Hazard and By Run views:{" "}
+          <strong>{activeEnsemble ? formatModelName(activeEnsemble) : "none"}</strong> (set in the
+          Summary above).
+        </p>
         {data?.summary_rows?.some((r) => isAcePa(r.hazard_code, r.metric)) ? (
           <p className="mb-3 text-xs text-fred-muted">{ACE_PA_INDICATIVE_NOTE}</p>
         ) : null}
 
-        {/* Controls — directly above the table they control */}
-        <div className="mb-3 flex flex-wrap items-center gap-3">
-          {/* View selector tabs */}
-          <div className="flex gap-1 rounded-lg border border-fred-secondary bg-fred-bg/40 p-1">
-            {VIEW_LABELS.map(({ key, label }) => (
-              <button
-                key={key}
-                type="button"
-                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  view === key
-                    ? "bg-fred-primary text-fred-bg"
-                    : "text-fred-text hover:bg-fred-bg/60"
-                }`}
-                onClick={() => setView(key)}
-              >
-                {label}
-              </button>
+        {/* Table */}
+        {loading ? (
+          <div className="space-y-2" aria-busy="true" aria-label="Loading scores">
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <Skeleton key={i} className="h-7" />
             ))}
           </div>
-
-          {/* Metric filter */}
-          <select
-            className="rounded-md border border-fred-secondary bg-fred-bg/40 px-3 py-1.5 text-sm text-fred-text"
-            value={metric ?? ""}
-            onChange={(e) => handleMetricChange(e.target.value || null)}
-          >
-            <option value="">All Metrics</option>
-            <option value="PA">People Affected (PA)</option>
-            <option value="FATALITIES">Fatalities</option>
-            <option value="EVENT_OCCURRENCE">Event Occurrence (binary)</option>
-            <option value="PHASE3PLUS_IN_NEED">Phase 3+ (IPC)</option>
-          </select>
-
-          {/* Track filter */}
-          <select
-            className="rounded-md border border-fred-secondary bg-fred-bg/40 px-3 py-1.5 text-sm text-fred-text"
-            value={track != null ? String(track) : ""}
-            onChange={(e) =>
-              handleTrackChange(e.target.value ? Number(e.target.value) : null)
-            }
-          >
-            <option value="">All Tracks</option>
-            <option value="1">Track 1</option>
-            <option value="2">Track 2</option>
-          </select>
-
-          {/* Ensemble selector (shown for By Hazard and By Run views) */}
-          {(view === "by_hazard" || view === "by_run") &&
-          ensembleModels.length > 0 ? (
-            <select
-              className="rounded-md border border-fred-secondary bg-fred-bg/40 px-3 py-1.5 text-sm text-fred-text"
-              value={activeEnsemble ?? ""}
-              onChange={(e) => setSelectedEnsemble(e.target.value || null)}
-            >
-              {ensembleModels.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          ) : null}
-        </div>
-
-        {/* Table */}
-        {isEmpty ? (
-          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-slate-300">
-            No scoring data available yet. Scores are generated once forecasts
-            have been resolved against ground truth.
+        ) : isEmpty ? (
+          <div className="rounded-lg border border-fred-border bg-fred-bg px-4 py-6 text-center text-sm text-fred-text">
+            No scores yet{metric || track ? " for these filters" : ""}. A question is scored once one
+            of its horizons resolves against the Resolver&apos;s ground truth, which happens on the 11th of
+            the month after that horizon.
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-lg border border-fred-secondary">
+          <div className="overflow-x-auto rounded-lg border border-fred-border">
             {view === "total" && (
               <SortableTable
-                columns={PIVOTED_COLUMNS}
+                columns={modelColumns}
                 rows={totalRows}
                 rowKey={(row) => row.key}
                 initialSortKey="avg_brier"
                 initialSortDirection="asc"
                 tableLayout="auto"
                 emptyMessage="No scores available."
+                pinnedOrder={pinActiveFirst}
                 rowClassName={(row) =>
                   row.key.startsWith("__ext_")
                     ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
-                    : undefined
+                    : row.status === "retired"
+                      ? "text-fred-muted"
+                      : undefined
                 }
               />
             )}
@@ -1076,17 +1413,20 @@ export default function PerformancePanel({
 
             {view === "by_model" && (
               <SortableTable
-                columns={PIVOTED_COLUMNS}
+                columns={modelColumns}
                 rows={modelRows}
                 rowKey={(row) => row.key}
                 initialSortKey="avg_brier"
                 initialSortDirection="asc"
                 tableLayout="auto"
                 emptyMessage="No per-model scores available."
+                pinnedOrder={pinActiveFirst}
                 rowClassName={(row) =>
                   row.key.startsWith("__ext_")
                     ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
-                    : undefined
+                    : row.status === "retired"
+                      ? "text-fred-muted"
+                      : undefined
                 }
               />
             )}
