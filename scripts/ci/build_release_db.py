@@ -309,6 +309,8 @@ def build_release_db(
     scrub: dict[str, object] = {"scrubbed": {}, "residual": {}}
     before: list[str] = []
     after: list[str] = []
+    canonical_counts: dict[str, int] = {}
+    canonical_table_count = 0
 
     con = _connect()
     try:
@@ -319,6 +321,18 @@ def build_release_db(
         # un-checkpointed database measures as zero bytes.
         con.execute("CHECKPOINT work")
         before = _size_lines(con, "work", report_top)
+        all_tables = tables_in(con, "work")
+        canonical_table_count = len(all_tables)
+        if not keep_all:
+            # Row counts of what the release drops, so a report on the release
+            # copy can say "canonical: N rows" rather than "no table".
+            for table in all_tables:
+                if is_excluded(table):
+                    try:
+                        canonical_counts[table] = int(con.execute(
+                            f'SELECT COUNT(*) FROM work."{table}"').fetchone()[0])
+                    except Exception:
+                        pass
         if not keep_all:
             for table in tables_in(con, "work"):
                 if is_excluded(table):
@@ -346,6 +360,8 @@ def build_release_db(
         "storage_version": storage_version,
         "writer_version": writer,
         "dropped_tables": dropped,
+        "canonical_counts": canonical_counts,
+        "canonical_table_count": canonical_table_count,
         "scrubbed": scrub["scrubbed"],
         "residual": scrub["residual"],
         "saved_bytes": src_bytes - out_bytes,
@@ -367,12 +383,28 @@ def main(argv: list[str] | None = None) -> int:
                         help="Compact only; keep every table (diagnostics)")
     parser.add_argument("--report-top", type=int, default=15,
                         help="Per-table sizes to log before/after (0 disables)")
+    parser.add_argument("--report-json", default=None,
+                        help="Write the dropped tables, their canonical row counts "
+                             "and the canonical table count here (read by "
+                             "inspect_resolver_db --release-build-json)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="[build_release_db] %(message)s")
     stats = build_release_db(
         args.src, args.out, keep_all=args.keep_all, report_top=args.report_top
     )
+    if args.report_json:
+        try:
+            import json
+
+            Path(args.report_json).write_text(json.dumps({
+                k: stats.get(k) for k in (
+                    "src_bytes", "out_bytes", "dropped_tables",
+                    "canonical_counts", "canonical_table_count",
+                )
+            }, indent=2))
+        except Exception as exc:  # a report never costs the publish
+            LOGGER.warning("could not write --report-json: %s", exc)
     LOGGER.info(
         "source %s -> published %s (saved %s)",
         _mb(stats["src_bytes"]), _mb(stats["out_bytes"]), _mb(stats["saved_bytes"]),

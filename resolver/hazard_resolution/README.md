@@ -853,6 +853,28 @@ question). The second file exists because the failure mode at this seam is
 silent: a loader whose text nobody renders costs money and changes nothing,
 which is how CrisisWatch and the HS grounding packs were both lost.
 
+## Why a cell has no row: the reason codes
+
+Every assessed cell with no row in `haz_resolutions` says why, on its
+trigger row (`trigger_detail_json.no_row_reason`) and in the run's cell
+ledger. Each code names a different repair:
+
+| reason | meaning |
+|---|---|
+| `pending_before_freeze` | no candidate yet, and the freeze deadline has not passed |
+| `month_in_progress` | the month had not ended when the pass ran. Since Nov 2026 flood and cyclone obey it as drought does: detection and trigger rows are written, nothing is swept, zeroed or resolved, and any provisional row for the month is retracted (`cli.hold_month_in_progress`; `cli.retract_rows_written_mid_month` removes rows written before their month ended) |
+| `sweep_inconclusive` | ReliefWeb could not be read, so silence is unproven |
+| `sweep_hit_unconfirmed` | ReliefWeb found reports, so no zero; reports are not a detection, so the cell is undecided |
+| `coverage_gate_suppressed_zero` | the detector cannot show it covered the month |
+| `indicator_inconclusive`, `indicator_no_coverage`, `indicator_too_few_feeds_for_zero` | drought feeds unreadable, silent about the country, or too few to rest a zero on |
+| `frozen_row_unchanged` | a frozen answer stands; the attempt went to `haz_revisions` |
+| `cell_raised` | the walk threw; a re-run retries the cell |
+| `extraction_budget_deferred` | a backcast cell owed to a later run |
+| `no_population` | a territory with no resident population (ANT, ATA, ATF, BVT, HMD, SGS, UMI). Not walked since Sept 2026; cells an older backcast assessed are stamped by `detect.stamp_unpopulated_territories`, run with every base-rate refresh |
+
+A cell no code accounts for reads `unexplained_no_row` in the resolver debug
+bundle, and that is a bug.
+
 ## Production wiring (Aug 2026; flood and cyclone grade forecasts since Oct 2026)
 
 The machine runs in two workflows. Since 2026-10-12 its flood and cyclone

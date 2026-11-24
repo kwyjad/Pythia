@@ -467,6 +467,100 @@ def _log_summary(hazard: str, ym: str, result, tally: SweepTally, ladder, dry: s
             )
 
 
+def retract_rows_written_mid_month(con, hazard: str) -> int:
+    """Delete provisional *hazard* rows written before their month had ended.
+
+    Until Nov 2026 flood and cyclone had no month-in-progress guard: on 11
+    November the machine wrote 14 FL and 3 TC values for 2026-11, a month
+    eleven days old. Such a row is any provisional row whose month is the
+    month of its own ``created_at`` or later. Idempotent, and a no-op once
+    converged: a row the next run writes after the month ends has a later
+    ``created_at``. Frozen rows are never touched.
+    """
+
+    try:
+        n = con.execute(
+            """
+            SELECT COUNT(*) FROM haz_resolutions
+            WHERE hazard = ? AND COALESCE(provisional, FALSE)
+              AND year * 100 + month >= CAST(strftime(created_at, '%Y%m') AS INTEGER)
+            """,
+            [hazard],
+        ).fetchone()[0]
+        if n:
+            con.execute(
+                """
+                DELETE FROM haz_resolutions
+                WHERE hazard = ? AND COALESCE(provisional, FALSE)
+                  AND year * 100 + month >= CAST(strftime(created_at, '%Y%m') AS INTEGER)
+                """,
+                [hazard],
+            )
+    except Exception as exc:  # never costs the run
+        LOG.warning("[cli] %s: mid-month row retraction failed: %s", hazard, exc)
+        return 0
+    LOG.info(
+        "[cli] %s: retracted %d provisional row(s) written before their month ended",
+        hazard, int(n),
+    )
+    return int(n)
+
+
+def hold_month_in_progress(con, result, *, dry_run: bool, run_type: str) -> int:
+    """Write no flood/cyclone answer for a month that has not ended.
+
+    The detection and trigger rows stand (the next run needs them). Every
+    assessed cell gets ``month_in_progress`` on its trigger row and in the
+    cell ledger, and any provisional row already stored for the month is
+    deleted: nothing could have supported a verdict for a month that has not
+    ended. Mirrors drought's ``RULE_MONTH_IN_PROGRESS``. Returns the number
+    of rows retracted.
+    """
+    from resolver.hazard_resolution import cell_ledger
+    from resolver.hazard_resolution import detect as detect_mod
+
+    year, month = detect_mod.ym_to_year_month(result.ym)
+    note = f"{result.ym} has not ended: no answer is written until it has"
+    for row in result.rows:
+        if not dry_run:
+            detect_mod.record_no_row_reason(
+                con, hazard=result.hazard, iso3=row.iso3, ym=result.ym,
+                reason=cell_ledger.REASON_MONTH_IN_PROGRESS, note=note,
+            )
+        cell_ledger.record_cell(
+            stage=cell_ledger.STAGE_LADDER if row.triggered else cell_ledger.STAGE_SWEEP,
+            iso3=row.iso3, hazard=result.hazard, ym=result.ym,
+            triggered=row.triggered, trigger_source=row.trigger_source,
+            write_outcome="no_row",
+            reason_code=cell_ledger.REASON_MONTH_IN_PROGRESS,
+            run_type=run_type,
+        )
+    retracted = 0
+    if not dry_run:
+        retracted = con.execute(
+            """
+            SELECT COUNT(*) FROM haz_resolutions
+            WHERE hazard = ? AND year = ? AND month = ?
+              AND COALESCE(provisional, FALSE)
+            """,
+            [result.hazard, year, month],
+        ).fetchone()[0]
+        con.execute(
+            """
+            DELETE FROM haz_resolutions
+            WHERE hazard = ? AND year = ? AND month = ?
+              AND COALESCE(provisional, FALSE)
+            """,
+            [result.hazard, year, month],
+        )
+    LOG.info(
+        "[cli] %s %s: month in progress — %d cell(s) held with no row, %d "
+        "provisional row(s) retracted",
+        result.hazard, result.ym, len(result.rows), int(retracted),
+    )
+    return int(retracted)
+
+
 def run_cyclone_month(
     *,
     ym: str,
@@ -482,6 +576,7 @@ def run_cyclone_month(
     skip_detector_fetch: bool = False,
     rulebook=None,
     con=None,
+    today: date | None = None,
 ) -> int:
     """Run the cyclone path for one month.  Returns an exit code.
 
@@ -559,6 +654,13 @@ def run_cyclone_month(
     )
     if not dry_run:
         detect_mod.write_triggers(con, result, rulebook, run_type=run_type)
+        retract_rows_written_mid_month(con, result.hazard)
+
+    # A month still running gets no answer: detection stands, no sweep,
+    # no zero, no ladder (as drought, RULE_MONTH_IN_PROGRESS).
+    if not month_has_ended(ym, today):
+        hold_month_in_progress(con, result, dry_run=dry_run, run_type=run_type)
+        return 0
 
     # --- Step 3: silence sweep + zero resolutions for non-triggered ---
     tally = SweepTally()
@@ -634,6 +736,7 @@ def run_flood_month(
     run_type: str = RUN_TYPE_LIVE,
     rulebook=None,
     con=None,
+    today: date | None = None,
 ) -> int:
     """Run the flood path for one month.  Returns an exit code.
 
@@ -693,6 +796,12 @@ def run_flood_month(
     result = detect_mod.detect_flood_month(con, ym, rulebook, iso3_filter=universe)
     if not dry_run:
         detect_mod.write_triggers(con, result, rulebook, run_type=run_type)
+        retract_rows_written_mid_month(con, hazard)
+
+    # A month still running gets no answer (see run_cyclone_month).
+    if not month_has_ended(ym, today):
+        hold_month_in_progress(con, result, dry_run=dry_run, run_type=run_type)
+        return 0
 
     # --- Step 3: silence sweep + zero resolutions for non-triggered ---
     tally = SweepTally()

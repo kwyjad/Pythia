@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import date, timedelta
 from typing import Sequence
 
 import pandas as pd
@@ -133,6 +133,62 @@ def stamp_vintage_flags(con, *, today: date | None = None) -> dict[str, int]:
     return stale_by_source
 
 
+#: The ``conflict_forecasts.source`` value each connector writes.
+SOURCE_COLUMN_VALUE: dict[str, str] = {
+    "views": "VIEWS",
+    "conflictforecast_org": "conflictforecast_org",
+    "acled_cast": "ACLED_CAST",
+}
+
+#: An empty answer is ``no_new_vintage`` (info) when this is the outcome.
+OUTCOME_NO_NEW_VINTAGE = "no_new_vintage"
+
+
+def newest_stored_issue_date(source: str) -> date | None:
+    """The newest ``forecast_issue_date`` stored for *source*, or None."""
+    try:
+        from pythia.db.schema import connect
+
+        con = connect()
+        try:
+            row = con.execute(
+                "SELECT MAX(CAST(forecast_issue_date AS DATE)) FROM conflict_forecasts "
+                "WHERE source = ?",
+                [source],
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001 - a missing table is "none stored"
+        LOG.info("[fetch_conflict_forecasts] newest stored vintage unreadable: %s", exc)
+        return None
+    value = row[0] if row else None
+    if value is None:
+        return None
+    return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
+
+def classify_empty_answer(
+    summary: dict, newest_stored: date | None, today: date | None = None,
+) -> str:
+    """Why a source answered with no rows: ``no_new_vintage`` or ``fetch_failed``.
+
+    ``no_new_vintage`` when the connector itself saw the listing name a
+    vintage already stored, or when a vintage for the current or previous
+    month is already stored (nothing is lost this run, whatever went wrong
+    with the fetch; the connector's errors stay on the summary). Otherwise
+    the empty answer is a failure. On 8 and 11 November 2026 the CSV host
+    failed TLS verification while the November vintage was already stored.
+    """
+    if (summary or {}).get("outcome") == OUTCOME_NO_NEW_VINTAGE:
+        return OUTCOME_NO_NEW_VINTAGE
+    if newest_stored is not None:
+        day = today or date.today()
+        prev = (day.replace(day=1) - timedelta(days=1)).replace(day=1)
+        if newest_stored >= prev:
+            return OUTCOME_NO_NEW_VINTAGE
+    return "fetch_failed"
+
+
 def fetch_and_store(
     *,
     db_url: str | None = None,
@@ -165,6 +221,9 @@ def fetch_and_store(
         LOG.info("[fetch_conflict_forecasts] fetching %s ...", name)
         cls = _import_connector(_FORECAST_CONNECTORS[name])
         connector = cls()
+        stored = newest_stored_issue_date(SOURCE_COLUMN_VALUE.get(name, name))
+        if hasattr(connector, "newest_stored"):
+            connector.newest_stored = stored
 
         try:
             df = connector.fetch_forecasts()
@@ -178,7 +237,16 @@ def fetch_and_store(
             LAST_RUN_SUMMARIES[name] = dict(summary)
 
         if df.empty:
-            LOG.info("[fetch_conflict_forecasts] %s returned 0 rows", name)
+            outcome = classify_empty_answer(
+                summary if isinstance(summary, dict) else {}, stored,
+            )
+            entry = LAST_RUN_SUMMARIES.setdefault(name, {})
+            entry["empty_answer"] = outcome
+            entry["newest_stored_issue_date"] = stored.isoformat() if stored else None
+            LOG.info(
+                "[fetch_conflict_forecasts] %s returned 0 rows (%s; newest stored "
+                "issue date %s)", name, outcome, stored.isoformat() if stored else "none",
+            )
             row_counts[name] = 0
             continue
 

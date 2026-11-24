@@ -270,3 +270,22 @@ def test_no_round_date_stubs_new_this_round_and_the_cases(tmp_path):
     assert doc["new_this_round"]["stub"] is True
     assert doc["case_candidates"]["stub"] is True and doc["case_studies_new"]["stub"] is True
     assert doc["section_status"]["paired_comparisons"] == "ok"
+
+
+def test_new_this_round_is_decided_by_observed_month_against_the_cutoff():
+    """Nov 2026: an event outcome carries the GDACS fact's ingest date as its
+    source_snapshot_ym, days before the run, and was counted as earlier."""
+    gdacs = {"snapshot": date(2026, 11, 8), "first_recorded": date(2026, 11, 11),
+             "observed_month": "2026-10"}
+    assert mri.calendar_cutoff(ROUND) == "2026-10"
+    assert mri.classify_new(gdacs, ROUND) == ("new", False)
+    older = {"snapshot": date(2026, 10, 8), "first_recorded": date(2026, 10, 11),
+             "observed_month": "2026-09"}
+    assert mri.classify_new(older, ROUND) == ("earlier", False)
+    late = {"snapshot": None, "first_recorded": date(2026, 11, 11),
+            "observed_month": "2026-08"}
+    assert mri.classify_new(late, ROUND) == ("new", False)
+    reread = {"snapshot": date(2026, 11, 11), "first_recorded": date(2026, 10, 11),
+              "observed_month": "2026-10"}
+    assert mri.classify_new(reread, ROUND) == ("new", True)
+    assert mri.calendar_cutoff(date(2027, 1, 11)) == "2026-12"

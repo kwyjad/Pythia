@@ -59,6 +59,19 @@ class ConflictForecastOrgConnector:
 
     name: str = "conflictforecast_org"
 
+    #: The newest issue date already in ``conflict_forecasts`` for this
+    #: source, set by ``fetch_and_store`` before the fetch. When the listing
+    #: names that vintage or an older one, there is nothing new to download.
+    newest_stored: Optional[date] = None
+
+    def __init__(self) -> None:
+        #: What this fetch found, for the run summary and the issue register:
+        #: ``outcome`` (rows | no_new_vintage | listing_failed | empty_listing
+        #: | download_failed | no_rows), the issue date the listing names
+        #: (only when it was read off the listing, never the today fallback)
+        #: and every download error, verbatim.
+        self.summary: Dict[str, Any] = {"outcome": None, "errors": []}
+
     def fetch_forecasts(self) -> pd.DataFrame:
         """Fetch the latest Armed Conflict and Violence Intensity CSVs.
 
@@ -66,14 +79,31 @@ class ConflictForecastOrgConnector:
         table: source, iso3, hazard_code, metric, lead_months, value,
         forecast_issue_date, target_month, model_version.
         """
+        summary = self.summary
         try:
             file_listing = self._get_file_listing()
         except Exception as exc:
             LOG.warning("[conflictforecast_org] file listing failed: %s", exc)
+            summary["outcome"] = "listing_failed"
+            summary["errors"].append(f"listing: {exc}"[:400])
             return pd.DataFrame()
 
         if not file_listing:
             LOG.info("[conflictforecast_org] empty file listing")
+            summary["outcome"] = "empty_listing"
+            return pd.DataFrame()
+
+        listed = self._listed_issue_date(file_listing)
+        summary["listing_issue_date"] = listed.isoformat() if listed else None
+        if listed is not None and self.newest_stored is not None and listed <= self.newest_stored:
+            # The provider has not published anything newer than what is
+            # stored: the expected state between monthly releases, not a fault.
+            LOG.info(
+                "[conflictforecast_org] no new vintage: the listing names %s and %s "
+                "is already stored; nothing downloaded",
+                listed.isoformat(), self.newest_stored.isoformat(),
+            )
+            summary["outcome"] = "no_new_vintage"
             return pd.DataFrame()
 
         issue_date = self._derive_issue_date(file_listing)
@@ -103,6 +133,7 @@ class ConflictForecastOrgConnector:
                     "[conflictforecast_org] failed to download %s: %s",
                     metric, exc,
                 )
+                summary["errors"].append(f"{metric}: {exc}"[:400])
                 continue
 
             LOG.info("[conflictforecast_org] CSV columns for %s: %s", metric, list(df_csv.columns))
@@ -114,8 +145,10 @@ class ConflictForecastOrgConnector:
 
         if not all_rows:
             LOG.info("[conflictforecast_org] no rows produced")
+            summary["outcome"] = "download_failed" if summary["errors"] else "no_rows"
             return pd.DataFrame()
 
+        summary["outcome"] = "rows"
         df = pd.DataFrame(all_rows)
         LOG.info("[conflictforecast_org] produced %d forecast rows", len(df))
         return df
@@ -152,6 +185,23 @@ class ConflictForecastOrgConnector:
         resp = requests.get(url, timeout=_TIMEOUT)
         resp.raise_for_status()
         return pd.read_csv(io.StringIO(resp.text))
+
+    @staticmethod
+    def _listed_issue_date(listing: List[Dict[str, Any]]) -> Optional[date]:
+        """The issue date the listing itself states, or None.
+
+        Unlike :meth:`_derive_issue_date` this never falls back to today:
+        comparing a guessed date with the stored vintage would read "nothing
+        listed" as "a new vintage" (or the reverse).
+        """
+        derived = ConflictForecastOrgConnector._derive_issue_date(listing)
+        for entry in listing:
+            name = entry.get("name") or ""
+            if re.search(r"(\d{2})-(\d{4})", name) or isinstance(
+                entry.get("created"), (int, float)
+            ):
+                return derived
+        return None
 
     @staticmethod
     def _derive_issue_date(listing: List[Dict[str, Any]]) -> date:

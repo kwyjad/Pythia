@@ -1652,6 +1652,26 @@ def ingest(
         elif not data:
             diag_status = "error"
             diag_reason = "fetch-returned-empty"
+            # A conflict source with no new vintage is the expected state
+            # between monthly releases, not a failure (Nov 2026: two empty
+            # conflictforecast.org answers were raised as degraded while the
+            # November vintage was already stored).
+            if lbl in _CONFLICT_SOURCE_MAP:
+                try:
+                    from resolver.tools.fetch_conflict_forecasts import (
+                        LAST_RUN_SUMMARIES,
+                        OUTCOME_NO_NEW_VINTAGE,
+                    )
+
+                    summary = LAST_RUN_SUMMARIES.get(_CONFLICT_SOURCE_MAP[lbl]) or {}
+                    if summary.get("empty_answer") == OUTCOME_NO_NEW_VINTAGE:
+                        diag_status = "ok"
+                        diag_reason = (
+                            f"{OUTCOME_NO_NEW_VINTAGE}: newest stored issue date "
+                            f"{summary.get('newest_stored_issue_date')}"
+                        )
+                except Exception:  # pragma: no cover - diagnostics only
+                    pass
         else:
             diag_status = "error"
             diag_reason = "all-stores-failed"

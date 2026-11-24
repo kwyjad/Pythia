@@ -2080,8 +2080,20 @@ class BundleBuilder:
         backlog = 0
         backlog_hazards: dict[str, int] = {}
         backlog_months: list[str] = []
+        try:
+            from resolver.hazard_resolution.cli import UNPOPULATED_TERRITORIES
+        except Exception:  # pragma: no cover - defensive
+            UNPOPULATED_TERRITORIES = frozenset(
+                {"ANT", "ATA", "ATF", "BVT", "HMD", "SGS", "UMI"}
+            )
         for key, entry in merged.items():
             if entry["status"] is not None or entry["reason_code"]:
+                continue
+            if str(entry.get("iso3") or "").upper() in UNPOPULATED_TERRITORIES:
+                # A territory with no people is not walked since Sept 2026;
+                # an older backcast's cell for it is not a bug.
+                entry["reason_code"] = "no_population"
+                entry["assessed"] = False
                 continue
             entry["reason_code"] = "unexplained_no_row"
             if key in assessed_this_run or (
@@ -2601,6 +2613,8 @@ class BundleBuilder:
             self._check_inform_severity_on_its_scale,
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
+            self._check_no_flood_or_cyclone_verdict_for_a_month_in_progress,
+            self._check_no_known_issue_is_past_its_review_date,
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
             self._check_ace_fatalities_resolve_from_the_base_rate_series,
@@ -5045,6 +5059,69 @@ class BundleBuilder:
             or "No drought row for a month that has not ended.",
         )
 
+    def _check_no_flood_or_cyclone_verdict_for_a_month_in_progress(self) -> None:
+        """No flood or cyclone resolution exists for a month that has not ended.
+
+        On 11 November 2026 the machine wrote 14 FL and 3 TC values for
+        2026-11, a month eleven days old, because only drought had the month
+        rule. Compute Resolutions never reads past its calendar cutoff, so no
+        outcome moved; the rows were still answers nothing could support.
+        """
+
+        name = "no_flood_or_cyclone_resolution_for_a_month_still_in_progress"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions absent")
+        today = dt.date.today()
+        rows = self.query(
+            """
+            SELECT hazard, printf('%04d-%02d', year, month) AS ym, COUNT(*)
+            FROM haz_resolutions
+            WHERE hazard IN ('FL', 'TC') AND (year > ? OR (year = ? AND month >= ?))
+            GROUP BY hazard, ym ORDER BY ym, hazard
+            """,
+            [today.year, today.year, today.month],
+        )
+        found = [(str(r[0]), str(r[1]), int(r[2])) for r in (rows[1] if rows else [])]
+        self._check(
+            name, "FAIL" if found else "PASS",
+            f"{sum(n for *_, n in found)} flood/cyclone rows in months at or after {today:%Y-%m}",
+            "0",
+            "; ".join(f"{hz} {ym}: {n}" for hz, ym, n in found)
+            or "No flood or cyclone row for a month that has not ended.",
+        )
+
+    def _check_no_known_issue_is_past_its_review_date(self) -> None:
+        """Every known-issues entry is inside its review date (tolerance 0).
+
+        Nov 2026: acled_cast_stale_vintage (due 2026-10-15) and
+        views_stale_vintage (due 2026-11-01) were both overdue and nothing in
+        the run said so unless their fault fired. Raised at info: the entry
+        needs a person to look, not a re-run.
+        """
+
+        name = "no_known_issue_is_past_its_review_date"
+        try:
+            from resolver.diagnostics.issues import KnownIssues, _today
+
+            known = KnownIssues.load()
+            overdue = known.overdue_entries(_today())
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"register unreadable: {exc}")
+        self._check(
+            name, "FAIL" if overdue else "PASS",
+            f"{len(overdue)} of {len(known.entries)} entries overdue", "0",
+            "; ".join(f"{key} (review by {due or 'no date'})" for key, due in overdue)
+            or "Every known-issues entry is inside its review date.",
+            issues=[{
+                "id": f"known_issue_review_overdue_{key}",
+                "severity": "info",
+                "title": f"Known issue {key} is past its review date ({due or 'none'}).",
+                "evidence": "resolver/config/known_issues.yml: review the entry, "
+                            "then move its review_by or close it",
+                "recovers_on_rerun": False,
+            } for key, due in overdue] or None,
+        )
+
     def _check_no_row_beside_an_unconfirmed_sweep_hit(self) -> None:
         """An undecided sweep-hit cell carries no row unless it is frozen.
 
@@ -5648,7 +5725,13 @@ class BundleBuilder:
             "- `indicator_no_coverage` — no feed carried a reading for the country.",
             "- `indicator_too_few_feeds_for_zero` — feeds answered, but too few for a",
             "  zero to rest on their silence (drought.indicators.min_answered_for_zero).",
-            "- `month_in_progress` — the month had not ended when the pass ran.",
+            "- `month_in_progress` — the month had not ended when the pass ran",
+            "  (all three hazards since November 2026).",
+            "- `sweep_hit_unconfirmed` — ReliefWeb found reports, so no zero may be",
+            "  written, but reports are not a detection: the cell is undecided.",
+            "- `no_population` — a territory with no resident population (ANT, ATA,",
+            "  ATF, BVT, HMD, SGS, UMI). Nothing is resolved for it.",
+            "- `extraction_budget_deferred` — a backcast cell owed to a later run.",
             "- `unexplained_no_row` — nothing accounted for the cell. That is a bug.",
             "",
             "`hazard/figures_ledger.csv` carries every extracted figure and its",

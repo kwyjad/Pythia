@@ -838,6 +838,28 @@ def _checks(tmp_path, db, full_run, sub="d"):
     return {c["name"]: c for c in manifest["checks"]}
 
 
+def test_an_unpopulated_territory_cell_reads_no_population(tmp_path, full_run):
+    """Nov 2026: 12 backcast cells for ANT, ATA, ATF, BVT, HMD, SGS and UMI
+    read unexplained_no_row. A territory with no people is not a bug."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_triggers VALUES ('ATF', 2013, 4, 'FL', FALSE, 'none', '{}', "
+        "NULL, 'backcast', CURRENT_TIMESTAMP)"
+    )
+    con.close()
+    out, _ = _build(tmp_path, db_path=db, diagnostics_dir=full_run["diagnostics"])
+    with zipfile.ZipFile(out) as zf:
+        ledger = zf.read("hazard/cell_ledger.csv").decode()
+    atf = [l for l in ledger.splitlines() if l.startswith("ATF,")]
+    assert atf and "no_population" in atf[0]
+    assert "unexplained_no_row" not in atf[0]
+    con = duckdb.connect(str(db))
+    con.execute("DELETE FROM haz_triggers WHERE iso3 = 'ATF'")
+    con.close()
+
+
 def test_a_no_row_cell_with_a_reason_on_its_trigger_row_is_explained(tmp_path, full_run):
     """D1: 28,728 drought cells read unexplained_no_row because the reason
     lived only in the run stream, which the backcast never enables. The
@@ -1003,6 +1025,35 @@ def test_no_drought_row_may_exist_for_a_month_still_in_progress(tmp_path, full_r
     con.close()
     assert _checks(tmp_path, db, full_run, "again")[
         "no_drought_resolution_for_a_month_still_in_progress"]["verdict"] == "PASS"
+
+
+def test_no_flood_or_cyclone_row_may_exist_for_a_month_still_in_progress(tmp_path, full_run):
+    """Nov 2026: 14 FL and 3 TC values were written for 2026-11 on the 11th."""
+
+    import datetime as dt
+
+    db = full_run["db"]
+    today = dt.date.today()
+    name = "no_flood_or_cyclone_resolution_for_a_month_still_in_progress"
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_resolutions VALUES ('PHL', ?, ?, 'TC', 'RESOLVED_VALUE', 5.0, '{}', "
+        "'ladder:test', FALSE, TRUE, 'live', NULL, CURRENT_TIMESTAMP)",
+        [today.year, today.month],
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run)[name]
+    assert check["verdict"] == "FAIL"
+    assert f"TC {today:%Y-%m}: 1" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "DELETE FROM haz_resolutions WHERE iso3 = 'PHL' AND hazard = 'TC' "
+        "AND year = ? AND month = ?",
+        [today.year, today.month],
+    )
+    con.close()
+    assert _checks(tmp_path, db, full_run, "again")[name]["verdict"] == "PASS"
 
 
 # --------------------------------------------------------------------------
@@ -1678,3 +1729,17 @@ def test_an_inform_score_off_its_scale_is_a_contradiction(tmp_path, full_run):
     con.close()
     check = _checks(tmp_path, db, full_run, "again")["inform_severity_scores_lie_on_the_0_to_10_scale"]
     assert check["verdict"] == "PASS"
+
+
+def test_an_overdue_known_issue_review_fails_the_check(tmp_path, full_run, monkeypatch):
+    """Nov 2026: two known-issues entries sat past their review dates."""
+
+    monkeypatch.setenv("PYTHIA_ISSUES_TODAY", "2099-01-01")
+    check = _checks(tmp_path, full_run["db"], full_run)[
+        "no_known_issue_is_past_its_review_date"]
+    assert check["verdict"] == "FAIL"
+    assert "acled_cast_stale_vintage" in check["detail"]
+    assert all(i["severity"] == "info" for i in check["issues"])
+    monkeypatch.setenv("PYTHIA_ISSUES_TODAY", "2026-11-24")
+    assert _checks(tmp_path, full_run["db"], full_run, "again")[
+        "no_known_issue_is_past_its_review_date"]["verdict"] == "PASS"

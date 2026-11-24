@@ -280,6 +280,18 @@ def issues_from_reconciliation(rows: Iterable[Mapping[str, Any]]) -> list[Issue]
         agrees = str(row.get("agrees") or "").strip().strip("*").lower()
         connector = str(row.get("connector") or "unknown")
         status = str(row.get("status") or "")
+        reason = str(row.get("reason") or "")
+        if reason.startswith("no_new_vintage"):
+            # The provider has published nothing newer than what is stored:
+            # the expected state between releases, said once, never a fault.
+            out.append(Issue(
+                id=f"no_new_vintage_{_slug(connector)}",
+                severity=INFO,
+                title=f"{connector}: no new vintage this run.",
+                evidence=reason,
+                source="checks/reconciliation.md",
+            ))
+            continue
         if agrees == "no":
             out.append(Issue(
                 id=f"connector_wrote_nothing_{_slug(connector)}",

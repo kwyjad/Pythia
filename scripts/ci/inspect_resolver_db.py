@@ -30,13 +30,56 @@ DEFAULT_COUNTRY_LIST = _REPO_ROOT / "horizon_scanner" / "hs_country_list.txt"
 DEFAULT_COUNTRIES_CSV = _REPO_ROOT / "resolver" / "data" / "countries.csv"
 
 
+def _load_release_build(path: Optional[Path]) -> dict:
+    """The build_release_db report, or {} when absent or unreadable."""
+    if path is None:
+        return {}
+    try:
+        import json
+
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _excluded_from_release(table: str) -> bool:
+    """True when the public release drops *table* on purpose."""
+    try:
+        from scripts.ci.build_release_db import is_excluded
+    except Exception:  # pragma: no cover - the module is stdlib-only
+        return False
+    return is_excluded(table)
+
+
 def build_report(
     db_path: Path,
     country_list_path: Optional[Path] = None,
     countries_csv_path: Optional[Path] = None,
+    *,
+    source_label: Optional[str] = None,
+    release_build_json: Optional[Path] = None,
 ) -> str:
-    """Render the full inspection report for ``db_path`` as Markdown."""
+    """Render the full inspection report for ``db_path`` as Markdown.
+
+    ``source_label`` names where the file came from (artifact, run id), and
+    ``release_build_json`` is build_release_db's report: with it, a table the
+    public release drops is reported as "not in the published DB" with the
+    canonical row count, never as "(no table)". On 11 Nov 2026 the report
+    called four tables absent that the canonical DB held and wrote that day.
+    """
     lines = []
+    release_build = _load_release_build(release_build_json)
+    canonical_counts = release_build.get("canonical_counts") or {}
+    is_release = bool(release_build) or bool(source_label and "release" in source_label.lower())
+
+    def absent(table: str, short: bool = False) -> str:
+        if is_release and _excluded_from_release(table):
+            n = canonical_counts.get(table)
+            tail = f"; canonical: {n:,} rows" if isinstance(n, int) else "; see the canonical DB"
+            return ("_not published_" if short
+                    else f"_not in the published DB (excluded from the public release{tail})_")
+        return "_no table_" if short else "(no table)"
 
     def L(text=""):
         lines.append(text)
@@ -192,6 +235,22 @@ def build_report(
     L()
     L(f"_Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}_")
     L(f"_Database size: {db_size_mb:.1f} MB ({db_size:,} bytes)_")
+    try:
+        _n_tables = con.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='main'"
+        ).fetchone()[0]
+    except Exception:
+        _n_tables = None
+    _label = source_label or str(db_path)
+    _what = "the PUBLISHED release copy" if is_release else "this database"
+    L(f"**Database read:** {_what} — {_label}; {db_size_mb:.1f} MB; "
+      f"{_n_tables if _n_tables is not None else '?'} tables"
+      + (f" (canonical: {release_build.get('canonical_table_count')} tables)"
+         if release_build.get("canonical_table_count") else ""))
+    if is_release:
+        L("_The public release drops licensed and internal tables on purpose "
+          "(`scripts/ci/build_release_db.py` EXCLUDED_TABLES, and every `haz_` table); "
+          "such a table reads \"not in the published DB\" below, never \"no table\"._")
     L()
 
     # =====================================================================
@@ -257,7 +316,7 @@ def build_report(
     for _label, _table, _cands, _stale, _chrono in _freshness_sources:
         _n = row_count(con, _table)
         if _n is None:
-            L(f"| {_label} | _n/a_ | (no table) | — |")
+            L(f"| {_label} | _n/a_ | {absent(_table)} | — |")
             continue
         _col, _val = newest(con, _table, _cands, chrono=_chrono)
         _status = _fresh_status(_n, _val, _stale, _now)
@@ -322,7 +381,9 @@ def build_report(
     for _i, (_lbl, _t) in enumerate(_stages, 1):
         _rc = row_count(con, _t)
         _mark = "✓" if _rc else "✗"
-        _rcs = fmt_num(_rc) if _rc is not None else "_(no table)_"
+        _rcs = fmt_num(_rc) if _rc is not None else (
+            absent(_t, short=True) if is_release and _excluded_from_release(_t)
+            else "_(no table)_")
         L(f"| {_i} | {_lbl} | `{_t}` | {_rcs} | {_mark} |")
     L()
 
@@ -427,7 +488,7 @@ def build_report(
         L("|---------------|----------------:|--------:|-------------|")
         for _lbl, _tbl, _q, _expect in _inject_sources:
             if not table_exists(con, _tbl):
-                L(f"| {_lbl} | _no table_ | — | {_expect} |")
+                L(f"| {_lbl} | {absent(_tbl, short=True)} | — | {_expect} |")
                 continue
             _cov = {str(r[0]).strip().upper() for r in safe_query(con, _q) if r and r[0]}
             _hit = _tset & _cov
@@ -1895,12 +1956,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=str(DEFAULT_COUNTRIES_CSV),
         help="ISO registry CSV (country_name,iso3) used to resolve the country list",
     )
+    parser.add_argument(
+        "--source-label", default=None,
+        help="Where the DB came from (artifact name, run id), printed at the top",
+    )
+    parser.add_argument(
+        "--release-build-json", default=None,
+        help="build_release_db --report-json output: marks the DB as the release "
+             "copy and carries the canonical counts of the tables it dropped",
+    )
     args = parser.parse_args(argv)
 
     report = build_report(
         Path(args.db),
         country_list_path=Path(args.country_list),
         countries_csv_path=Path(args.countries_csv),
+        source_label=args.source_label,
+        release_build_json=Path(args.release_build_json) if args.release_build_json else None,
     )
     out_path = Path(args.out)
     out_path.write_text(report, encoding="utf-8")

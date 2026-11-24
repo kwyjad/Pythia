@@ -226,26 +226,51 @@ def resolution_dates(con, qids: Sequence[str]) -> dict[tuple[str, int], dict[str
     join = (" LEFT JOIN resolution_vintages v ON v.question_id = r.question_id "
             "AND v.horizon_m = r.horizon_m AND v.vintage = 'first'") if has_v else ""
     first = "CAST(v.recorded_at AS DATE), v.value" if has_v else "NULL, NULL"
+    obs = "r.observed_month" if column_exists(con, "resolutions", "observed_month") else "NULL"
     out: dict[tuple[str, int], dict[str, Any]] = {}
-    for qid, h, s, fr, fv, val in con.execute(
-        f"SELECT r.question_id, r.horizon_m, {snap}, {first}, r.value FROM resolutions r{join} "
+    for qid, h, s, fr, fv, val, om in con.execute(
+        f"SELECT r.question_id, r.horizon_m, {snap}, {first}, r.value, {obs} "
+        f"FROM resolutions r{join} "
         "WHERE r.question_id IN (SELECT UNNEST(?::VARCHAR[]))", [list(qids)],
     ).fetchall():
         if h is None:
             continue
         out[(str(qid), int(h))] = {"snapshot": _err._as_date(s), "first_recorded": _err._as_date(fr),
-                                   "first_value": fv, "value": val}
+                                   "first_value": fv, "value": val,
+                                   "observed_month": str(om)[:7] if om else None}
     return out
+
+
+def calendar_cutoff(round_date: date) -> str:
+    """The newest month a resolution run on ``round_date`` may resolve: the
+    previous complete month (``compute_resolutions``' calendar cutoff)."""
+    y, m = round_date.year, round_date.month - 1
+    if m == 0:
+        y, m = y - 1, 12
+    return f"{y:04d}-{m:02d}"
 
 
 def classify_new(dates: Mapping[str, Any], round_date: date) -> tuple[str, bool]:
     """('new' | 'earlier' | 'undated', rewritten).
 
-    The snapshot date of the source row the resolution was read from decides;
-    a zero-default carries none, so its first recorded vintage stands in. A
-    new resolution whose first vintage predates the round was read before and
-    re-read now: ``rewritten``.
+    The resolution's ``observed_month`` against the round's calendar cutoff
+    decides (Nov 2026): the cutoff month is new this round, and an older
+    month is new only when its first vintage was recorded in this round (a
+    late source, a freeze). ``source_snapshot_ym`` is the date of the SOURCE
+    row (an ACLED pull, a GDACS fact's ingest), never the run date; read as
+    the run date it miscounted the November 2026 report. With no
+    ``observed_month`` (an older table) the snapshot rule below still
+    applies. A new resolution whose first vintage predates the round was
+    read before and re-read now: ``rewritten``.
     """
+    first = dates.get("first_recorded")
+    observed = dates.get("observed_month")
+    if observed:
+        if observed >= calendar_cutoff(round_date):
+            return "new", bool(first is not None and first < round_date)
+        if first is not None and first >= round_date:
+            return "new", False
+        return "earlier", False
     written = dates.get("snapshot") or dates.get("first_recorded")
     if written is None:
         return "undated", False
@@ -292,9 +317,13 @@ def build_new_this_round(ctx: Any, round_date: date | None,
                                           "horizon_months_undated", "new_indicative",
                                           "new_rewritten")}})
     return {"round_date": round_date.isoformat(),
-            "rule": ("new = the resolution's source_snapshot_ym (else, for a zero-default, its first "
-                     "resolution_vintages reading) is on or after the round date; rewritten = new, "
-                     "with a first reading before the round"),
+            "rule": ("new = the resolution's observed_month is the round's calendar cutoff "
+                     "(the previous complete month), or an older month whose first "
+                     "resolution_vintages reading is on or after the round date; "
+                     "source_snapshot_ym is the source row's date, not the run date, and decides "
+                     "only where observed_month is absent; rewritten = new, with a first "
+                     "reading before the round"),
+            "calendar_cutoff": calendar_cutoff(round_date),
             "groups": rows, "rewritten": rewritten}, new_pairs
 
 

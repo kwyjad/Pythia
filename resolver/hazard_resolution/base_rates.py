@@ -513,6 +513,16 @@ def compute_all(
     # alike, and it is a no-op once converged.
     backfill_no_candidate_flags(con)
 
+    # Name the cells an earlier backcast assessed for territories with no
+    # people (no_population), so they no longer read as unexplained.
+    try:
+        from resolver.hazard_resolution.cli import UNPOPULATED_TERRITORIES
+        from resolver.hazard_resolution.detect import stamp_unpopulated_territories
+
+        stamp_unpopulated_territories(con, UNPOPULATED_TERRITORIES)
+    except Exception as exc:  # a stamp never costs the base rates
+        LOG.warning("[base_rates] no_population stamp failed: %s", exc)
+
     return {
         "occurrence": compute_occurrence(con, rulebook, hazards=hazards, today=today),
         "severity": compute_severity(con, rulebook, hazards=hazards, today=today),

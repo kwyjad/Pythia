@@ -864,7 +864,33 @@ VINTAGE_MILESTONES_BY_GROUP: dict[tuple[str, str], tuple[tuple[str, int], ...]] 
     # only lets ``reading_label`` name the reading for a scored bundle.
     ("FL", "PA"): (("at_freeze", 60),),
     ("TC", "PA"): (("at_freeze", 60),),
+    # Event outcomes (Nov 2026): a GDACS alert list can be revised, and the
+    # row is replaced every run, so a change between runs was invisible.
+    # Kept like fatalities: first, d60, d90.
+    ("*", "EVENT_OCCURRENCE"): VINTAGE_MILESTONES,
 }
+
+
+def count_event_outcomes_changed(conn) -> int:
+    """EVENT_OCCURRENCE resolutions whose value differs from their ``first``
+    vintage. A run-level count: an event outcome that moved after it was
+    first scored is otherwise visible nowhere."""
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM resolutions r
+            JOIN questions q ON q.question_id = r.question_id
+            JOIN resolution_vintages v
+              ON v.question_id = r.question_id AND v.horizon_m = r.horizon_m
+             AND v.vintage = 'first'
+            WHERE UPPER(q.metric) = 'EVENT_OCCURRENCE'
+              AND r.value IS DISTINCT FROM v.value
+            """
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:  # noqa: BLE001 - a pre-vintage DB
+        return 0
 
 
 def vintage_milestones(hazard: str, metric: str) -> Optional[tuple[tuple[str, int], ...]]:
@@ -1600,6 +1626,7 @@ def compute_resolutions(
             "skipped_conflict_displacement_gate": skipped_conflict_displacement_gate,
             "skipped_unresolvable_hazard": skipped_unresolvable_hazard,
             "vintages_written": vintages_written,
+            "event_outcomes_changed_since_first": count_event_outcomes_changed(conn),
             "machine_retracted": machine_retracted,
             "machine_rung_counts": {
                 f"{hz}/{rung}": n for (hz, rung), n in sorted(machine_rung_counts.items())

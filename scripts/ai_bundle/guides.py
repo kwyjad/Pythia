@@ -328,12 +328,26 @@ _RESOLUTION_SEMANTICS = """\
   no IFRC record was unresolved, so FL/TC scores before and after the switch
   are drawn from different outcome sets.
 - `observed_month` is the calendar month the horizon resolves against.
+- `source_snapshot_ym` is the date of the SOURCE row the value was read
+  from, never the date of the resolution run. Per metric: ACE/FATALITIES,
+  the ACLED pull's `updated_at`; PA and PHASE3PLUS_IN_NEED from facts, the
+  fact's `created_at` (its ingest); EVENT_OCCURRENCE, the GDACS fact's
+  ingest date, often days before the run (the weekly ingest); FL/TC PA from
+  the machine, the machine row's `retrieved_at` (else its `created_at`); a
+  zero-default carries none. Whether a resolution is "new this round" is
+  decided by its `observed_month` against the run's `calendar_cutoff` (the
+  previous complete month): the cutoff month is new, an older month only
+  when its `first` vintage was recorded this round. Read as the run date,
+  `source_snapshot_ym` miscounted the November 2026 report.
 - `acled_snapshot_date` (ACE/FATALITIES) is the date of the ACLED pull the
   figure came from. ACLED revises counts for weeks, and every resolution run
   REPLACES the row, so `resolution_vintages` keeps the first resolution and
   those taken ~60 and ~90 days after month end (`vintage` = first / d60 /
   d90, with the actual `days_after_month_end`). Compare them to see whether
-  an outcome moved after it was scored. ACE/PA keeps first / d180 / d270.
+  an outcome moved after it was scored. ACE/PA keeps first / d180 / d270;
+  EVENT_OCCURRENCE keeps first / d60 / d90 since November 2026 (a revised
+  GDACS alert list can change an outcome), and Compute Resolutions reports
+  `event_outcomes_changed_since_first`.
 - `resolution_reading` (in `scores_flat.csv`, `forecast_vs_outcome.csv` and
   each record's `outcome.resolutions`) names the reading the resolution a
   score used was taken at: `first`, or the latest milestone the resolution's
@@ -615,7 +629,8 @@ binary and SPD never blended, Track 1 never compared with Track 2, 90%
 intervals from 2,000 resamples of whole questions (seed 20261002); a section
 that cannot be computed is `{"stub": true, "reason": ...}` and
 `section_status` says which. Sections: `round` (the Resolver Update date,
-the newest `resolutions.source_snapshot_ym` unless `--round-date` was given;
+the newest `resolutions.source_snapshot_ym` unless `--round-date` was given,
+and its `calendar_cutoff`, the previous complete month;
 the calibration run id; the git sha); `forecast_vintage` (per latest run
 behind the scored questions: its date, question count and the value counts
 of lineup, prompt versions, advice arm, recalibration mode and
@@ -623,9 +638,10 @@ of lineup, prompt versions, advice arm, recalibration mode and
 scored set); `new_this_round` (per hazard, metric and track: questions and
 horizon-months resolved this round, horizon-months from earlier rounds,
 undated ones, new indicative months, and new ones `rewritten`, read before
-the round and read again now; "new" is the resolution's
-`source_snapshot_ym`, or for a zero-default its first `resolution_vintages`
-reading, on or after the round date); `paired_comparisons` (Track 1 only,
+the round and read again now; "new" is a resolution whose `observed_month`
+is the round's `calendar_cutoff`, or an older month whose first
+`resolution_vintages` reading is on or after the round date; the
+`source_snapshot_ym` rule applies only to a table with no `observed_month`); `paired_comparisons` (Track 1 only,
 same question and horizon, indicative months left out: BayesMC minus the
 plain mean on SPD RPS and on binary Brier, each member minus the primary
 aggregate on SPD RPS, Sibyl minus the primary on SPD RPS and Brier; lower is
@@ -923,7 +939,9 @@ _QUESTION_RECORD_SCHEMA = """\
   family inherits its predecessor's record as a prior (`inherited_from`).
 - `outcome`: resolutions per horizon (value, observed_month, source_desc,
   `scoring_class`, `resolution_reading`) plus `unresolved_horizons`
-  (absent ≠ zero!).
+  (absent ≠ zero!). `source_snapshot_ym` is the source row's date, not the
+  run date (see Resolutions above); "new this round" is `observed_month`
+  against the run's `calendar_cutoff`.
 - `scores`: [{horizon_m, model_name, score_type, value}].
 - `sibyl`: status, divergences, cost; `trials` (full belief traces) present
   in case_studies/ or when built with --include-sibyl-trials=all.
