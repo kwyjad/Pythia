@@ -1,0 +1,3 @@
+2026-11-14 00:06:32,438 INFO sibyl.select_questions: sibyl.select_questions: eligible pool by hazard and RC level for hs_run_id=hs_20261113T035247: {'ACE': {'0': 21, '1': 13, '2': 4, '3': 1}, 'DR': {'0': 4, '1': 5, '2': 11}, 'FL': {'0': 2, '1': 9, '2': 7, '3': 1}, 'TC': {'1': 4, '3': 1}}
+2026-11-14 00:06:32,438 INFO sibyl.select_questions: sibyl.select_questions: chose 15 (ACE 7, DR 3, FL 2, TC 1) — 2 control, 7 floor, 6 fill (rule rc_focus)
+2026-11-14 00:06:32,438 INFO __main__: sibyl.run: sibyl_1794614792427 starting — 15 questions, cap $25.00, K=2, model=claude-opus-5-5
