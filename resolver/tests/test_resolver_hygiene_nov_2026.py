@@ -120,3 +120,34 @@ def test_rows_written_mid_month_are_retracted_and_others_kept(con):
     ).fetchall()
     assert left == [("PHL", "FL", 11), ("CUB", "TC", 11), ("VNM", "TC", 10)]
     assert cli_mod.retract_rows_written_mid_month(con, "TC") == 0
+
+
+# --- 2. territories with no population --------------------------------------
+
+
+def test_no_population_is_a_known_no_row_reason():
+    assert cell_ledger.REASON_NO_POPULATION == "no_population"
+    assert cell_ledger.REASON_NO_POPULATION in cell_ledger.NO_ROW_REASONS
+    assert cell_ledger.REASON_SWEEP_HIT in cell_ledger.NO_ROW_REASONS
+
+
+def test_unpopulated_trigger_rows_are_stamped_no_population(con):
+    from resolver.hazard_resolution import detect as detect_mod
+
+    for iso3 in ("ATA", "BVT", "VNM"):
+        con.execute(
+            "INSERT INTO haz_triggers (iso3, year, month, hazard, triggered, "
+            "trigger_source, trigger_detail_json, run_type) "
+            "VALUES (?, 2013, 4, 'FL', FALSE, 'none', '{}', 'backcast')",
+            [iso3],
+        )
+    n = detect_mod.stamp_unpopulated_territories(con, cli_mod.UNPOPULATED_TERRITORIES)
+    assert n == 2
+    reasons = dict(con.execute(
+        "SELECT iso3, json_extract_string(trigger_detail_json, '$.no_row_reason') "
+        "FROM haz_triggers"
+    ).fetchall())
+    assert reasons == {"ATA": "no_population", "BVT": "no_population", "VNM": None}
+    assert detect_mod.stamp_unpopulated_territories(
+        con, cli_mod.UNPOPULATED_TERRITORIES
+    ) == 0

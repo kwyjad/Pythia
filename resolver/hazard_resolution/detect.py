@@ -659,6 +659,56 @@ def record_no_row_reason(
     )
 
 
+def stamp_unpopulated_territories(
+    con: "duckdb.DuckDBPyConnection", territories,
+) -> int:
+    """Stamp ``no_population`` on trigger rows of territories with no people.
+
+    Such territories left the assessed universe in Sept 2026, but cells an
+    earlier backcast assessed for them (ANT, ATA, ATF, BVT, HMD, SGS, UMI)
+    carry no resolution row and no reason, so a bundle built from the
+    database labelled them ``unexplained_no_row`` — which its README calls a
+    bug. Only cells with no resolution row and no stamped reason are touched;
+    idempotent. Returns the number stamped.
+    """
+
+    codes = sorted({str(t).upper() for t in territories})
+    if not codes:
+        return 0
+    marks = ",".join("?" for _ in codes)
+    where = f"""
+        WHERE t.iso3 IN ({marks})
+          AND json_extract_string(COALESCE(t.trigger_detail_json, '{{}}'),
+                                  '$.no_row_reason') IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM haz_resolutions r
+              WHERE r.iso3 = t.iso3 AND r.year = t.year
+                AND r.month = t.month AND r.hazard = t.hazard)
+    """
+    rows = con.execute(
+        f"SELECT t.iso3, t.year, t.month, t.hazard, t.trigger_detail_json "
+        f"FROM haz_triggers t {where}",
+        codes,
+    ).fetchall()
+    for iso3, year, month, hazard, raw in rows:
+        try:
+            detail = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            detail = {}
+        if not isinstance(detail, dict):
+            detail = {"detail": detail}
+        detail["no_row_reason"] = "no_population"
+        detail["assessed"] = False
+        con.execute(
+            """
+            UPDATE haz_triggers SET trigger_detail_json = ?
+            WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+            """,
+            [json.dumps(detail), iso3, year, month, hazard],
+        )
+    return len(rows)
+
+
 def record_sweep_on_trigger(
     con: "duckdb.DuckDBPyConnection",
     *,

@@ -78,6 +78,12 @@ REASON_FLIPPED = "flipped_to_triggered_by_sweep"
 #: once the calendar month's allowance resets. A live run never defers —
 #: it writes what it has, with ``budget_capped`` in the provenance.
 REASON_BUDGET_DEFERRED = "extraction_budget_deferred"
+#: A territory with no resident population (``cli.UNPOPULATED_TERRITORIES``).
+#: It can carry no humanitarian impact and has no population cap, so nothing
+#: is resolved. Since Sept 2026 such territories are not walked at all; the
+#: code names the cells an earlier backcast assessed (12 in November 2026,
+#: 2009-2019) so they no longer read as ``unexplained_no_row``.
+REASON_NO_POPULATION = "no_population"
 
 #: Every reason a cell may carry no row, so a reader (the debug bundle, a
 #: contradiction check) can tell a known silence from an unexplained one.
@@ -85,7 +91,7 @@ NO_ROW_REASONS = frozenset({
     REASON_PENDING, REASON_SWEEP_INCONCLUSIVE, REASON_COVERAGE_GATE,
     REASON_INCONCLUSIVE, REASON_NO_COVERAGE, REASON_TOO_FEW_FEEDS,
     REASON_MONTH_IN_PROGRESS, REASON_FROZEN, REASON_EXCEPTION, REASON_FLIPPED,
-    REASON_SWEEP_HIT, REASON_BUDGET_DEFERRED,
+    REASON_SWEEP_HIT, REASON_BUDGET_DEFERRED, REASON_NO_POPULATION,
 })
 
 #: Stage names, so a reader can tell which half of the machine spoke.

@@ -838,6 +838,28 @@ def _checks(tmp_path, db, full_run, sub="d"):
     return {c["name"]: c for c in manifest["checks"]}
 
 
+def test_an_unpopulated_territory_cell_reads_no_population(tmp_path, full_run):
+    """Nov 2026: 12 backcast cells for ANT, ATA, ATF, BVT, HMD, SGS and UMI
+    read unexplained_no_row. A territory with no people is not a bug."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_triggers VALUES ('ATF', 2013, 4, 'FL', FALSE, 'none', '{}', "
+        "NULL, 'backcast', CURRENT_TIMESTAMP)"
+    )
+    con.close()
+    out, _ = _build(tmp_path, db_path=db, diagnostics_dir=full_run["diagnostics"])
+    with zipfile.ZipFile(out) as zf:
+        ledger = zf.read("hazard/cell_ledger.csv").decode()
+    atf = [l for l in ledger.splitlines() if l.startswith("ATF,")]
+    assert atf and "no_population" in atf[0]
+    assert "unexplained_no_row" not in atf[0]
+    con = duckdb.connect(str(db))
+    con.execute("DELETE FROM haz_triggers WHERE iso3 = 'ATF'")
+    con.close()
+
+
 def test_a_no_row_cell_with_a_reason_on_its_trigger_row_is_explained(tmp_path, full_run):
     """D1: 28,728 drought cells read unexplained_no_row because the reason
     lived only in the run stream, which the backcast never enables. The

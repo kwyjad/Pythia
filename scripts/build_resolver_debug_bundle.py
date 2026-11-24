@@ -2080,8 +2080,20 @@ class BundleBuilder:
         backlog = 0
         backlog_hazards: dict[str, int] = {}
         backlog_months: list[str] = []
+        try:
+            from resolver.hazard_resolution.cli import UNPOPULATED_TERRITORIES
+        except Exception:  # pragma: no cover - defensive
+            UNPOPULATED_TERRITORIES = frozenset(
+                {"ANT", "ATA", "ATF", "BVT", "HMD", "SGS", "UMI"}
+            )
         for key, entry in merged.items():
             if entry["status"] is not None or entry["reason_code"]:
+                continue
+            if str(entry.get("iso3") or "").upper() in UNPOPULATED_TERRITORIES:
+                # A territory with no people is not walked since Sept 2026;
+                # an older backcast's cell for it is not a bug.
+                entry["reason_code"] = "no_population"
+                entry["assessed"] = False
                 continue
             entry["reason_code"] = "unexplained_no_row"
             if key in assessed_this_run or (
@@ -5680,7 +5692,13 @@ class BundleBuilder:
             "- `indicator_no_coverage` — no feed carried a reading for the country.",
             "- `indicator_too_few_feeds_for_zero` — feeds answered, but too few for a",
             "  zero to rest on their silence (drought.indicators.min_answered_for_zero).",
-            "- `month_in_progress` — the month had not ended when the pass ran.",
+            "- `month_in_progress` — the month had not ended when the pass ran",
+            "  (all three hazards since November 2026).",
+            "- `sweep_hit_unconfirmed` — ReliefWeb found reports, so no zero may be",
+            "  written, but reports are not a detection: the cell is undecided.",
+            "- `no_population` — a territory with no resident population (ANT, ATA,",
+            "  ATF, BVT, HMD, SGS, UMI). Nothing is resolved for it.",
+            "- `extraction_budget_deferred` — a backcast cell owed to a later run.",
             "- `unexplained_no_row` — nothing accounted for the cell. That is a bug.",
             "",
             "`hazard/figures_ledger.csv` carries every extracted figure and its",
