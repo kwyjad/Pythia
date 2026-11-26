@@ -162,6 +162,11 @@ llm:
         rc_pass1:         gemini_flash  # PYTHIA_RC_MODEL_PASS1 overrides
         rc_pass2:         gemini_flash  # PYTHIA_RC_MODEL_PASS2 overrides
         hs_fallback:      gpt           # JSON repair; PYTHIA_HS_FALLBACK_MODEL_SPECS overrides
+        # RC SHADOW ARM (horizon_scanner/rc_shadow.py): a second model family
+        # sent the byte-identical RC prompt pass 1 received, stored for
+        # comparison (hs_rc_shadow) and never used. NOT pass 2.
+        # PYTHIA_RC_SHADOW_MODEL overrides; effort in role_params below.
+        rc_shadow:        gpt
         # --- Forecaster ---
         track2_spd:       gemini_flash  # Track 2 single-model SPD (stored as model_name=track2_flash)
         scenario_writer:  gemini_flash  # PYTHIA_SCENARIO_MODEL_ID overrides
@@ -187,6 +192,12 @@ llm:
         # output_config.effort (PYTHIA_INTERPRETER_THINKING, default high)
         # and never sends temperature (the opus-5-5 prefix guard drops it).
         interpreter:      claude
+
+      # Call parameters for roles that need their own (roles map to an alias
+      # only). Env overrides win where noted.
+      role_params:
+        rc_shadow:
+          thinking: medium          # PYTHIA_RC_SHADOW_THINKING overrides
 
 forecaster:
   horizons: [1,2,3,4,5,6]

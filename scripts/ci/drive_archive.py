@@ -803,6 +803,7 @@ FORECAST_REVIEW_DEBUG_FILES = (
     "crisiswatch_inject", "data_inject_inventory", "gdacs_prompt_check", "rc_triage_summary",
     "prompt_cache_report", "model_config", "env_and_config", "question_metrics", "coverage_detail",
     "provider_preflight", "rc_pass_detail", "grounding_detail", "model_completeness", "prompt_prefixes",
+    "rc_shadow_comparison",
 )
 #: Lifted from the forecast attribution bundle, named ``attribution__<file>``.
 FORECAST_REVIEW_ATTRIBUTION_FILES = (

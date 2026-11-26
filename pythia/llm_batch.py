@@ -79,7 +79,15 @@ _FAMILY_SLUGS = {
     "track2_spd": "t2",
     "hs_rc": "hsrc",
     "hs_triage": "hstr",
+    # The regime-change shadow arm (horizon_scanner/rc_shadow.py).
+    "hs_rc_shadow": "hsrs",
 }
+
+# Families no stage waits on: the poller leaves them out of the batch state it
+# gates on, and drain_pending skips them, so a slow shadow batch can never
+# delay a production stage. Their owner collects them when they are done
+# (rc_shadow.collect_shadow) and cancels what the last stage finds running.
+NON_BLOCKING_FAMILIES = frozenset({"hs_rc_shadow"})
 _SLUG_TO_FAMILY = {v: k for k, v in _FAMILY_SLUGS.items()}
 
 _CUSTOM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -1670,6 +1678,8 @@ def drain_pending(
     in_flight: List[str] = []
     try:
         for binfo in pending_batches(con, pipeline_id):
+            if binfo.get("family") in NON_BLOCKING_FAMILIES:
+                continue  # collected by its owner; never waited on here
             bid = binfo["batch_id"]
             status = _poll_with_retry(con, bid)
             state = status.state if status else "unknown"

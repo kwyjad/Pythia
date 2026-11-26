@@ -107,6 +107,11 @@ jobs:
       # (salted hash "adversarial:" + question id) has it withheld. Arm on
       # forecasts_raw/forecasts_ensemble.adversarial_arm. Keep in lockstep.
       PYTHIA_ADVERSARIAL_WITHHELD_SHARE: "0.5"
+      # RC shadow arm (horizon_scanner/rc_shadow.py): a second model family on
+      # the byte-identical RC prompt, stored and never used. On by default in
+      # production, off in test mode unless PYTHIA_RC_SHADOW_ENABLED is set.
+      # Per-run spend cap in USD. Keep in lockstep.
+      PYTHIA_RC_SHADOW_MAX_USD: "15"
       # ACE/FATALITIES prompts show the level-and-volatility distribution and
       # tell members to copy it as their Step 1 prior (the loss on the August
       # 2026 conflict-death questions was in the prior). Keep in lockstep across
@@ -361,6 +366,14 @@ jobs:
               --status success \
               --json databaseId,createdAt,event \
               --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Billing Reconciliation"' >>"${CANDIDATES_FILE}" || true
+            # Monthly RC recall check (the 12th) — writes rc_recall_check
+            # (and, on a replay, hs_rc_shadow) and re-uploads canonical.
+            gh run list \
+              --workflow "RC Recall Check" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),RC Recall Check"' >>"${CANDIDATES_FILE}" || true
             # Manual interpreter backfill/recovery — also re-uploads canonical.
             gh run list \
               --workflow "Interpreter Backfill" \

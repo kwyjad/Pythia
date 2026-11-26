@@ -243,7 +243,7 @@ def _batchable_sql(con) -> str:
     if _has_column(con, "llm_calls", "call_type"):
         return (
             f"({phase_part} OR call_type LIKE 'rc_pass_%' "
-            "OR call_type LIKE 'triage_pass_%')"
+            "OR call_type LIKE 'triage_pass_%' OR call_type = 'rc_shadow')"
         )
     # Pre-call_type DBs: phase alone cannot separate an RC pass from grounding,
     # so count only the forecaster families rather than over-claim.

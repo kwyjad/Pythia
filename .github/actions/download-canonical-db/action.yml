@@ -260,6 +260,7 @@ runs:
         Purge HS Run
         Mark runs as test
         Billing Reconciliation
+        RC Recall Check
         Pythia — Compute Resolutions
         Pythia — Compute SPD Scores
         Pythia — Compute Calibration Weights & Advice

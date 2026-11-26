@@ -1497,6 +1497,30 @@ def _load_country_list(
     return resolved, skipped_entries, raw_countries
 
 
+def _rc_shadow_stage_end(stage: str, run_id: str) -> None:
+    """The RC shadow arm's per-stage work (horizon_scanner/rc_shadow.py)."""
+
+    try:
+        from horizon_scanner import hs_batch, rc_shadow
+
+        if not rc_shadow.enabled():
+            return
+        if stage == "hs_submit":
+            rc_shadow.submit(run_id, stage)
+        elif stage in ("hs_rc_collect", "hs_finalize"):
+            with hs_batch._DB_LOCK:
+                rc_shadow.collect_shadow(
+                    hs_batch.batch_con(), hs_batch.pipeline_id() or run_id, run_id,
+                    final=False, run_unsubmitted=(stage == "hs_rc_collect"),
+                )
+            rc_shadow.wait_background(rc_shadow.wait_seconds())
+        else:
+            rc_shadow.wait_background(rc_shadow.wait_seconds())
+        logger.info("RC shadow (%s): %s", stage, rc_shadow.stats())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RC shadow stage work failed (%s): %s", stage, exc)
+
+
 def main(
     countries: list[str] | None = None,
     stage: str = "full",
@@ -1826,6 +1850,10 @@ def main(
             # month. Fail the process so the stage turns red instead.
             raise SystemExit(1)
     finally:
+        # The RC shadow arm's stage work: submit its own (non-blocking)
+        # batches, collect what has finished, wait (bounded) for sync-path
+        # shadow calls. Never raises; touches nothing production reads.
+        _rc_shadow_stage_end(stage, run_id)
         # Checkpoint the staged batch/stage-state writes before the workflow
         # uploads the DB (the artifact excludes the .wal file).
         if hs_batch.staged():
