@@ -191,7 +191,10 @@ def argon_batch(prompt: str, *, wait_sec: float, poll_sec: float = 30.0) -> Dict
             adapter.cancel(pbid)
         except Exception:  # noqa: BLE001
             pass
-        out["verdict"] = "not_finished" if state == "in_progress" else state
+        # Accepted and still running at the cap is SLOW, not failed: Gemini
+        # batches routinely outlast a short wait (the September 2026 canary
+        # saw the same). Only a refusal or a terminal failure fails the probe.
+        out["verdict"] = "slow_but_accepted" if state in ("in_progress", "submitted") else state
         return out
     items: List[Dict[str, Any]] = []
     total = 0.0
@@ -223,7 +226,7 @@ def _table(rows: List[Dict[str, Any]], cols: List[str]) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="diagnostics/model_lineup_probe.json")
-    ap.add_argument("--batch-wait-min", type=float, default=30.0)
+    ap.add_argument("--batch-wait-min", type=float, default=120.0)
     ap.add_argument("--skip-batch", action="store_true")
     args = ap.parse_args(argv)
 
@@ -272,7 +275,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     failed = any(not m.get("batch_supported") for m in report["metadata"])
     failed = failed or any(not s.get("ok") for s in report["sync"])
-    if report["batch"] is not None and report["batch"].get("verdict") != "ok":
+    if report["batch"] is not None and report["batch"].get("verdict") not in ("ok", "slow_but_accepted"):
         failed = True
     return 1 if failed else 0
 

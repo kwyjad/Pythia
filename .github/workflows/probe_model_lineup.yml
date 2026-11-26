@@ -19,7 +19,7 @@ on:
       batch_wait_min:
         description: "Minutes to wait on the Argon batch before cancelling"
         required: false
-        default: "30"
+        default: "120"
       skip_batch:
         description: "Skip the Argon batch"
         type: boolean
@@ -35,7 +35,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,7 +56,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PYTHIA_TEST_MODE: "1"
           PYTHIA_LLM_PROFILE: prod
-          BATCH_WAIT_MIN: ${{ inputs.batch_wait_min || '30' }}
+          BATCH_WAIT_MIN: ${{ inputs.batch_wait_min || '120' }}
           SKIP_BATCH: ${{ inputs.skip_batch == true || inputs.skip_batch == 'true' }}
         run: |
           set -o pipefail
