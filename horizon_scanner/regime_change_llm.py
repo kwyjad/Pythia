@@ -737,6 +737,7 @@ def _run_rc_for_single_hazard(
                 pass_idx=pass_idx,
                 temperature=HS_TEMPERATURE,
             )
+        _run_shadow(prompt, run_id=run_id, iso3=iso3, hazard_code=hazard_code, mode=rc_mode)
         return {**_RC_DEFAULTS, "valid": False, "status": "pending_batch"}
 
     pass_rcs: list[Dict[str, Any]] = []
@@ -871,7 +872,22 @@ def _run_rc_for_single_hazard(
     # direction/window, deduped bullets) and keeps the status semantics:
     # valid -> "ok", invalid -> "error".
     merged = _merge_single_hazard_passes(pass_rcs[0], pass_rcs[-1])
+    # The shadow arm sees the byte-identical prompt pass 1 received and
+    # returns nothing: `merged` is computed above and never touched by it.
+    _run_shadow(prompt, run_id=run_id, iso3=iso3, hazard_code=hazard_code, mode=rc_mode)
     return merged
+
+
+def _run_shadow(prompt: str, *, run_id: str, iso3: str, hazard_code: str, mode: str) -> None:
+    """Hand pass 1's prompt to the RC shadow arm. Never raises, returns nothing."""
+
+    try:
+        from horizon_scanner import rc_shadow
+
+        rc_shadow.run_for_hazard(prompt, hs_run_id=run_id, iso3=iso3,
+                                 hazard_code=hazard_code, mode=mode)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RC shadow hook failed for %s %s: %s", iso3, hazard_code, exc)
 
 
 # ---------------------------------------------------------------------------

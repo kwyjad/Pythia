@@ -203,6 +203,23 @@ def _rc_levels(con, hs_run_id: str) -> Dict[str, Any]:
     }
 
 
+def _rc_shadow(con, hs_run_id: str) -> Dict[str, Any]:
+    """The RC shadow arm beside production (stored, never used); see
+    scripts/debug_bundle/rc_shadow.py. Lists are cut to ten here."""
+
+    try:
+        from scripts.debug_bundle.rc_shadow import shadow_comparison
+
+        rep = shadow_comparison(con, hs_run_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"[:200]}
+    for key in ("would_have_forecast", "production_only"):
+        if isinstance(rep.get(key), list):
+            rep[f"n_{key}"] = len(rep[key])
+            rep[key] = rep[key][:10]
+    return rep
+
+
 def _is_test_consistency(con, hs_run_id: str, expected: Optional[bool]) -> Dict[str, Any]:
     """Every table stamped for this run should agree on is_test.
 
@@ -526,6 +543,18 @@ def _markdown(rep: Dict[str, Any]) -> str:
         L.append(f"**RC levels** ({rc['n_rows']} triage rows): {lv} · tracks: {tr}")
         L.append("")
 
+    sh = rep.get("rc_shadow") or {}
+    if sh.get("available"):
+        lv = ", ".join(f"L{k}={v}" for k, v in sorted((sh.get("shadow_levels") or {}).items()))
+        L.append(
+            f"**RC shadow** (`{sh.get('model_id')}`, stored, never used): {sh['n_ok']} ok of "
+            f"{sh['n_rows']}, {lv}; exact agreement {sh.get('exact_agreement')}; "
+            f"would have forecast {sh.get('n_would_have_forecast', 0)}, production only "
+            f"{sh.get('n_production_only', 0)}; ${sh.get('cost_usd', 0):.2f}, "
+            f"{sh.get('n_failures', 0)} failed, {sh.get('n_skipped_cap', 0)} skipped by the cap"
+        )
+        L.append("")
+
     it = rep.get("is_test") or {}
     if it.get("per_table"):
         if it.get("scoped", True):
@@ -686,6 +715,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "is_test": _is_test_consistency(con, hs_run_id, _expected_is_test()),
             "cost": _cost(con, hs_run_id, args.fc_run_id.strip(), since),
             "sibyl": _sibyl(con, hs_run_id, args.sibyl_run_id.strip()),
+            "rc_shadow": _rc_shadow(con, hs_run_id),
         }
     finally:
         try:

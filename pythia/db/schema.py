@@ -2498,6 +2498,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "hazard_code": "TEXT",
                 "metric": "TEXT",
                 "is_test": "BOOLEAN DEFAULT FALSE",
+                "is_shadow": "BOOLEAN DEFAULT FALSE",
             },
         )
 

@@ -82,7 +82,7 @@ def main() -> int:
 
     import duckdb
 
-    from pythia.llm_batch import pending_batches
+    from pythia.llm_batch import NON_BLOCKING_FAMILIES, pending_batches
 
     db_path = args.db
     if db_path.startswith("duckdb:///"):
@@ -113,6 +113,9 @@ def main() -> int:
                 "submitted_at": str(p["submitted_at"]) if p["submitted_at"] else None,
             }
             for p in pending
+            # A non-blocking family (the RC shadow arm) is not something the
+            # poller should wait on before dispatching the next stage.
+            if p["family"] not in NON_BLOCKING_FAMILIES
         ],
     }
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

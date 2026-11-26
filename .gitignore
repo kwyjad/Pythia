@@ -140,6 +140,7 @@ gtmc_logs/
 
 # --- Resolver runtime artifacts ---
 data/resolver.duckdb
+data/resolver.duckdb.wal
 data/staging/
 data/snapshots/
 data/logs/

@@ -190,6 +190,11 @@ env:
   # (salted hash "adversarial:" + question id) has it withheld. Arm on
   # forecasts_raw/forecasts_ensemble.adversarial_arm. Keep in lockstep.
   PYTHIA_ADVERSARIAL_WITHHELD_SHARE: "0.5"
+  # RC shadow arm (horizon_scanner/rc_shadow.py): a second model family on
+  # the byte-identical RC prompt, stored and never used. On by default in
+  # production, off in test mode unless PYTHIA_RC_SHADOW_ENABLED is set.
+  # Per-run spend cap in USD. Keep in lockstep.
+  PYTHIA_RC_SHADOW_MAX_USD: "15"
   # ACE/FATALITIES prompts show the level-and-volatility distribution and
   # tell members to copy it as their Step 1 prior (the loss on the August
   # 2026 conflict-death questions was in the prior). Keep in lockstep across
@@ -1659,6 +1664,23 @@ jobs:
           else
             echo "WARNING: Forecaster run id not detected in output."
           fi
+
+      # The RC shadow arm's batches are non-blocking: no stage waits for
+      # them. This last stage records whatever has finished and cancels the
+      # rest (recorded 'unfinished'). It runs before the request bodies are
+      # cleared, because the logged prompt is read back from them. Writes only
+      # hs_rc_shadow and llm_calls; never fatal.
+      - name: Collect the RC shadow arm (final)
+        if: always()
+        continue-on-error: true
+        env:
+          PIPELINE_ID: ${{ inputs.pipeline_id }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set +e
+          python -m horizon_scanner.rc_shadow collect --final \
+            --pipeline-id "${PIPELINE_ID}" --hs-run-id "${HS_RUN_ID}"
+          exit 0
 
       - name: Clear collected batch request bodies
         env:

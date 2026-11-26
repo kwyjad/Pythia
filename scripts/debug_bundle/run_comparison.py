@@ -33,6 +33,7 @@ METRICS = (
     "cost_forecast_usd",
     "cost_hs_usd",
     "cost_sibyl_usd",
+    "cost_rc_shadow_usd",
     "n_batches",
     "batch_fallback_pct",
     "batch_tier_cost_pct",
@@ -234,6 +235,20 @@ def _metrics_for_run(con, hs_run_id: str) -> dict[str, Any]:
             ),
             4,
         )
+    # The RC shadow arm is HS spend (phase hs_triage, so it is inside
+    # cost_hs_usd) and is also shown on its own: call_type 'rc_shadow'.
+    out["cost_rc_shadow_usd"] = round(
+        float(
+            _scalar(
+                con,
+                f"SELECT SUM(COALESCE(cost_usd,0)) FROM llm_calls "
+                f"WHERE {llm_where} AND call_type = 'rc_shadow'",
+                llm_params,
+                0.0,
+            )
+        ),
+        4,
+    )
 
     if _columns(con, "llm_batches"):
         ph2 = ",".join("?" for _ in ids)

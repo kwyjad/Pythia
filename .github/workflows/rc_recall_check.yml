@@ -1,0 +1,140 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+# Does a regime-change flag catch the breaks that happen? Production RC
+# against the RC shadow arm (pythia/tools/rc_recall_check.py), per run and
+# pooled, by hazard. Monthly after the Resolver Update on the 11th has
+# brought the outcomes in, and by hand. Optional replay of the stored
+# October/November RC prompts on the shadow model (capped, default $10),
+# whose scores are optimistic and labelled so.
+#
+# It writes rc_recall_check (and, with replay, hs_rc_shadow rows) into the
+# canonical DB, so it is a canonical producer: gated on the staged pipeline,
+# the pythia-resolver-db group on the writing job, the upload guard before
+# the upload, and named in the three discovery lists. The report itself is
+# an artifact (rc-recall-check); the Drive archive is chain-based and does
+# not pick it up.
+---
+name: RC Recall Check
+
+"on":
+  schedule:
+    # The 12th, 04:37 UTC: after Resolver Update (the 11th, 03:00, delivered
+    # hours late) and its resolutions chain, before the forecast on the 13th.
+    - cron: "37 4 12 * *"
+  workflow_dispatch:
+    inputs:
+      replay:
+        description: "Replay stored RC prompts of runs with no shadow rows on the shadow model"
+        type: boolean
+        default: false
+      replay_max_usd:
+        description: "Spend cap for the replay (USD)"
+        required: false
+        default: "10"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    name: Skip if a staged pipeline is in flight
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: "false"
+        run: python3 -m scripts.ci.check_pipeline_active
+
+  recall:
+    needs: gate
+    if: ${{ needs.gate.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: pythia-resolver-db
+      cancel-in-progress: false
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      IN_REPLAY: ${{ inputs.replay == true || inputs.replay == 'true' }}
+      IN_REPLAY_MAX_USD: ${{ inputs.replay_max_usd || '10' }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB
+        id: canonical_download
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-workflows: RC Recall Check
+
+      - name: Score production and shadow RC against resolved breaks
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${IN_REPLAY_MAX_USD}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::replay_max_usd must be a number."
+            exit 1
+          fi
+          mkdir -p diagnostics
+          extra=()
+          if [ "${IN_REPLAY}" = "true" ]; then
+            extra=(--replay --replay-max-usd "${IN_REPLAY_MAX_USD}")
+          fi
+          python -m pythia.tools.rc_recall_check --db-url "${PYTHIA_DB_URL}" \
+            --out diagnostics/rc_recall_check.md "${extra[@]}"
+
+      - name: Upload report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc-recall-check
+          retention-days: 90
+          path: |
+            diagnostics/rc_recall_check.md
+            diagnostics/rc_recall_check.json
+          if-no-files-found: warn
+
+      - name: Refuse to upload over a newer canonical DB
+        uses: ./.github/actions/guard-canonical-upload
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          downloaded-run-id: ${{ steps.canonical_download.outputs.run-id }}
+          source: ${{ steps.canonical_download.outputs.source }}
+
+      - name: Upload canonical resolver DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          retention-days: 90
+          path: data/resolver.duckdb

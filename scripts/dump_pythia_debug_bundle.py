@@ -5852,7 +5852,7 @@ def emit_rc_pass_detail_csv(
         return
 
     fieldnames = [
-        "iso3", "hazard_code", "pass_number",
+        "iso3", "hazard_code", "pass_number", "is_shadow",
         "model_id", "provider",
         "likelihood", "magnitude", "direction", "window",
         "elapsed_ms", "cost_usd",
@@ -5869,9 +5869,11 @@ def emit_rc_pass_detail_csv(
         for row in rows:
             iso3 = row.get("iso3") or ""
             hazard_code = row.get("hazard_code") or ""
+            # The RC shadow arm logs RC_<HZ>_SHADOW: never a production pass.
+            is_shadow = hazard_code.upper().endswith("_SHADOW")
             key = (iso3, hazard_code)
             pass_counters[key] = pass_counters.get(key, 0) + 1
-            pass_number = min(pass_counters[key], 2)
+            pass_number: Any = "shadow" if is_shadow else min(pass_counters[key], 2)
 
             # Parse response JSON for RC values
             likelihood = ""
@@ -5901,6 +5903,7 @@ def emit_rc_pass_detail_csv(
                 "iso3": iso3,
                 "hazard_code": hazard_code,
                 "pass_number": pass_number,
+                "is_shadow": is_shadow,
                 "model_id": row.get("model_id") or "",
                 "provider": row.get("provider") or "",
                 "likelihood": likelihood,
@@ -6214,6 +6217,10 @@ def _timing_stage_for_call(phase: str, call_type: str, hazard_code: str) -> str 
     ct = (call_type or "").lower()
     hz = (hazard_code or "").upper()
     ph = (phase or "").lower()
+    if ct == "rc_shadow" or hz.endswith("_SHADOW"):
+        # The RC shadow arm is collected whenever its batch finishes, often
+        # stages later; counting it would stretch the RC span it never gated.
+        return None
     if ct.startswith("rc_"):
         return "rc"
     if ct.startswith("triage_"):
@@ -6983,6 +6990,23 @@ def emit_operational_files(
 
     collected["gdacs_prompt_check"] = _run_collector(
         "gdacs_prompt_check", gp_json, _gdacs_prompts
+    ) or {}
+
+    # --- RC shadow arm beside production --------------------------------
+    rs_json = out_dir / f"rc_shadow_comparison__{run}.json"
+
+    def _rc_shadow() -> dict[str, Any]:
+        from scripts.debug_bundle import rc_shadow as rc_shadow_cmp
+
+        rep = rc_shadow_cmp.shadow_comparison(con, data.hs_run_id or "")
+        rs_json.write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+        (out_dir / f"rc_shadow_comparison__{run}.md").write_text(
+            rc_shadow_cmp.markdown(rep), encoding="utf-8"
+        )
+        return rep
+
+    collected["rc_shadow_comparison"] = _run_collector(
+        "rc_shadow_comparison", rs_json, _rc_shadow
     ) or {}
 
     # --- anomalies (last: it reads everything above) ----------------------

@@ -12,6 +12,9 @@ on:
     paths:
       - "horizon_scanner/**"
       - "pythia/secret_scrub.py"
+      # The RC shadow arm's tests (horizon_scanner/tests/test_rc_shadow.py).
+      - "pythia/llm_batch.py"
+      - "scripts/debug_bundle/rc_shadow.py"
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - ".github/workflows/run_sibyl.yml"
@@ -47,6 +50,9 @@ on:
     paths:
       - "horizon_scanner/**"
       - "pythia/secret_scrub.py"
+      # The RC shadow arm's tests (horizon_scanner/tests/test_rc_shadow.py).
+      - "pythia/llm_batch.py"
+      - "scripts/debug_bundle/rc_shadow.py"
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - ".github/workflows/run_sibyl.yml"

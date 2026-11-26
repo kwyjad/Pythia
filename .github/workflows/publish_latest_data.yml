@@ -143,7 +143,8 @@ jobs:
             "Compact Resolver DB" \
             "Purge HS Run" \
             "Mark runs as test" \
-            "Billing Reconciliation"
+            "Billing Reconciliation" \
+            "RC Recall Check"
           do
             gh run list \
               --workflow "${WF}" \

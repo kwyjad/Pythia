@@ -40,6 +40,7 @@ CONSUMED_ROLES = [
     "rc_pass1",
     "rc_pass2",
     "hs_fallback",
+    "rc_shadow",
     "track2_spd",
     "scenario_writer",
     "grounding_gemini",

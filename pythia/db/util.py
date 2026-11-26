@@ -34,6 +34,8 @@ def ensure_llm_calls_columns(conn: duckdb.DuckDBPyConnection) -> None:
         ("hazard_scores_json", "TEXT"),
         ("hazard_scores_parse_ok", "BOOLEAN"),
         ("is_test", "BOOLEAN"),
+        # TRUE only for the regime-change shadow arm (horizon_scanner/rc_shadow.py).
+        ("is_shadow", "BOOLEAN"),
     ]
     for name, col_type in columns:
         conn.execute(f"ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS {name} {col_type}")

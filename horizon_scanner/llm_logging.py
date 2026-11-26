@@ -126,8 +126,9 @@ def log_hs_llm_call(
     response_text: str,
     usage: Dict[str, Any],
     error_text: Optional[str],
-    is_test: bool = False,
+    is_test: bool | None = None,
     call_type: str = "chat",
+    is_shadow: bool = False,
 ) -> None:
     """
     Log a Horizon Scanner triage LLM call into llm_calls with phase='hs_triage'.
@@ -233,6 +234,15 @@ def log_hs_llm_call(
         except Exception:  # noqa: BLE001
             hazard_scores_json = None
 
+    if is_test is None:
+        # None-and-inherit, never a False default (see Invariants).
+        try:
+            from pythia.test_mode import is_test_mode
+
+            is_test = is_test_mode()
+        except Exception:  # noqa: BLE001
+            is_test = False
+
     call_id = f"hs_{hs_run_id}_{iso3_up}_{hz_up}_{int(time.time() * 1000)}"
     ts = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -283,8 +293,9 @@ def log_hs_llm_call(
                 iso3,
                 hazard_code,
                 metric,
-                is_test
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                is_test,
+                is_shadow
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 call_id,
@@ -317,6 +328,7 @@ def log_hs_llm_call(
                 hz_up,
                 None,  # metric not defined at HS stage
                 is_test,
+                bool(is_shadow),
             ],
         )
 

@@ -39,6 +39,7 @@ _ROLE_FALLBACKS: Dict[str, str] = {
     "rc_pass1": "google:gemini-3.8-flash",
     "rc_pass2": "google:gemini-3.8-flash",
     "hs_fallback": "openai:gpt-6.1-sol",
+    "rc_shadow": "openai:gpt-6.1-sol",
     "track2_spd": "google:gemini-3.8-flash",
     "scenario_writer": "google:gemini-3.8-flash",
     "grounding_gemini": "google:gemini-2.5-flash",
@@ -152,6 +153,22 @@ def get_role_model(role: str) -> str:
     except Exception:
         pass
     return _ROLE_FALLBACKS.get(role, "")
+
+
+def get_role_params(role: str) -> Dict[str, Any]:
+    """Per-role call parameters from the profile's ``role_params`` block.
+
+    Roles map to a model alias only; a role that needs a call parameter of its
+    own (e.g. ``rc_shadow``'s thinking effort) declares it here, e.g.
+    ``role_params: {rc_shadow: {thinking: medium}}``. Empty dict when absent.
+    """
+
+    try:
+        block = _get_profile_data().get("role_params")
+        params = block.get(role) if isinstance(block, dict) else None
+        return dict(params) if isinstance(params, dict) else {}
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
