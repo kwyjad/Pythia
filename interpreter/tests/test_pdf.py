@@ -526,3 +526,12 @@ class TestUnvalidatedBanner:
                                       "content_md": "# r", "created_at": "x",
                                       "interpretation_id": "i"})
         assert "UNVALIDATED" not in html
+
+
+def test_nested_and_numbered_lists_render_as_nested_html() -> None:
+    from interpreter.pdf import markdown_to_html
+
+    html = markdown_to_html("- **Brief 1.**\n  - Goal: x\n    wrapped\n- Brief 2\n\n1. one\n2. two\n")
+    assert html.startswith("<ul><li><strong>Brief 1.</strong><ul><li>Goal: x wrapped</li></ul></li>")
+    assert "<li>Brief 2</li></ul>" in html
+    assert "<ol><li>one</li><li>two</li></ol>" in html

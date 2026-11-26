@@ -66,3 +66,45 @@ The **Publish Slide Decks** workflow (`.github/workflows/publish_decks.yml`) use
 6. **Archive what GitHub still holds.** In GitHub, open **Actions → Archive Run to Drive → Run workflow**, set `backfill_days` to `80`, and run it. From then on, every Publish run dispatches the archive itself, and a weekly run catches any that were missed.
 
 The daily **Cron Watchdog** checks that every Publish run older than 48 hours has been archived, and that Drive has at least 20 GB free and is under 85% full.
+
+## Analysis reports (`RCLONE_REPORTS_CONF_B64`)
+
+The **Sync Analysis Reports** workflow (`.github/workflows/sync_analysis_reports.yml`) copies the skill analyses, resolver reviews and forecast pipeline reviews from `Fred_archive/Performance_Reports/` in your Drive into the `analysis-reports` GitHub release, where the dashboard's Performance Analysis page reads them. Those reports are written by the Claude Drive connector, not by rclone, so the archive's `drive.file` remote cannot see them. This is a second, separate remote that can only read.
+
+| Secret | Used by | Notes |
+|---|---|---|
+| `RCLONE_REPORTS_CONF_B64` | `sync_analysis_reports.yml` | Base64 of an `rclone.conf` holding exactly one remote, named `fred_reports`, scope `drive.readonly`, with `root_folder_id` set to the `Performance_Reports` folder. Decoded to a file in one step and deleted at the end of the job. Missing: the job writes a summary saying so and exits green. |
+
+### One-time setup (Windows, PowerShell)
+
+1. **Use the same Google Cloud project and Desktop OAuth client as the archive** (steps 1 to 3 above), or make a new one the same way. The OAuth consent screen must read **In production**, not **Testing**: Google expires the refresh token of an app in Testing after 7 days, and the sync would stop a week later. `drive.readonly` is a restricted scope, so the consent screen warns that the app is unverified. That is expected for your own app used by one account; click **Advanced → Go to (app name)**.
+
+2. **Find the `Performance_Reports` folder id.** Open the folder in Drive; the id is the last part of the address, after `folders/`.
+
+3. **Create the remote** in a config file of its own:
+
+   ```powershell
+   $conf = "$env:USERPROFILE\fred-reports-rclone.conf"
+   ```
+
+   ```powershell
+   rclone --config $conf config create fred_reports drive client_id=PASTE_CLIENT_ID client_secret=PASTE_CLIENT_SECRET scope=drive.readonly root_folder_id=PASTE_FOLDER_ID
+   ```
+
+   Sign in with the Google account that owns the reports. Check that the remote lists the year folders and `template/`:
+
+   ```powershell
+   rclone --config $conf lsd fred_reports:
+   ```
+
+4. **Save it as a repository secret** named `RCLONE_REPORTS_CONF_B64`:
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes($conf)) | Set-Clipboard
+   ```
+
+   ```powershell
+   Remove-Item $conf
+   ```
+
+5. **Run it once.** **Actions → Sync Analysis Reports → Run workflow**. From then on it runs daily at 09:41 UTC. If the remote lists no four-digit year folder, the run fails and says its `root_folder_id` is wrong.

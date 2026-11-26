@@ -399,6 +399,8 @@ DuckDB connection and caches, multiplying memory on the 2GB instance:
 uvicorn pythia.api.app:app --host 0.0.0.0 --port $PORT --workers 1
 ```
 Recommended Render env: `PYTHIA_MAX_CONCURRENT_HEAVY=1`, `MALLOC_ARENA_MAX=2`.
+The Performance Analysis page reads the `analysis-reports` release of `PYTHIA_DATA_REPO`
+(`PYTHIA_ANALYSIS_REPORTS_TAG` overrides the tag); see `docs/analysis_reports.md`.
 The `/v1/run` endpoint is disabled by default; set `PYTHIA_ALLOW_INPROCESS_RUN=1`
 locally if you want the API to launch pipeline runs in-process.
 

@@ -51,8 +51,8 @@
       "number": 5,
       "title": "Resolution and Calibration (plus performance note)",
       "file": "5_resolution_calibration.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "402ab2a",
       "overview_sections": ["14. Scoring, calibration", "3. Resolver"],
       "code_paths": ["pythia/tools/compute_resolutions.py", "pythia/tools/compute_scores.py", "pythia/tools/compute_calibration_pythia.py", "pythia/tools/generate_calibration_advice.py", "pythia/tools/score_baselines.py", "pythia/tools/family_recalibration.py", "resolver/hazard_resolution/", "web/src/app/performance/"]
     },

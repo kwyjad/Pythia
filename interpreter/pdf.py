@@ -23,7 +23,8 @@ parts); the ``/interpreter/print`` route stays the always-available
 ``window.print()`` fallback when the release asset is missing. The markdown →
 HTML conversion here is a small deterministic subset converter, NOT a general
 markdown engine — it only needs to handle what ``render.render_markdown``
-emits (headings, lists, pipe tables, bold/italic/code inlines).
+emits (headings, lists, pipe tables, bold/italic/code inlines), plus
+nested and numbered lists, which the analysis reports use.
 
 Same contracts as the runner: ``main()`` returns 0 in every outcome, and
 ``PYTHIA_INTERPRETER_STRICT_VALIDATION=1`` suppresses the PDF for a
@@ -92,6 +93,40 @@ def _inline(text: str) -> str:
 
 
 _TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+# A list item: "- x" (or "* x"), or "1. x" / "1) x", at any indent. Two or
+# more spaces deeper than the item above it nests the item.
+_LIST_ITEM = re.compile(r"^(\s*)([-*]|\d+[.)])\s+(.*)$")
+
+
+def _indent(prefix: str) -> int:
+    return len(prefix.replace("\t", "    "))
+
+
+def _list_tag(marker: str) -> str:
+    return "ul" if marker in ("-", "*") else "ol"
+
+
+def _render_list(items: list[tuple[int, str, str]]) -> str:
+    """Nested ``<ul>``/``<ol>`` from (indent, tag, text) items in order."""
+    html_parts: list[str] = []
+    stack: list[tuple[int, str]] = []  # (indent, tag) of each open list
+    for indent, tag, text in items:
+        while stack and indent < stack[-1][0]:
+            html_parts.append(f"</li></{stack.pop()[1]}>")
+        if stack and indent == stack[-1][0]:
+            if tag != stack[-1][1]:
+                html_parts.append(f"</li></{stack.pop()[1]}>")
+                html_parts.append(f"<{tag}>")
+                stack.append((indent, tag))
+            else:
+                html_parts.append("</li>")
+        elif not stack or indent > stack[-1][0]:
+            html_parts.append(f"<{tag}>")
+            stack.append((indent, tag))
+        html_parts.append(f"<li>{_inline(text)}")
+    while stack:
+        html_parts.append(f"</li></{stack.pop()[1]}>")
+    return "".join(html_parts)
 
 
 def markdown_to_blocks(md: str) -> list[str]:
@@ -143,12 +178,23 @@ def markdown_to_blocks(md: str) -> list[str]:
             out.append(f"<h1>{_inline(stripped[2:])}</h1>")
             i += 1
             continue
-        if stripped.startswith("- "):
-            items = []
-            while i < len(lines) and lines[i].strip().startswith("- "):
-                items.append(f"<li>{_inline(lines[i].strip()[2:])}</li>")
-                i += 1
-            out.append("<ul>" + "".join(items) + "</ul>")
+        if _LIST_ITEM.match(line):
+            items: list[tuple[int, str, str]] = []
+            while i < len(lines):
+                m = _LIST_ITEM.match(lines[i])
+                if m:
+                    items.append((_indent(m.group(1)), _list_tag(m.group(2)), m.group(3)))
+                    i += 1
+                    continue
+                cont = lines[i]
+                # A wrapped line indented under an item continues that item.
+                if items and cont.strip() and _indent(cont[: len(cont) - len(cont.lstrip())]) > items[-1][0]:
+                    indent, tag, text = items[-1]
+                    items[-1] = (indent, tag, f"{text} {cont.strip()}")
+                    i += 1
+                    continue
+                break
+            out.append(_render_list(items))
             continue
         if stripped.startswith("|"):
             rows = []
@@ -185,7 +231,7 @@ def markdown_to_blocks(md: str) -> list[str]:
         i += 1
         while i < len(lines):
             nxt = lines[i].strip()
-            if not nxt or nxt.startswith(("#", "- ", "|", "<svg")):
+            if not nxt or nxt.startswith(("#", "- ", "|", "<svg")) or _LIST_ITEM.match(lines[i]):
                 break
             para.append(nxt)
             i += 1

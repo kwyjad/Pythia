@@ -2,22 +2,51 @@ import React from "react";
 
 import { safeHref } from "./safe_href";
 
-const INLINE_TOKEN_REGEX = /(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|https?:\/\/\S+)/g;
+// Order matters: bold-italic before bold before italic; code spans are
+// matched as one token so nothing inside them is read as emphasis.
+const INLINE_TOKEN_REGEX =
+  /(`[^`]+`|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|(?<![\w*])\*[^*\s][^*]*\*(?![\w*])|(?<![\w])_[^_\s][^_]*_(?![\w])|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s)|]+)/g;
 const TABLE_ROW_REGEX = /^\|.+\|$/;
-const TABLE_SEP_REGEX = /^\|[\s:-]+\|$/;
+const TABLE_SEP_REGEX = /^\|[\s:|-]+\|$/;
 const HEADING_REGEX = /^(#{1,4})\s+(.*)$/;
-const ORDERED_LIST_REGEX = /^\d+[.)]\s+(.*)$/;
-const UNORDERED_LIST_REGEX = /^-\s+(.*)$/;
+const ORDERED_LIST_REGEX = /^(\s*)\d+[.)]\s+(.*)$/;
+const UNORDERED_LIST_REGEX = /^(\s*)-\s+(.*)$/;
 
 function renderInline(text: string): React.ReactNode[] {
   const parts = text.split(INLINE_TOKEN_REGEX).filter((part) => part !== "");
   let inlineKey = 0;
 
   return parts.map((part) => {
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`")) {
+      inlineKey += 1;
+      return (
+        <code
+          key={`code-${inlineKey}`}
+          className="rounded bg-fred-bg px-1 py-0.5 font-mono text-[0.9em] text-fred-text"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+
+    if (part.startsWith("***") && part.endsWith("***") && part.length > 6) {
+      inlineKey += 1;
+      return (
+        <strong key={`bi-${inlineKey}`}>
+          <em>{part.slice(3, -3)}</em>
+        </strong>
+      );
+    }
+
     if (part.startsWith("**")) {
       const content = part.replace(/\*+/g, "");
       inlineKey += 1;
       return <strong key={`bold-${inlineKey}`}>{content}</strong>;
+    }
+
+    if (/^\*[^*\s][^*]*\*$/.test(part) || /^_[^_\s][^_]*_$/.test(part)) {
+      inlineKey += 1;
+      return <em key={`em-${inlineKey}`}>{part.slice(1, -1)}</em>;
     }
 
     const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
@@ -62,12 +91,93 @@ function renderInline(text: string): React.ReactNode[] {
   });
 }
 
-export function renderSimpleMarkdown(md: string): React.ReactNode {
+type ListItem = { indent: number; ordered: boolean; content: React.ReactNode[] };
+type ListNode = { ordered: boolean; items: { content: React.ReactNode[]; children: ListNode[] }[] };
+
+/** Nest flat (indent, type) items: deeper indent opens a list inside the
+ *  item above it; a change of type at the same depth starts a new list. */
+export function buildListTree(items: ListItem[]): ListNode[] {
+  const roots: ListNode[] = [];
+  const stack: { indent: number; node: ListNode }[] = [];
+  items.forEach((item) => {
+    while (stack.length && item.indent < stack[stack.length - 1].indent) {
+      stack.pop();
+    }
+    let top = stack[stack.length - 1];
+    if (top && item.indent === top.indent && top.node.ordered !== item.ordered) {
+      stack.pop();
+      top = stack[stack.length - 1];
+    }
+    if (!top || item.indent > top.indent) {
+      const node: ListNode = { ordered: item.ordered, items: [] };
+      const parent = top?.node.items[top.node.items.length - 1];
+      if (parent) {
+        parent.children.push(node);
+      } else {
+        roots.push(node);
+      }
+      stack.push({ indent: item.indent, node });
+      top = stack[stack.length - 1];
+    }
+    top.node.items.push({ content: item.content, children: [] });
+  });
+  return roots;
+}
+
+function renderList(nodes: ListNode[], key: string): React.ReactNode {
+  return (
+    <React.Fragment key={key}>
+      {nodes.map((node, ni) => {
+        const Tag = node.ordered ? "ol" : "ul";
+        const cls = node.ordered
+          ? "my-2 list-decimal pl-6 space-y-1"
+          : "my-2 list-disc pl-6 space-y-1";
+        return (
+          <Tag key={`${key}-${ni}`} className={cls}>
+            {node.items.map((item, ii) => (
+              <li key={`${key}-${ni}-${ii}`} className="text-fred-text">
+                {item.content}
+                {item.children.length > 0 && renderList(item.children, `${key}-${ni}-${ii}-c`)}
+              </li>
+            ))}
+          </Tag>
+        );
+      })}
+    </React.Fragment>
+  );
+}
+
+/** The plain text of a heading line (markdown stripped), for a contents list. */
+function headingText(content: string): string {
+  return content
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*+([^*]+)\*+/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .trim();
+}
+
+/** Every level-2 heading, with the id renderSimpleMarkdown gives it when
+ *  called with `{ headingIds: true }`. */
+export function extractHeadings(md: string): { id: string; text: string }[] {
+  const out: { id: string; text: string }[] = [];
+  md.split(/\r?\n/).forEach((line) => {
+    const m = line.trim().match(HEADING_REGEX);
+    if (m && m[1].length === 2) {
+      out.push({ id: `sec-${out.length + 1}`, text: headingText(m[2]) });
+    }
+  });
+  return out;
+}
+
+export function renderSimpleMarkdown(
+  md: string,
+  options: { headingIds?: boolean } = {}
+): React.ReactNode {
+  let h2Count = 0;
   const lines = md.split(/\r?\n/);
   const elements: React.ReactNode[] = [];
   let paragraphLines: string[] = [];
-  let listType: "ul" | "ol" | null = null;
-  let listItems: React.ReactNode[][] = [];
+  let listItems: ListItem[] = [];
   let tableLines: string[] = [];
   let blockKey = 0;
 
@@ -138,28 +248,11 @@ export function renderSimpleMarkdown(md: string): React.ReactNode {
   };
 
   const flushList = () => {
-    if (!listType || listItems.length === 0) {
-      listType = null;
-      listItems = [];
+    if (listItems.length === 0) {
       return;
     }
-
     blockKey += 1;
-    const Tag = listType;
-    const listClass =
-      listType === "ol"
-        ? "my-4 list-decimal pl-6 space-y-1"
-        : "my-4 list-disc pl-6 space-y-1";
-    elements.push(
-      <Tag key={`list-${blockKey}`} className={listClass}>
-        {listItems.map((item, index) => (
-          <li key={`li-${blockKey}-${index}`} className="text-fred-text">
-            {item}
-          </li>
-        ))}
-      </Tag>
-    );
-    listType = null;
+    elements.push(renderList(buildListTree(listItems), `list-${blockKey}`));
     listItems = [];
   };
 
@@ -206,7 +299,11 @@ export function renderSimpleMarkdown(md: string): React.ReactNode {
         );
       } else if (level === 2) {
         elements.push(
-          <h2 key={`h2-${blockKey}`} className="mt-8 mb-3 text-xl font-semibold">
+          <h2
+            key={`h2-${blockKey}`}
+            id={options.headingIds ? `sec-${(h2Count += 1)}` : undefined}
+            className="mt-8 mb-3 scroll-mt-20 text-xl font-semibold"
+          >
             {renderInline(content)}
           </h2>
         );
@@ -226,29 +323,25 @@ export function renderSimpleMarkdown(md: string): React.ReactNode {
       return;
     }
 
-    const unorderedMatch = trimmed.match(UNORDERED_LIST_REGEX);
-    if (unorderedMatch) {
+    const listMatch = line.match(UNORDERED_LIST_REGEX) ?? line.match(ORDERED_LIST_REGEX);
+    if (listMatch) {
       flushParagraph();
-      if (listType && listType !== "ul") {
-        flushList();
-      }
-      listType = "ul";
-      listItems.push(renderInline(unorderedMatch[1]));
+      listItems.push({
+        indent: listMatch[1].replace(/\t/g, "    ").length,
+        ordered: !UNORDERED_LIST_REGEX.test(line),
+        content: renderInline(listMatch[2]),
+      });
       return;
     }
 
-    const orderedMatch = trimmed.match(ORDERED_LIST_REGEX);
-    if (orderedMatch) {
-      flushParagraph();
-      if (listType && listType !== "ol") {
-        flushList();
-      }
-      listType = "ol";
-      listItems.push(renderInline(orderedMatch[1]));
+    // A wrapped line indented under a list item continues that item.
+    if (listItems.length > 0 && line.length - line.trimStart().length > 0) {
+      const last = listItems[listItems.length - 1];
+      last.content = [...last.content, " ", ...renderInline(trimmed)];
       return;
     }
 
-    if (listType) {
+    if (listItems.length > 0) {
       flushList();
     }
     paragraphLines.push(trimmed);
