@@ -106,12 +106,12 @@ jobs:
             exit 1
           fi
           mkdir -p diagnostics
-          extra=""
+          extra=()
           if [ "${IN_REPLAY}" = "true" ]; then
-            extra="--replay --replay-max-usd ${IN_REPLAY_MAX_USD}"
+            extra=(--replay --replay-max-usd "${IN_REPLAY_MAX_USD}")
           fi
           python -m pythia.tools.rc_recall_check --db-url "${PYTHIA_DB_URL}" \
-            --out diagnostics/rc_recall_check.md ${extra}
+            --out diagnostics/rc_recall_check.md "${extra[@]}"
 
       - name: Upload report
         if: always()
