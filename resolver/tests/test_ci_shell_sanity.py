@@ -459,3 +459,23 @@ def test_the_archive_keeps_its_report_for_the_watchdog():
     assert "retention-days: 90" in step, "the watchdog reads these back over 90 days"
     watchdog = (WF_DIR / "cron_watchdog.yml").read_text(encoding="utf-8")
     assert "scripts.ci.check_drive_archive" in watchdog
+
+
+def test_the_analysis_reports_sync_reads_drive_with_its_own_remote():
+    """The reports sync names its rclone secret in one step, removes the config
+    always, never reads Drive through the archive's remote, and is green with
+    the secret missing (a summary says so)."""
+    text = (WF_DIR / "sync_analysis_reports.yml").read_text(encoding="utf-8")
+    assert "RCLONE_CONF_B64" not in text.replace("RCLONE_REPORTS_CONF_B64", "")
+    for m in re.finditer(r"secrets\.RCLONE_REPORTS_CONF_B64", text):
+        head = text[:m.start()]
+        assert head[head.rfind("- name:"):].splitlines()[0] == "- name: Write rclone config"
+    removal = _step(text, "Remove rclone config")
+    assert "if: always()" in removal and 'rm -rf "${RUNNER_TEMP}/rclone"' in removal
+    write = _step(text, "Write rclone config")
+    assert "configured=false" in write and "GITHUB_STEP_SUMMARY" in write and "exit 0" in write
+    # The index goes up after the assets it names.
+    upload = _step(text, "Upload changed assets, then the index")
+    assert upload.index("--clobber\n            echo") < upload.index("reports_out/index.json")
+    assert "gh release delete" not in text and "delete-asset" not in text
+    assert "pythia-data-latest" not in text

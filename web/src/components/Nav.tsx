@@ -22,6 +22,7 @@ export const NAV_LINKS: Array<{
   { href: "/sibyl", label: "Sibyl" },
   { href: "/costs", label: "Costs" },
   { href: "/performance", label: "Performance" },
+  { href: "/performance-analysis", label: "Performance Analysis" },
   { href: "/downloads", label: "Downloads" },
   { href: "/about", label: "About" },
   {

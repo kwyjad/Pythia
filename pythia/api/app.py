@@ -644,6 +644,7 @@ def get_ui_run(ui_run_id: str):
 # resolver explorer -> downloads -> costs.
 # ---------------------------------------------------------------------------
 from pythia.api.routes import (  # noqa: E402
+    analysis_reports as _analysis_reports_routes,
     costs as _costs_routes,
     diagnostics as _diagnostics_routes,
     downloads as _downloads_routes,
@@ -730,6 +731,7 @@ app.include_router(_downloads_routes.router)
 app.include_router(_costs_routes.router)
 app.include_router(_sibyl_routes.router)
 app.include_router(_interpreter_routes.router)
+app.include_router(_analysis_reports_routes.router)
 
 # ---------------------------------------------------------------------------
 # Backward-compat re-exports of names moved into route modules.

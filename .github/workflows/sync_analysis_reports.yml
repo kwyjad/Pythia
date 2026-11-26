@@ -1,0 +1,192 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Copy the analysis reports from Google Drive into a GitHub release.
+#
+# Scheduled Claude sessions write three kinds of report into Drive,
+# Fred_archive/Performance_Reports/<YYYY>/ (skill analysis, resolver
+# pipeline review, forecast pipeline review). The dashboard API reads GitHub
+# release assets only and never Drive, so this job copies each report, a PDF
+# of it, and index.json into the analysis-reports release (never the data
+# release). The Performance Analysis page reads that index through the API.
+#
+# Drive is read with a SEPARATE rclone remote, fred_reports, signed in with
+# the drive.readonly scope and rooted at the Performance_Reports folder
+# (root_folder_id). The archive's remote uses drive.file and cannot see files
+# another app wrote, which these are. Setup: docs/SECRETS.md, "Analysis
+# reports". With the secret missing the job says so and exits green.
+#
+# Not workflow_run, and outside the pythia-resolver-db group: it touches no
+# database.
+
+name: Sync Analysis Reports
+
+on:
+  schedule:
+    # After the reports land: the forecast review task runs 07:58 UTC, the
+    # skill report 06:57 UTC on the 12th.
+    - cron: "41 9 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Re-render every PDF, not only new or changed reports"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-analysis-reports
+  cancel-in-progress: false
+
+env:
+  ANALYSIS_REPORTS_TAG: analysis-reports
+  RCLONE_REMOTE: fred_reports
+
+jobs:
+  sync:
+    name: Drive reports to the analysis-reports release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Write rclone config
+        id: conf
+        env:
+          RCLONE_REPORTS_CONF_B64: ${{ secrets.RCLONE_REPORTS_CONF_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RCLONE_REPORTS_CONF_B64:-}" ]; then
+            echo "::warning title=Analysis reports not configured::The RCLONE_REPORTS_CONF_B64 secret is missing. See docs/SECRETS.md, 'Analysis reports'."
+            {
+              echo "## Analysis reports sync"
+              echo ""
+              echo "Not configured: the \`RCLONE_REPORTS_CONF_B64\` secret is missing, so nothing was read from Drive."
+              echo "See docs/SECRETS.md, 'Analysis reports'."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/rclone"
+          printf '%s' "${RCLONE_REPORTS_CONF_B64}" | base64 -d > "${RUNNER_TEMP}/rclone/rclone.conf"
+          chmod 600 "${RUNNER_TEMP}/rclone/rclone.conf"
+          echo "RCLONE_CONFIG=${RUNNER_TEMP}/rclone/rclone.conf" >> "$GITHUB_ENV"
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.conf.outputs.configured == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install rclone, WeasyPrint and Python deps
+        if: steps.conf.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq rclone libpango-1.0-0 libpangoft2-1.0-0 >/dev/null
+          rclone version | head -1
+          python3 -m pip install --quiet "weasyprint==70.0"
+
+      - name: Check the remote is the reports folder
+        if: steps.conf.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          # The remote's root_folder_id is Performance_Reports, so it lists the
+          # year folders (and template/) directly.
+          rclone lsjson "${RCLONE_REMOTE}:" --dirs-only --max-depth 1 > "${RUNNER_TEMP}/top.json"
+          YEARS="$(python3 -c 'import json,re,sys; d=json.load(open(sys.argv[1])); print(" ".join(sorted(e["Name"] for e in d if re.fullmatch(r"\d{4}", e.get("Name","")))))' "${RUNNER_TEMP}/top.json")"
+          if [ -z "${YEARS}" ]; then
+            echo "::error title=Analysis reports remote::${RCLONE_REMOTE}: lists no 4-digit year folder. Its root_folder_id must be the Performance_Reports folder."
+            exit 1
+          fi
+          echo "Year folders: ${YEARS}"
+
+      - name: Copy reports from Drive
+        if: steps.conf.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p reports_src
+          FILTER=(--include "/[0-9][0-9][0-9][0-9]/*.md")
+          rclone lsjson "${RCLONE_REMOTE}:" -R --files-only "${FILTER[@]}" > "${RUNNER_TEMP}/files.json"
+          rclone copy "${RCLONE_REMOTE}:" reports_src "${FILTER[@]}"
+          find reports_src -type f | sort
+
+      - name: Fetch the current index
+        if: steps.conf.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p prev
+          if gh release view "${ANALYSIS_REPORTS_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release download "${ANALYSIS_REPORTS_TAG}" --repo "${REPO}" -p index.json -D prev --clobber || echo "No index.json yet."
+          else
+            gh release create "${ANALYSIS_REPORTS_TAG}" --repo "${REPO}" --prerelease \
+              --title "Analysis reports" \
+              --notes "Fred's analysis reports (skill analysis, resolver and forecast pipeline reviews), copied from Drive by sync_analysis_reports.yml. Read by the dashboard's Performance Analysis page. Separate from the data release."
+          fi
+
+      - name: Parse, scan and render
+        if: steps.conf.outputs.configured == 'true'
+        env:
+          # In the environment so the credential scan looks for it.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_FORCE: ${{ inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          ARGS=()
+          # A boolean input can arrive as the STRING "false" over the REST API.
+          if [ "${IN_FORCE:-}" = "true" ]; then
+            ARGS+=(--force-rebuild)
+          fi
+          python3 -m scripts.ci.analysis_reports build \
+            --src reports_src --out reports_out \
+            --previous-index prev/index.json \
+            --modtimes "${RUNNER_TEMP}/files.json" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --report-json diagnostics/analysis_reports_sync.json \
+            "${ARGS[@]}"
+
+      - name: Upload changed assets, then the index
+        if: steps.conf.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Only the assets that changed; never a delete. The index goes last,
+          # so it never names an asset that is not there yet.
+          python3 -c 'import json; [print(u) for u in json.load(open("diagnostics/analysis_reports_sync.json"))["uploads"]]' > "${RUNNER_TEMP}/uploads.txt"
+          while IFS= read -r asset; do
+            [ -n "${asset}" ] || continue
+            gh release upload "${ANALYSIS_REPORTS_TAG}" "reports_out/${asset}" --repo "${REPO}" --clobber
+            echo "uploaded ${asset}"
+          done < "${RUNNER_TEMP}/uploads.txt"
+          gh release upload "${ANALYSIS_REPORTS_TAG}" reports_out/index.json --repo "${REPO}" --clobber
+
+      - name: Keep the sync report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-reports-sync
+          path: |
+            diagnostics/analysis_reports_sync.json
+            reports_out/index.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Remove rclone config
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/rclone"
