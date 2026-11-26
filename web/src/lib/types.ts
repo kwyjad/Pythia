@@ -347,6 +347,10 @@ export type ActiveModel = {
   model_id: string;
   model_name: string;
   role: "ensemble" | "track2";
+  /** llm.model_families key; absent from an older API, null outside a family. */
+  family?: string | null;
+  /** Earlier versions of the family, newest first, as their scores name them. */
+  predecessors?: string[];
 };
 
 export type PerformanceTimeseriesRow = {

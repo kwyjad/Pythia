@@ -264,3 +264,31 @@ def test_every_configured_model_maps_to_the_name_its_rows_carry() -> None:
     assert {a["model_id"] for a in active if a["role"] == "ensemble"} == voting
     cli_src = (Path(__file__).resolve().parents[2] / "forecaster" / "cli.py").read_text()
     assert f'"{llm_profiles.TRACK2_MODEL_NAME}"' in cli_src
+
+
+def test_active_models_carry_family_and_predecessors() -> None:
+    """Each active entry names its family and the earlier versions of it, so
+    the Performance page can show a predecessor as superseded."""
+    from pythia import llm_profiles
+
+    pythia_config.load.cache_clear()
+    active = llm_profiles.active_scored_models()
+    for a in active:
+        assert "family" in a and "predecessors" in a, a
+        assert isinstance(a["predecessors"], list)
+    claude = next(a for a in active if a["model_id"] == "claude-opus-5-5")
+    assert claude["family"] == "claude"
+    assert claude["predecessors"][0] == "claude-opus-5"
+    t2 = next(a for a in active if a["role"] == "track2")
+    assert t2["model_name"] == llm_profiles.TRACK2_MODEL_NAME
+    assert t2["family"] == llm_profiles.model_family(t2["model_id"])
+
+
+def test_active_models_empty_when_the_profile_cannot_be_read(monkeypatch) -> None:
+    from pythia import llm_profiles
+
+    def boom():
+        raise RuntimeError("no profile")
+
+    monkeypatch.setattr(llm_profiles, "get_ensemble_resolved", boom)
+    assert perf._active_models() == []

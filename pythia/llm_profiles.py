@@ -314,16 +314,30 @@ def stored_model_name(model_id: str, display_name: Optional[str] = None) -> str:
     return str(model_id or "").replace("/", "-")
 
 
-def active_scored_models() -> List[Dict[str, str]]:
+def active_scored_models() -> List[Dict[str, Any]]:
     """The models the current profile forecasts with, as scores names them.
 
     One entry per voting ensemble member (role ``ensemble``) and one for the
     Track 2 model (role ``track2``, stored as :data:`TRACK2_MODEL_NAME`).
-    Each entry: ``{"model_id", "model_name", "role"}``.
+    Each entry: ``{"model_id", "model_name", "role", "family",
+    "predecessors"}``. ``family`` is the ``llm.model_families`` key (None when
+    the id is in no family); ``predecessors`` lists the earlier versions of
+    the family, newest first, as the ``model_name`` their scores carry, so the
+    Performance page can label a predecessor "superseded" rather than
+    "retired". A predecessor is stored under its model id unless it is also a
+    current member with a ``display_name``.
     """
-    out: List[Dict[str, str]] = []
+    out: List[Dict[str, Any]] = []
     voting = set(voting_ensemble_model_ids())
-    for entry in get_ensemble_resolved():
+    ensemble = get_ensemble_resolved()
+    display_by_id = {
+        e.get("model_id"): e.get("display_name") for e in ensemble if e.get("model_id")
+    }
+
+    def _preds(mid: str) -> List[str]:
+        return [stored_model_name(p, display_by_id.get(p)) for p in family_predecessors(mid)]
+
+    for entry in ensemble:
         mid = entry.get("model_id") or ""
         if mid not in voting:
             continue
@@ -331,9 +345,17 @@ def active_scored_models() -> List[Dict[str, str]]:
             "model_id": mid,
             "model_name": stored_model_name(mid, entry.get("display_name")),
             "role": "ensemble",
+            "family": model_family(mid),
+            "predecessors": _preds(mid),
         })
     t2 = get_role_model("track2_spd")
     if t2:
         _, t2_id = split_model_ref(t2)
-        out.append({"model_id": t2_id, "model_name": TRACK2_MODEL_NAME, "role": "track2"})
+        out.append({
+            "model_id": t2_id,
+            "model_name": TRACK2_MODEL_NAME,
+            "role": "track2",
+            "family": model_family(t2_id),
+            "predecessors": _preds(t2_id),
+        })
     return out
