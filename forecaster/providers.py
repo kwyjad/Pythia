@@ -483,7 +483,7 @@ _forecaster_cfg = _cfg.get("forecaster", {}) if isinstance(_cfg, dict) else {}
 def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | None = None) -> str:
     """Return the display name stored as ``model_name`` in forecasts_raw / scores / llm_calls.
 
-    Uses the specific model id (e.g. ``gemini-3.6-flash``, ``gpt-6-sol``) so
+    Uses the specific model id (e.g. ``gemini-3.8-flash``, ``gpt-6.1-sol``) so
     dashboards, downloads, and calibration weights always reference a clear,
     unambiguous model — never a generic family label like "Gemini" or
     "Gemini Flash". An explicit ``display_name`` in config still wins.

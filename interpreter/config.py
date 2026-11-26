@@ -9,7 +9,7 @@ Env vars (see CLAUDE.md's table):
 - PYTHIA_INTERPRETER_ENABLED (default 1) — kill switch.
 - PYTHIA_INTERPRETER_MODEL_ID — purpose-specific override, wins over the
   config ``interpreter`` role (same precedence rule as every other role).
-- PYTHIA_INTERPRETER_TEMPLATE_VERSION (default v1).
+- PYTHIA_INTERPRETER_TEMPLATE_VERSION (default v4).
 - PYTHIA_INTERPRETER_MAX_PACK_TOKENS (default 250000) — hard model-input cap.
 - PYTHIA_INTERPRETER_TOP_N (default 8) — attention list length.
 - PYTHIA_INTERPRETER_PER_CAPITA_FLOOR (default 10000).
