@@ -8,7 +8,9 @@
 # Gemini 3.8 Flash) before the swap merges: Gemini model metadata, one real
 # SPD call per new model through the sync path, and a two-item Argon batch.
 # Writes nothing to any database (PYTHIA_TEST_MODE=1, no DB URL), so it is
-# not in the pythia-resolver-db concurrency group. Dispatch only.
+# not in the pythia-resolver-db concurrency group. Dispatch, plus a pull
+# request that changes the probe itself (a workflow that exists only on a
+# branch cannot be dispatched, so this is how it runs before it merges).
 name: Probe model lineup
 
 on:
@@ -22,6 +24,10 @@ on:
         description: "Skip the Argon batch"
         type: boolean
         default: false
+  pull_request:
+    paths:
+      - "tools/probe_model_lineup.py"
+      - ".github/workflows/probe_model_lineup.yml"
 
 permissions:
   contents: read
