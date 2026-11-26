@@ -48,6 +48,8 @@ on:
       - "pythia/llm_batch.py"
       - "pythia/secret_scrub.py"
       - "pythia/model_costs.json"
+      - "tools/probe_model_lineup.py"
+      - ".github/workflows/probe_model_lineup.yml"
       # test_opus55_lineup.py pins Sibyl's model and effort defaults.
       - "sibyl/config.py"
       - "sibyl/agent.py"
@@ -390,6 +392,8 @@ jobs:
             forecaster/tests/test_spd_model_params.py \
             forecaster/tests/test_opus55_lineup.py \
             forecaster/tests/test_gpt6_lineup.py \
+            forecaster/tests/test_dec2026_lineup.py \
+            forecaster/tests/test_probe_model_lineup.py \
             forecaster/tests/test_prices_cache_truncation.py
 
       - name: Run regime-change shift guidance tests

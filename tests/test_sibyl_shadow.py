@@ -82,7 +82,7 @@ def test_the_last_month_still_runs_and_the_alias_resolves_to_sol(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     s = sh.shadow_setup(today=date(2027, 4, 30), backtest=False)
     assert s.status == "on" and s.on
-    assert (s.provider, s.model_id) == ("openai", "gpt-6-sol")
+    assert (s.provider, s.model_id) == ("openai", "gpt-6.1-sol")
 
 
 def test_a_missing_key_skips_the_arm(monkeypatch, caplog):
@@ -198,7 +198,7 @@ def test_a_run_builds_the_shadow_series_and_publishes_only_sibyl(tmp_path, monke
         assert roles == [("production", 3), ("shadow", 1)]
         run = con.execute("SELECT shadow_status, shadow_model, n_shadow_trials, n_search_calls "
                           "FROM sibyl_runs").fetchone()
-        assert run == ("on", "openai:gpt-6-sol", 1, 3)  # shadow searches are not counted
+        assert run == ("on", "openai:gpt-6.1-sol", 1, 3)  # shadow searches are not counted
     finally:
         con.close()
     sibyl_tools.reset_run_state()

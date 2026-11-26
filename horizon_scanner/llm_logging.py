@@ -168,6 +168,14 @@ def log_hs_llm_call(
 
     # For convenience, keep HS temperature in the usage JSON (no dedicated column).
     temperature = getattr(model_spec, "temperature", None)
+    try:
+        from forecaster.providers import google_drops_sampling
+
+        if google_drops_sampling(str(getattr(model_spec, "model_id", "") or "")):
+            # The model ignores sampling params and none was sent: record none.
+            temperature = None
+    except Exception:
+        pass
     if temperature is not None and "temperature" not in usage_dict:
         usage_dict["temperature"] = temperature
 

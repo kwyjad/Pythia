@@ -175,6 +175,108 @@ def reset_terminal_providers() -> None:
 # Data structures
 # ---------------------------------------------------------------------------
 
+# Gemini generations that take ``thinkingConfig.thinkingLevel``. Gemini 2.5
+# models use ``thinkingBudget`` instead and reject a level, so they stay out.
+# Literal id prefixes, same contract as the Anthropic and OpenAI guards: a new
+# generation needs its own entry here, or its thinking setting is dropped from
+# every request without any error (which is what happened to gemini_pro's
+# ``thinking: medium`` before the 3.x gate was widened in July 2026).
+_GEMINI_THINKING_LEVEL_PREFIXES = ("gemini-3-", "gemini-3.", "gemini-4-", "gemini-4.")
+
+# Gemini generations that IGNORE sampling parameters (Gemini 4 Argon: Google's
+# migration notes say to remove temperature, top_p, top_k and candidate_count).
+# They are dropped from the request body, sync and batch alike, and the
+# effective temperature is reported as None so no llm_calls row claims a
+# temperature that was never applied.
+_GEMINI_NO_SAMPLING_PREFIXES = ("gemini-4-", "gemini-4.")
+
+# Thinking levels a Gemini generation accepts, where it accepts fewer than
+# Gemini 3.x. Argon: low | medium | high (medium is its default); ``minimal``
+# is a 400 and ``thinkingBudget`` is deprecated (a 400 beside thinkingLevel,
+# so this module never sends it to any thinking-level model).
+_GEMINI_ALLOWED_THINKING_LEVELS = {
+    "gemini-4-": frozenset({"low", "medium", "high"}),
+    "gemini-4.": frozenset({"low", "medium", "high"}),
+}
+
+# Argon's non-streaming REST output ceiling. Thinking tokens count against it,
+# so it is sent explicitly: left unset, a long think can end the answer early
+# and the only sign is finishReason=MAX_TOKENS (google_finish_problem flags it).
+_GEMINI_ARGON_MAX_OUTPUT_DEFAULT = 32768
+# Google advises HTTP timeouts of at least 20 minutes per Argon call. Only the
+# sync fallback path waits on a single call (batch is the normal route), but a
+# 300 s timeout there would turn a slow answer into a dropped member.
+_GEMINI_ARGON_SYNC_TIMEOUT_DEFAULT = 1200.0
+
+
+def _bare_google_model(model_id: str) -> str:
+    mid = (model_id or "").strip().lower()
+    return mid.split("/", 1)[-1] if "/" in mid else mid
+
+
+def _supports_thinking_level(model_id: str) -> bool:
+    """True for Gemini ids that take ``thinkingConfig.thinkingLevel``.
+
+    Gemini 3.x (gemini-3-*, gemini-3.1-*, gemini-3.6-*, gemini-3.8-*, ...) and
+    Gemini 4.x (gemini-4-argon, ...). Gemini 2.5 ids return False.
+    """
+
+    return _bare_google_model(model_id).startswith(_GEMINI_THINKING_LEVEL_PREFIXES)
+
+
+# Kept for callers and tests written before Gemini 4; it now answers the
+# question every caller was actually asking.
+_is_gemini_3_family = _supports_thinking_level
+
+
+def _is_gemini_4_family(model_id: str) -> bool:
+    return _bare_google_model(model_id).startswith(("gemini-4-", "gemini-4."))
+
+
+def google_drops_sampling(model_id: str) -> bool:
+    """True when a Gemini model ignores temperature (Gemini 4 Argon)."""
+
+    return _bare_google_model(model_id).startswith(_GEMINI_NO_SAMPLING_PREFIXES)
+
+
+def validate_google_thinking_level(model_id: str, level: Optional[str]) -> None:
+    """Raise ValueError when ``level`` is not one the model accepts.
+
+    Called where a level is resolved (config load and resolve_request_params),
+    so an unsupported level fails loudly before any sync or batch body is built.
+    """
+
+    if not level:
+        return
+    lvl = str(level).strip().lower()
+    if lvl in ("", "off", "none"):
+        return
+    mid = _bare_google_model(model_id)
+    for prefix, allowed in _GEMINI_ALLOWED_THINKING_LEVELS.items():
+        if mid.startswith(prefix) and lvl not in allowed:
+            raise ValueError(
+                f"thinking level {level!r} is not supported by {model_id}; "
+                f"allowed: {sorted(allowed)}"
+            )
+
+
+def google_max_output_tokens(model_id: str) -> Optional[int]:
+    """Explicit maxOutputTokens for a Gemini model, or None to send nothing.
+
+    Only Gemini 4 Argon gets one (PYTHIA_GOOGLE_ARGON_MAX_OUTPUT_TOKENS,
+    default 32768). Gemini 3.x bodies are unchanged.
+    """
+
+    if not _is_gemini_4_family(model_id):
+        return None
+    raw = (os.getenv("PYTHIA_GOOGLE_ARGON_MAX_OUTPUT_TOKENS", "") or "").strip()
+    try:
+        value = int(raw) if raw else _GEMINI_ARGON_MAX_OUTPUT_DEFAULT
+    except ValueError:
+        value = _GEMINI_ARGON_MAX_OUTPUT_DEFAULT
+    return value if value > 0 else None
+
+
 @dataclass
 class ProviderResult:
     text: str
@@ -561,6 +663,10 @@ def _load_ensemble_from_config() -> List[ModelSpec]:
             thinking_val = entry.get("thinking")
             if isinstance(thinking_val, str) and thinking_val.strip():
                 ms.thinking = thinking_val.strip().lower()
+            if provider in {"google", "gemini"}:
+                # Fails at import: a level the model rejects (e.g. "minimal"
+                # on Gemini 4 Argon) must never reach a sync or batch body.
+                validate_google_thinking_level(model_id, ms.thinking)
 
             shadow_val = entry.get("shadow")
             ms.shadow = shadow_val is True or str(shadow_val).strip().lower() in {"true", "1", "yes"}
@@ -1105,28 +1211,45 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _is_gemini_3_family(model_id: str) -> bool:
-    """True for Gemini 3.x model ids (gemini-3-*, gemini-3.1-*, gemini-3.5-*, ...)."""
-
-    return (model_id or "").lower().startswith(("gemini-3-", "gemini-3."))
-
-
 def _google_model_family(model_id: str) -> Optional[str]:
-    """Classify a Gemini 3.x model id as "flash" or "pro".
+    """Classify a thinking-level Gemini id as "flash" or "pro".
 
     Used for the per-family SPD timeout / thinking-level env fallbacks.
     Substring-based so version bumps (gemini-3-flash-preview ->
-    gemini-3.5-flash -> gemini-3.6-flash) don't silently disable the env overrides.
+    gemini-3.6-flash -> gemini-3.8-flash) don't silently disable the env
+    overrides. A Gemini 4 id that names neither "flash" nor "lite"
+    (gemini-4-argon) is the frontier tier and classifies as "pro".
     """
 
-    mid = (model_id or "").lower()
-    if not _is_gemini_3_family(mid):
+    mid = _bare_google_model(model_id)
+    if not _supports_thinking_level(mid):
         return None
     if "flash" in mid:
         return "flash"
     if "pro" in mid:
         return "pro"
+    if _is_gemini_4_family(mid) and "lite" not in mid:
+        return "pro"
     return None
+
+
+def _google_spd_timeout(model_id: str) -> Optional[float]:
+    """Default sync SPD timeout for a Gemini model, by family.
+
+    Argon gets its own default (PYTHIA_GOOGLE_ARGON_TIMEOUT_SEC, 1200 s);
+    other pro and flash ids keep the 300 s defaults and their env overrides.
+    """
+
+    family = _google_model_family(model_id)
+    if family is None:
+        return None
+    if _is_gemini_4_family(model_id) and family == "pro":
+        return _resolve_timeout(
+            "PYTHIA_GOOGLE_ARGON_TIMEOUT_SEC", None, _GEMINI_ARGON_SYNC_TIMEOUT_DEFAULT
+        )
+    if family == "flash":
+        return _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 300.0)
+    return _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 300.0)
 
 
 def build_openai_body(
@@ -1594,7 +1717,7 @@ def call_anthropic(
 def build_google_body(
     prompt: str,
     model: str,
-    temperature: float,
+    temperature: Optional[float],
     *,
     thinking_level: Optional[str] = None,
 ) -> dict:
@@ -1602,15 +1725,26 @@ def build_google_body(
 
     Shared by the sync path (call_google) and the Batch API layer
     (pythia.llm_batch) so batch payloads are byte-identical to sync payloads.
-    Carries the Gemini-3.x-only thinkingConfig gate.
+    Every per-generation rule lives here, never in one path:
+
+    * thinkingConfig.thinkingLevel only for Gemini 3.x and 4.x
+      (_supports_thinking_level); thinkingBudget is never sent.
+    * Gemini 4 (Argon): no temperature (sampling params are ignored), an
+      explicit maxOutputTokens (google_max_output_tokens), and a thinking level
+      outside low|medium|high raises before the body exists.
+    * No explicit-cache field (cachedContent) is ever sent; Argon rejects it
+      and implicit caching needs none.
     """
 
     api_model = model.split("/", 1)[-1] if "/" in model else model
-    generation_config: Dict[str, Any] = {"temperature": float(temperature)}
-    # thinkingLevel is supported by the Gemini 3.x families (gemini-3-*,
-    # gemini-3.1-*, gemini-3.5-*, gemini-3.6-*); older 2.5 models use a different knob
-    # (thinkingBudget) and would reject this config.
-    if thinking_level and _is_gemini_3_family(api_model):
+    generation_config: Dict[str, Any] = {}
+    if temperature is not None and not google_drops_sampling(api_model):
+        generation_config["temperature"] = float(temperature)
+    max_out = google_max_output_tokens(api_model)
+    if max_out:
+        generation_config["maxOutputTokens"] = max_out
+    if thinking_level and _supports_thinking_level(api_model):
+        validate_google_thinking_level(api_model, thinking_level)
         generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
     return {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -1681,7 +1815,7 @@ def _google_usage_from_payload(payload: Any) -> Dict[str, Any]:
 def call_google(
     prompt: str,
     model: str,
-    temperature: float,
+    temperature: Optional[float],
     *,
     timeout_sec: Optional[float] = None,
     thinking_level: Optional[str] = None,
@@ -1738,7 +1872,7 @@ def call_google(
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
-def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[float, Optional[str]]:
+def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[Optional[float], Optional[str]]:
     """Resolve (effective_temperature, thinking_level) for a model spec.
 
     The single source of the per-model param rules used by call_chat_ms AND
@@ -1760,7 +1894,15 @@ def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[float, 
             thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
     if thinking_level in ("", "off", "none"):
         thinking_level = None
-    effective_temperature = ms.temperature if ms.temperature is not None else temperature
+    effective_temperature: Optional[float] = (
+        ms.temperature if ms.temperature is not None else temperature
+    )
+    if (ms.provider or "").lower() in {"google", "gemini"}:
+        # An unsupported level (e.g. "minimal" on Argon, from config or the
+        # env fallback) raises here, before a sync or batch body is built.
+        validate_google_thinking_level(ms.model_id, thinking_level)
+        if google_drops_sampling(ms.model_id):
+            effective_temperature = None
     return effective_temperature, thinking_level
 
 
@@ -2119,12 +2261,10 @@ async def call_chat_ms(
     effective_temperature, thinking_level = resolve_request_params(ms, temperature)
 
     if spd_google:
-        google_family = _google_model_family(ms.model_id)
         if not caller_timeout:
-            if google_family == "flash":
-                timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 300.0)
-            elif google_family == "pro":
-                timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 300.0)
+            family_timeout = _google_spd_timeout(ms.model_id)
+            if family_timeout is not None:
+                timeout_sec = family_timeout
         try:
             max_attempts = max(1, int(os.getenv("PYTHIA_GOOGLE_SPD_RETRIES", "1") or 1))
         except Exception:
