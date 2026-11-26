@@ -6,8 +6,8 @@
       "number": 0,
       "title": "Introductory System Overview",
       "file": "0_overview.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["System at a Glance", "1. Purpose", "2. Core objects", "15. Dashboard", "16. Operations", "Test Mode"],
       "code_paths": ["pythia/config.yaml", ".github/workflows/resolver_update.yml", ".github/workflows/pythia_pipeline_stage.yml", "horizon_scanner/hs_country_list.txt"]
     },
@@ -15,8 +15,8 @@
       "number": 1,
       "title": "Resolver",
       "file": "1_resolver.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["3. Resolver", "4. Structured data connectors"],
       "code_paths": ["resolver/connectors/", "resolver/ingestion/", "resolver/transform/", "resolver/tools/", "resolver/hazard_resolution/", "resolver/config/known_issues.yml", "pythia/tools/compute_resolutions.py", "pythia/tools/base_rate_spd.py", "pythia/tools/ace_pa_eligibility.py"]
     },
@@ -24,8 +24,8 @@
       "number": 2,
       "title": "Horizon Scan and Regime Change",
       "file": "2_horizon_scan.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["5. Web research", "6. Horizon Scanner", "7. Regime Change", "8. Adversarial evidence checks"],
       "code_paths": ["horizon_scanner/", "pythia/adversarial_check.py", "pythia/web_research/"]
     },
@@ -33,8 +33,8 @@
       "number": 3,
       "title": "Forecast: Tracks 1 and 2",
       "file": "3_forecast_tracks.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["10. Question bank", "12. Forecasting"],
       "code_paths": ["forecaster/", "scripts/create_questions_from_triage.py", "pythia/config.yaml", "pythia/llm_profiles.py", "pythia/buckets.py", "pythia/tools/family_recalibration.py"]
     },
@@ -42,8 +42,8 @@
       "number": 4,
       "title": "Forecast: Sibyl Track",
       "file": "4_sibyl.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["12b. Sibyl"],
       "code_paths": ["sibyl/", ".github/workflows/run_sibyl.yml"]
     },
@@ -52,7 +52,7 @@
       "title": "Resolution and Calibration (plus performance note)",
       "file": "5_resolution_calibration.pptx",
       "last_checked": "2026-11-26",
-      "last_checked_commit": "402ab2a",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["14. Scoring, calibration", "3. Resolver"],
       "code_paths": ["pythia/tools/compute_resolutions.py", "pythia/tools/compute_scores.py", "pythia/tools/compute_calibration_pythia.py", "pythia/tools/generate_calibration_advice.py", "pythia/tools/score_baselines.py", "pythia/tools/family_recalibration.py", "resolver/hazard_resolution/", "web/src/app/performance/"]
     },
@@ -60,8 +60,8 @@
       "number": 6,
       "title": "Scenarios",
       "file": "6_scenarios.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["13. Scenarios"],
       "code_paths": ["forecaster/scenario_writer.py"]
     },
@@ -69,8 +69,8 @@
       "number": 7,
       "title": "The Interpreter: Monthly Highlights Report",
       "file": "7_interpreter.pptx",
-      "last_checked": "2026-11-24",
-      "last_checked_commit": "43299ee",
+      "last_checked": "2026-11-26",
+      "last_checked_commit": "fda2635",
       "overview_sections": ["The monthly plain-language report"],
       "code_paths": ["interpreter/", "scripts/ai_bundle/build_current_run_bundle.py", "pythia/tools/compute_deviation.py"]
     }
