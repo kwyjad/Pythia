@@ -593,7 +593,7 @@ def _paired_stats(con, base: str, params: Dict[str, Any], *, left_sql: str,
     return _rows_from_cursor(_execute(con, sql, params or None))
 
 
-def _active_models() -> List[Dict[str, str]]:
+def _active_models() -> List[Dict[str, Any]]:
     """The current profile's voting members plus the Track 2 model, as the
     scores table names them (pythia.llm_profiles). Empty on any config
     failure: an unreadable profile must not take the page down."""

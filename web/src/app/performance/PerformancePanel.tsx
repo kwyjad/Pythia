@@ -20,6 +20,8 @@ import {
   TOOLTIP_MODELS_KPI,
   TOOLTIP_PAIRED_REFERENCE,
   TOOLTIP_SKILL_BAR,
+  TOOLTIP_TRACK2_NAME,
+  TOOLTIP_TRACK_SPLIT,
   ACE_PA_INDICATIVE_NOTE,
   isAcePa,
 } from "../../lib/score_glossary";
@@ -39,6 +41,14 @@ import {
   type SkillInfo,
   type Stat,
 } from "../../lib/performance_data";
+import {
+  buildStatusContext,
+  missingActiveModels,
+  placeholderScoreRow,
+  statusOf as modelStatusOf,
+  statusRank,
+  type RowStatus,
+} from "../../lib/model_status";
 import type {
   PairedScoreRow,
   PerformanceRunRow,
@@ -99,9 +109,11 @@ type PivotedRow = {
   status?: RowStatus;
   /** Paired skill vs climatology; null where none is drawn. */
   skill?: SkillInfo | null;
+  /** Superseded rows: the active successor's stored model_name. */
+  supersededBy?: string;
+  /** An active model with nothing scored under its name yet. */
+  placeholder?: boolean;
 };
-
-type RowStatus = "active" | "retired" | "aggregate" | "reference" | "other";
 
 // Aggregated row used by the By Run view after pivoting.
 type RunPivotedRow = {
@@ -283,15 +295,22 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
       const isExternal = row.key.startsWith("__ext_");
       const isSibyl = row.key === "sibyl";
       const retired = row.status === "retired";
+      const superseded = row.status === "superseded";
       return (
         <span
           className={`font-medium ${
-            isExternal ? "text-amber-800" : retired ? "text-fred-muted" : "text-fred-text"
+            isExternal ? "text-amber-800" : retired || superseded ? "text-fred-muted" : "text-fred-text"
           }`}
         >
           {row.status === "active" ? <ActiveBadge /> : null}
           {row.label}
+          {row.key === "track2_flash" ? <InfoTooltip text={TOOLTIP_TRACK2_NAME} /> : null}
           {retired ? <span className="ml-1.5 text-[10px] uppercase tracking-wide">retired</span> : null}
+          {superseded && row.supersededBy ? (
+            <span className="ml-1.5 text-[10px] tracking-wide" title={TOOLTIP_ACTIVE_MODEL}>
+              superseded by {formatModelName(row.supersededBy)}
+            </span>
+          ) : null}
           {isExternal ? (
             <InfoTooltip text={TOOLTIP_EXTERNAL_BENCHMARK} />
           ) : null}
@@ -472,7 +491,11 @@ function skillColumn(scale: number): SortableColumn<PivotedRow> {
         <SkillBar info={row.skill} scale={scale} />
       ) : (
         <span className="text-xs text-fred-muted">
-          {row.status === "retired" ? "retired" : "\u2014"}
+          {row.placeholder
+            ? "awaiting first scores"
+            : row.status === "retired"
+              ? "retired"
+              : "\u2014"}
         </span>
       ),
   };
@@ -813,30 +836,35 @@ export default function PerformancePanel({
 
   // ---- Model status and skill for the Detailed Scores rows -----------------
 
-  const activeNames = useMemo(
-    () => new Set((data.active_models ?? []).map((m) => m.model_name)),
-    [data],
-  );
-  const knowsActive = (data.active_models ?? []).length > 0;
+  const statusCtx = useMemo(() => buildStatusContext(data.active_models), [data]);
+  const knowsActive = statusCtx.knowsActive;
 
-  const statusOf = (key: string): RowStatus => {
-    if (activeNames.has(key)) return "active";
-    if (key.startsWith("__ext_")) return "reference";
-    if (isEnsembleModel(key) || key.startsWith("track2_") || key === "sibyl") return "aggregate";
-    if (knowsActive && isIndividualForecaster(key)) return "retired";
-    return "other";
-  };
-
-  const decorate = (rows: PivotedRow[]): PivotedRow[] =>
-    rows.map((r) => {
-      const status = statusOf(r.key);
-      const showSkill = status === "active" || (status === "aggregate" && isEnsembleModel(r.key));
+  /** Status for each row (lib/model_status), skill where it is drawn, and a
+   *  placeholder row for every active model nothing has been scored under
+   *  yet. Placeholders go in the model-keyed views only (Total, By Model):
+   *  the By Hazard and By Run rows are hazards and runs, not models. */
+  const decorate = (rows: PivotedRow[]): PivotedRow[] => {
+    const out: PivotedRow[] = rows.map((r) => {
+      const info = modelStatusOf(r.key, statusCtx);
+      const status: RowStatus = info.status;
+      // Superseded rows keep their bar: that record seeds the successor's
+      // calibration prior. Retired rows do not.
+      const showSkill =
+        status === "active" ||
+        status === "superseded" ||
+        (status === "aggregate" && isEnsembleModel(r.key));
       return {
         ...r,
         status,
+        supersededBy: info.supersededBy,
         skill: showSkill ? modelSkill(data.skill_rows ?? [], r.key, skillMetric) : null,
       };
     });
+    for (const m of missingActiveModels(data.active_models, rows.map((r) => r.key), track)) {
+      out.push(placeholderScoreRow(m, displayModelName(m.model_name)));
+    }
+    return out;
+  };
 
   /** Replace the cross-hazard medians (a median of medians when built from
    *  per-hazard rows) with the API's true per-model medians. */
@@ -855,8 +883,7 @@ export default function PerformancePanel({
     }));
   };
 
-  const pinActiveFirst = (row: PivotedRow): number =>
-    row.status === "active" ? 0 : row.status === "aggregate" ? 1 : row.status === "retired" ? 3 : 2;
+  const pinActiveFirst = (row: PivotedRow): number => statusRank(row.status);
 
   // ---- Helper to build pivoted rows from summary data ----------------------
 
@@ -912,7 +939,7 @@ export default function PerformancePanel({
         ),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, skillMetric],
+    [data, skillMetric, track],
   );
 
   // ---- By Hazard view ------------------------------------------------------
@@ -986,7 +1013,7 @@ export default function PerformancePanel({
     // the selected column; this order only breaks ties.
     return decorate(withTrueMedians(pivoted)).sort((a, b) => a.label.localeCompare(b.label));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, skillMetric]);
+  }, [data, skillMetric, track]);
 
   // One scale for every bar in the table, so lengths compare across rows.
   const skillTrackScale = useMemo(
@@ -1140,12 +1167,7 @@ export default function PerformancePanel({
               <span className="inline-flex items-center gap-1">
                 Track Split{" "}
                 <InfoTooltip
-                  text={
-                    "Breakdown of scored questions by track. Track 1 = full " +
-                    "ensemble; Track 2 = a single fast model (currently " +
-                    "gemini-3.6-flash). Older questions predate this split " +
-                    "and are counted only in Scored Questions above."
-                  }
+                  text={TOOLTIP_TRACK_SPLIT}
                 />
               </span>
             }
@@ -1394,7 +1416,7 @@ export default function PerformancePanel({
                 rowClassName={(row) =>
                   row.key.startsWith("__ext_")
                     ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
-                    : row.status === "retired"
+                    : row.status === "retired" || row.status === "superseded"
                       ? "text-fred-muted"
                       : undefined
                 }
@@ -1438,7 +1460,7 @@ export default function PerformancePanel({
                 rowClassName={(row) =>
                   row.key.startsWith("__ext_")
                     ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
-                    : row.status === "retired"
+                    : row.status === "retired" || row.status === "superseded"
                       ? "text-fred-muted"
                       : undefined
                 }

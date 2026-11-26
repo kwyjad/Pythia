@@ -203,4 +203,21 @@ export const TOOLTIP_SKILL_BAR =
 
 export const TOOLTIP_ACTIVE_MODEL =
   "Active: in the current forecasting lineup (a voting ensemble member or the " +
-  "Track 2 model). Rows without the badge are retired models, kept for the record.";
+  "Track 2 model). A model new to the lineup shows no scores until its first " +
+  "forecasts resolve: resolutions and scores run on the 11th of each month, for " +
+  "the months that have ended. Until then its row reads \"awaiting first scores\". " +
+  "\"Superseded by\" marks the version an active model replaced; its record " +
+  "still seeds the new version's calibration weight, so its skill bar stays. " +
+  "Retired: an older model with no successor in the lineup, kept for the record.";
+
+export const TOOLTIP_TRACK2_NAME =
+  "Track 2: one fast model forecasts each question with no regime-change flag. " +
+  "Its rows are stored as track2_flash whichever model backs the role, so the " +
+  "name stays the same across model swaps and the record spans them.";
+
+export const TOOLTIP_TRACK_SPLIT =
+  "Breakdown of scored questions by track. Track 1 = full ensemble; Track 2 = " +
+  "a single fast model (currently gemini-3.6-flash). The Track 2 rows are stored " +
+  "as track2_flash whichever model backs it, so the name is stable across model " +
+  "swaps. Older questions predate this split and are counted only in Scored " +
+  "Questions above.";
