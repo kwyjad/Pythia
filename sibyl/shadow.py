@@ -15,7 +15,7 @@ After every question of the run has had its production trials, each
 question that produced a forecast (controls excluded) gets one more trial
 on lane C, through the same loop and the same prompt, on
 ``SIBYL_SHADOW_MODEL`` (default the registry alias ``gpt``, i.e.
-``openai:gpt-6-sol``, at reasoning effort ``SIBYL_SHADOW_EFFORT``). Every
+``openai:gpt-6.1-sol`` since Dec 2026, at reasoning effort ``SIBYL_SHADOW_EFFORT``). Every
 dollar it spends is counted under its own cost kind (``shadow``).
 
 The shadow series is the production pool with the Claude lane C trial

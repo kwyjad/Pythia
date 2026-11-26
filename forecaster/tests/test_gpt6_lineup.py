@@ -36,7 +36,7 @@ def _openai_members():
 
 def test_the_openai_members_are_gpt6_with_pinned_effort() -> None:
     got = {ms.model_id: ms.thinking for ms in _openai_members()}
-    assert got == {"gpt-6-sol": "high", "gpt-6-luna": "medium"}
+    assert got == {"gpt-6.1-sol": "high", "gpt-6-luna": "medium"}
 
 
 def test_no_openai_role_is_below_gpt6() -> None:
@@ -44,8 +44,8 @@ def test_no_openai_role_is_below_gpt6() -> None:
 
     for role in ("hs_fallback", "grounding_openai", "grounding_openai_fallback"):
         ref = get_role_model(role)
-        assert ref.startswith("openai:gpt-6-"), f"{role} -> {ref}"
-        assert _ROLE_FALLBACKS[role].startswith("openai:gpt-6-"), role
+        assert ref.startswith(("openai:gpt-6-", "openai:gpt-6.")), f"{role} -> {ref}"
+        assert _ROLE_FALLBACKS[role].startswith(("openai:gpt-6-", "openai:gpt-6.")), role
 
 
 @pytest.mark.parametrize("model_id", ["gpt-6-sol", "gpt-6-luna", "GPT-6-Sol"])
