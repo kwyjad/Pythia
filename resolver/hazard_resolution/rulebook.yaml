@@ -1144,21 +1144,34 @@ conflict_displacement:
   extraction:
     enabled: true
     # The cache key. Distinct from extraction.prompt_version, so a PA cache
-    # entry can never answer a conflict question or the reverse.
-    prompt_version: conflict_v1
+    # entry can never answer a conflict question or the reverse. conflict_v2
+    # (Nov 2026) requires cumulative_or_new from new | cumulative |
+    # current_stock | unclear: under v1, 360 of the 505 figures rejected as
+    # not new had the flag left blank. A v1 answer whose figures all carry a
+    # definite flag is reused; one with a blank flag is read again.
+    prompt_version: conflict_v2
     # Its OWN monthly cap, counted over conflict_doc_extractions only. It
     # never draws on extraction.max_calls_per_month or the PA machine's
-    # live reserve, which count haz_doc_extractions. At the observed USD
-    # 0.0018 a call, 2000 calls is about USD 4 a month. A one-dispatch
+    # live reserve, which count haz_doc_extractions. At about USD 0.002 a
+    # call (the Oct 2026 backfill: 2,999 calls, USD 6.64), 2000 calls is
+    # about USD 4.4 a month. Since Nov 2026 the trailing window reads every
+    # listed ACE country (120 x 3 months); about 120 cells a month are new,
+    # near 1,100 calls at the measured documents per cell, so 2000 holds. A one-dispatch
     # backfill raises it through PYTHIA_CONFLICT_EXTRACTION_MONTHLY_CAP;
     # this default is never edited to clear a backlog.
     max_calls_per_month: 2000
+    # Documents read per country-month: the extraction call count per cell.
+    # Was documents.max_docs_per_cell = 5 until Nov 2026, when the yield
+    # report (2024-10..2026-10, 1,181 cells) found it binding in 486 of the
+    # 827 cells with a document, with 8,132 further matching documents
+    # unread (median 9 a capped cell). Raised to 15 only after the ACE
+    # ranking (reliefweb_docs.displacement_relevance) put displacement
+    # situation reports, flash updates and DTM flow products first, so the
+    # extra documents read are the ones most likely to state a figure. Its
+    # own key: the PA machine's reliefweb.documents.max_docs_per_cell (30)
+    # is a shared section and must not move.
+    max_docs_per_cell: 15
   documents:
-    # Documents read per country-month. The extraction call count per cell,
-    # so the first lever if the cap binds. Five, because the ranking puts
-    # OCHA and government documents first and the backfill (about 1,080
-    # cells) must fit one workflow job.
-    max_docs_per_cell: 5
     # Published month start .. month end + this many days. A figure for a
     # month is admissible only if its own date or period lies inside the
     # month; the pad only lets a later report state it.

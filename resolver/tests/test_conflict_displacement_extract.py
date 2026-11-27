@@ -126,7 +126,7 @@ def test_a_new_conflict_figure_inside_the_month_is_admitted(con, rulebook):
     assert best["value_type"] == "new_displacements"
     assert best["period_start"] == "2026-03-03" and best["period_end"] == "2026-03-18"
     assert best["doc_url"].endswith("/101")
-    assert best["prompt_version"] == "conflict_v1"
+    assert best["prompt_version"] == "conflict_v2"
     assert "12,500" in best["quote"]
     # The document went into the machine's shared cache, under ACE.
     n = con.execute(
@@ -172,19 +172,158 @@ def test_a_cumulative_figure_is_rejected(con, rulebook):
     assert _reasons(con) == {cde.REJECT_NOT_NEW: 1}
 
 
-def test_an_unstated_figure_is_rejected_as_not_new(con, rulebook):
-    row = _run(con, rulebook, [_item("101")], [_fig(cumulative_or_new="unstated")])
+@pytest.mark.parametrize("flag", ["", None, "unstated", "maybe"])
+def test_a_blank_flag_is_flag_missing_never_not_new(con, rulebook, flag):
+    fig = _fig()
+    if flag is None:
+        fig.pop("cumulative_or_new")
+    else:
+        fig["cumulative_or_new"] = flag
+    row = _run(con, rulebook, [_item("101")], [fig])
     assert row["reason"] == cde.CELL_NO_ADMISSIBLE
-    assert _reasons(con) == {cde.REJECT_NOT_NEW: 1}
+    assert _reasons(con) == {cde.REJECT_FLAG_MISSING: 1}
 
 
-def test_a_figure_for_another_month_is_rejected(con, rulebook):
+def test_unclear_has_its_own_reason_and_current_stock_is_not_new(con, rulebook):
+    fig_unclear = _fig(cumulative_or_new="unclear")
+    stock = _fig(value=8900000, quote="Since April 2023, 8,900,000 people have been displaced across Sudan.",
+                 cumulative_or_new="current_stock")
+    _run(con, rulebook, [_item("101")], [fig_unclear, stock])
+    assert _reasons(con) == {cde.REJECT_FLAG_UNCLEAR: 1, cde.REJECT_NOT_NEW: 1}
+
+
+def test_the_prompt_requires_the_flag_from_the_enum(con, rulebook):
+    calls: list[str] = []
+    _run(con, rulebook, [_item("101")], [_fig()], calls=calls)
+    assert '"new" | "cumulative" | "current_stock" | "unclear"' in calls[0]
+    assert "REQUIRED" in calls[0] and "Never leave it empty" in calls[0]
+    assert rulebook.get("conflict_displacement.extraction.prompt_version") == "conflict_v2"
+
+
+def _seed_v1(con, rulebook, figures, doc="101", ym="2026-03"):
+    """A cached v1 answer for one document, as the Oct 2026 backfill wrote it."""
+    _run(con, rulebook, [_item(doc)], [], ym=ym)  # caches the document text
+    con.execute("DELETE FROM conflict_doc_extractions")
+    con.execute(
+        "INSERT INTO conflict_doc_extractions (doc_id, iso3, year, month, hazard, model, "
+        "prompt_version, status, figures_json, cost_usd) VALUES (?, 'SDN', ?, ?, 'ACE', ?, "
+        "'conflict_v1', 'ok', ?, 0.002)",
+        [doc, int(ym[:4]), int(ym[5:]), MODEL, json.dumps({"figures": figures, "rejected": []})],
+    )
+
+
+def test_only_flag_missing_documents_are_read_again(con, rulebook):
+    blank = dict(_fig(cumulative_or_new="unstated"), doc_id="101")
+    _seed_v1(con, rulebook, [blank])
+    _seed_definite = dict(_fig(), doc_id="102")
+    con.execute(
+        "INSERT INTO conflict_doc_extractions (doc_id, iso3, year, month, hazard, model, "
+        "prompt_version, status, figures_json) VALUES ('102', 'SDN', 2026, 3, 'ACE', ?, "
+        "'conflict_v1', 'ok', ?)", [MODEL, json.dumps({"figures": [_seed_definite]})],
+    )
+    wanted = cde.flag_missing_documents(con, rulebook)
+    assert [(w["doc_id"], w["n_figures_flag_missing"]) for w in wanted] == [("101", 1)]
+    plan = cde.plan_reextract(con, rulebook, cde.load_budget(con, rulebook, TODAY))
+    assert plan["expected_calls"] == 1 and plan["documents"] == 1
+    calls: list[str] = []
+    out = cde.reextract_flag_missing(con, rulebook, call=_call([_fig()], calls),
+                                     model_ref=MODEL, today=TODAY)
+    assert len(calls) == 1 and out["calls_made"] == 1
+    # The document now has a v2 answer and is no longer wanted.
+    assert cde.flag_missing_documents(con, rulebook) == []
+    assert cde.extracted_figure(con, "SDN", "2026-03")["value_persons"] == 12500
+
+
+def test_a_definite_v1_answer_is_reused_and_not_paid_for_again(con, rulebook):
+    _seed_v1(con, rulebook, [dict(_fig(), doc_id="101")])
+    calls: list[str] = []
+    row = _run(con, rulebook, [_item("101")], [_fig()], calls=calls)
+    assert calls == [] and row["docs_cached"] == 1
+    assert row["reason"] == cde.CELL_ADMITTED
+
+
+def test_a_figure_for_another_month_is_routed_not_rejected(con, rulebook):
     fig = _fig(value=4000, unit="households",
                quote="In February, 4,000 families fled Tawila after attacks.",
                period_start="2026-02-01", period_end="2026-02-28")
+    # February not assessed yet: stored, not used, counted.
     row = _run(con, rulebook, [_item("101")], [fig])
     assert row["reason"] == cde.CELL_NO_ADMISSIBLE
-    assert _reasons(con) == {cde.REJECT_OUTSIDE_MONTH: 1}
+    assert _reasons(con) == {}
+    assert json.loads(row["detail_json"])["routing"]["routed_out_outside_window"] == 1
+    assert cde.extracted_figure(con, "SDN", "2026-02") is None
+    status = con.execute("SELECT status, routed_from_ym FROM conflict_displacement_candidates "
+                         "WHERE ym='2026-02'").fetchone()
+    assert status == (cde.STATUS_OUTSIDE_WINDOW, "2026-03")
+    # Once February is assessed (no documents of its own), the figure is its.
+    _run(con, rulebook, [], [], ym="2026-02")
+    best = cde.extracted_figure(con, "SDN", "2026-02")
+    assert best is not None and best["routed_from_ym"] == "2026-03"
+    feb = con.execute("SELECT reason, figures_admitted FROM conflict_displacement_cell_ledger "
+                      "WHERE iso3='SDN' AND ym='2026-02'").fetchone()
+    assert feb == (cde.CELL_ADMITTED, 1)
+
+
+def _figure(**over):
+    base = dict(value=12500, unit="people", quote="q", stated_by="OCHA", area="", date="",
+                cumulative_or_new="new", doc_id="9", doc_url="", doc_title="",
+                doc_date="2026-03-25", doc_source_rank=0, model=MODEL,
+                doc_primary_country="SDN", period_start="2026-03-03",
+                period_end="2026-03-18", cause="conflict")
+    base.update(over)
+    return cde.ConflictFigure(**base)
+
+
+def test_routing_to_the_next_and_previous_month(rulebook):
+    nxt = _figure(quote="next", doc_id="1", period_start="2026-04-01", period_end="2026-04-10",
+                  doc_date="2026-04-12")
+    prev = _figure(quote="prev", doc_id="2", period_start="2026-02-20", period_end="2026-02-27",
+                   doc_date="2026-03-05")
+    out = cde.admit_country({"2026-03": [nxt, prev]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-03", "2026-04"])
+    assert [f.quote for f, _v, _i in out.admitted["2026-04"]] == ["next"]
+    assert [f.quote for f, _v, _i in out.admitted["2026-02"]] == ["prev"]
+    assert out.admitted.get("2026-03", []) == []
+    assert out.routed_out == {"2026-03": 2}
+    assert out.routed_in == {"2026-02": 1, "2026-04": 1}
+    assert out.admitted["2026-04"][0][2]["routed_from_ym"] == "2026-03"
+
+
+def test_one_document_read_by_both_cells_counts_once(rulebook):
+    # A document published early April, read in the March cell (its window
+    # runs to April 30) and in the April cell, states a March figure.
+    in_march = _figure(doc_id="7", doc_date="2026-04-03")
+    in_april = _figure(doc_id="7", doc_date="2026-04-03")
+    out = cde.admit_country({"2026-03": [in_march], "2026-04": [in_april]}, "SDN", rulebook)
+    assert len(out.admitted["2026-03"]) == 1
+    assert out.admitted["2026-03"][0][2].get("routed_from_ym") is None  # the native reading
+    assert [r["reason"] for r in out.rejected["2026-04"]] == [cde.REASON_DUPLICATE_ACROSS_CELLS]
+    assert out.routed_in == {}
+
+
+def test_a_routed_figure_is_not_available_before_its_document(rulebook):
+    # A February figure stated in a document of 5 April: the rule alone
+    # (February end + 30 days = 30 March) would read it before it existed.
+    late = _figure(period_start="2026-02-10", period_end="2026-02-20", doc_date="2026-04-05")
+    out = cde.admit_country({"2026-04": [late]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-04"])
+    info = out.admitted["2026-02"][0][2]
+    assert info["available_on"] == "2026-04-05"
+    native = cde.admit_country({"2026-03": [_figure()]}, "SDN", rulebook)
+    assert native.admitted["2026-03"][0][2]["available_on"] == "2026-04-30"
+    assert cde.available_on("2026-02", "2026-03-01") == dt.date(2026, 3, 30)
+
+
+def test_the_ladder_reads_a_routed_figure_from_its_document_date(con, rulebook):
+    from pythia.tools import base_rate_spd as brs
+
+    late = _figure(period_start="2026-02-10", period_end="2026-02-20", doc_date="2026-04-05",
+                   quote="Between 10 and 20 February 2026, 12,500 people fled.")
+    out = cde.admit_country({"2026-04": [late]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-04"])
+    cde.write_country_candidates(con, "SDN", out, rulebook=rulebook, run_id="t")
+    reading = brs.conflict_ladder_lower(con)["SDN"]["2026-02"][0]
+    assert reading.available_on == dt.date(2026, 4, 5)
 
 
 def test_a_period_longer_than_the_month_is_rejected_never_apportioned(con, rulebook):
@@ -375,12 +514,15 @@ def test_resolver_update_runs_both_sources_non_fatally_with_their_own_timeouts()
     assert len(phase) == 3
     for step in phase:
         assert step.get("continue-on-error") is True, step["name"]
-        assert int(step["timeout-minutes"]) <= 270, step["name"]
+        assert int(step["timeout-minutes"]) <= 330, step["name"]
         assert "timeout " in step["run"] and "--summary-out" in step["run"], step["name"]
     backfill = next(s for s in phase if "BACKFILL" in s["name"])
     assert "displacement_backfill" in backfill["if"]
     assert backfill["env"][cde.CAP_OVERRIDE_ENV]
     assert "--plan-only" in backfill["run"]
+    assert "--compare-ranking" in backfill["run"] and "--reextract-flag-missing" in backfill["run"]
+    assert backfill["env"]["BACKFILL_SINCE"] == "2024-10"
+    assert float(backfill["env"]["BACKFILL_MAX_COST_USD"]) == 60
     # The rulebook default is never what a backfill edits.
     assert load_rulebook().get("conflict_displacement.extraction.max_calls_per_month") == 2000
 
@@ -429,3 +571,148 @@ def test_the_debug_bundle_reports_and_checks_both_sources(tmp_path, rulebook):
     builder._check_conflict_displacement_inside_its_month()
     check = builder.checks[-1]
     assert check["verdict"] == "FAIL" and "2026-04-02" in check["detail"]
+
+
+# --- the period against the calendar --------------------------------------------
+
+
+D = dt.date
+
+
+@pytest.mark.parametrize("start,end,ym,expected", [
+    # "In March" read in a February cell: inside another single month, not
+    # "longer than the month" (the pre-Nov-2026 label, which measured 31
+    # days against February's 28).
+    (D(2026, 3, 1), D(2026, 3, 31), "2026-02", cde.PERIOD_OTHER_MONTH),
+    (D(2026, 3, 1), D(2026, 3, 31), "2026-03", cde.PERIOD_INSIDE),
+    (D(2026, 2, 1), D(2026, 2, 28), "2026-03", cde.PERIOD_OTHER_MONTH),
+    # A 31-day May read in a 30-day April cell, and the reverse.
+    (D(2026, 5, 1), D(2026, 5, 31), "2026-04", cde.PERIOD_OTHER_MONTH),
+    (D(2026, 4, 1), D(2026, 4, 30), "2026-05", cde.PERIOD_OTHER_MONTH),
+    # Spans the April/May boundary in 31 days: crosses, never "longer".
+    (D(2026, 4, 15), D(2026, 5, 15), "2026-04", cde.PERIOD_CROSSES),
+    # 28 February to 1 March: crosses.
+    (D(2026, 2, 28), D(2026, 3, 1), "2026-02", cde.PERIOD_CROSSES),
+    # 32 days fits no month.
+    (D(2026, 3, 1), D(2026, 4, 1), "2026-03", cde.PERIOD_LONGER),
+    (None, None, "2026-03", cde.PERIOD_UNDATED),
+    (D(2026, 3, 9), D(2026, 3, 2), "2026-03", cde.PERIOD_REVERSED),
+])
+def test_periods_are_classified_against_the_calendar(start, end, ym, expected):
+    assert cde.classify_period(start, end, ym) == expected
+
+
+def test_a_whole_march_figure_read_in_february_is_routed_to_march(rulebook):
+    march = _figure(period_start="2026-03-01", period_end="2026-03-31", doc_date="2026-03-02")
+    out = cde.admit_country({"2026-02": [march]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-03"])
+    assert out.rejected["2026-02"] == []
+    assert len(out.admitted["2026-03"]) == 1
+
+
+# --- ranking and the document cap ---------------------------------------------
+
+
+def _doc(doc_id, title, body, source, hazard="ACE", fmt="News and Press Release",
+         created="2026-03-20T00:00:00+00:00"):
+    return {"id": doc_id, "fields": {
+        "title": title, "url": f"https://reliefweb.int/report/x/{doc_id}", "body": body,
+        "date": {"created": created, "original": created},
+        "source": [{"name": source, "shortname": source}],
+        "primary_country": {"iso3": "SDN"}, "country": [{"iso3": "SDN"}],
+        "format": [{"name": fmt}]}}
+
+
+def test_ranking_prefers_a_displacement_sitrep_over_a_higher_priority_unrelated_report(rulebook):
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    priority = [str(p) for p in rulebook.get("reliefweb.documents.source_priority")]
+    high, low = priority[0], "Norwegian Refugee Council"
+    unrelated = _doc("1", "Sudan: food security outlook", "Prices rose in March.", high,
+                     created="2026-03-28T00:00:00+00:00")
+    sitrep = _doc("2", "Sudan: El Fasher flash update No. 4",
+                  "Between 3 and 18 March, 12,500 people fled El Fasher.", low)
+    ranked, _ = docs_mod.select_documents([unrelated, sitrep], "SDN", "2026-03", "ACE", rulebook)
+    assert [d["doc_id"] for d in ranked] == ["2", "1"]
+    # Authority still breaks a tie between equally relevant documents.
+    twin = _doc("3", "Sudan: El Fasher flash update No. 5",
+                "Between 3 and 18 March, 12,500 people fled El Fasher.", high)
+    ranked, _ = docs_mod.select_documents([sitrep, twin], "SDN", "2026-03", "ACE", rulebook)
+    assert ranked[0]["doc_id"] == "3"
+
+
+def test_the_pa_machines_ranking_is_unchanged(rulebook):
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    priority = [str(p) for p in rulebook.get("reliefweb.documents.source_priority")]
+    unrelated = _doc("1", "Floods outlook", "Rain.", priority[0])
+    sitrep = _doc("2", "Flash update: people displaced", "Thousands fled.", "Somebody else")
+    ranked, _ = docs_mod.select_documents([sitrep, unrelated], "SDN", "2026-03", "FL", rulebook)
+    assert [d["doc_id"] for d in ranked] == ["1", "2"]
+
+
+def test_a_dtm_flow_product_scores_as_a_displacement_product():
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    doc = {"title": "DTM Sudan - Flash Alert: Mellit", "body": "", "sources": ["IOM"]}
+    assert docs_mod.displacement_relevance(doc) >= 3
+    assert docs_mod.displacement_relevance({"title": "Market prices", "body": "", "sources": []}) == 0
+
+
+def test_the_conflict_cap_is_its_own_and_moves_no_pa_fingerprint(rulebook):
+    assert rulebook.get("conflict_displacement.extraction.max_docs_per_cell") == 15
+    assert rulebook.get("reliefweb.documents.max_docs_per_cell") == 30
+    changed = copy.deepcopy(rulebook.raw)
+    changed["conflict_displacement"]["extraction"]["max_docs_per_cell"] = 3
+    edited = Rulebook(changed, rulebook.path)
+    for hazard in ("flood", "cyclone", "drought"):
+        assert rulebook.hazard_fingerprint(hazard) == edited.hazard_fingerprint(hazard)
+        assert rulebook.legacy_hazard_fingerprint(hazard) == edited.legacy_hazard_fingerprint(hazard)
+
+
+def test_the_cell_reads_up_to_the_conflict_cap(con, rulebook):
+    items = [_item(str(100 + i), body=BODY_SDN + f" Report {i}.") for i in range(20)]
+    calls: list[str] = []
+    row = _run(con, rulebook, items, [_fig()], calls=calls)
+    assert row["docs_selected"] == 15 and len(calls) == 15
+
+
+def test_compare_ranking_reports_what_the_new_selection_adds(con, rulebook):
+    items = [_item(str(100 + i), body=BODY_SDN + f" Report {i}.") for i in range(8)]
+    _run(con, rulebook, items[:5], [_fig()])  # read under the old cap of five
+    report = cde.compare_ranking(con, rulebook, post=_post(items))
+    assert report["cells_compared"] == 1 and report["previously_read"] == 5
+    assert report["added"] == 3 and report["expected_new_calls"] == 3
+    assert report["kept"] == 5 and report["dropped"] == 0
+
+
+# --- every listed ACE country is read ----------------------------------------
+
+
+def test_the_cell_list_includes_a_country_with_no_ace_question(con, monkeypatch):
+    con.execute("CREATE TABLE questions (iso3 TEXT, hazard_code TEXT, is_test BOOLEAN)")
+    con.execute("INSERT INTO questions VALUES ('SDN', 'ACE', FALSE)")
+    monkeypatch.setattr(cde, "listed_countries", lambda path=cde.COUNTRY_LIST: ["SDN", "LBR"])
+    assert cde.plan_countries(con) == ["SDN", "LBR"]
+
+
+def test_the_listed_countries_are_the_whole_horizon_scanner_list():
+    listed = cde.listed_countries()
+    assert len(listed) >= 100 and "SDN" in listed
+
+
+def test_months_since_runs_to_the_last_complete_month():
+    assert cde.months_since("2024-10", dt.date(2025, 1, 11)) == ["2024-12", "2024-11", "2024-10"]
+
+
+def test_the_plan_expects_calls_from_the_measured_documents(con, rulebook):
+    items = [_item(str(100 + i), body=BODY_SDN + f" Report {i}.") for i in range(3)]
+    _run(con, rulebook, items, [_fig()])
+    budget = cde.load_budget(con, rulebook, TODAY)
+    info = cde.plan(con, ["SDN", "COD"], ["2026-03"], rulebook, budget)
+    # SDN 2026-03 is measured (3 matched, 3 extracted: nothing new); COD is
+    # not, and is expected to read the measured mean (3).
+    assert info["cells_measured"] == 1
+    assert info["measured_documents_per_cell"] == 3
+    assert info["expected_calls"] == 3
+    assert info["expected_cost_usd"] == round(3 * info["cost_per_call_usd"], 2)

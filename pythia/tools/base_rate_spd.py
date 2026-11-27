@@ -702,6 +702,12 @@ def conflict_ladder_lower(con, *, before_ym: Optional[str] = None) -> ConflictLo
                 if value is None or (before_ym and str(ym) >= before_ym):
                     continue
                 avail = _month_end(str(ym)) + timedelta(days=CONFLICT_EXTRACTED_AVAILABLE_DAYS)
+                # A figure routed from another month's document (Nov 2026)
+                # is read no earlier than that document existed; for a
+                # native figure available_on IS the rule above.
+                stored = _iso_date(row.get("available_on"))
+                if stored is not None and stored > avail:
+                    avail = stored
                 ref = str(row.get("doc_url") or row.get("doc_id") or "")
                 out.setdefault(str(iso).upper(), {}).setdefault(str(ym), []).append(
                     ConflictReading(CONFLICT_RUNG_EXTRACTED, float(value), avail, False, ref)

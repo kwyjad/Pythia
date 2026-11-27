@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -199,6 +200,55 @@ def _document(
     }
 
 
+#: Hazard whose documents are ranked by what they say about displacement
+#: before authority (the conflict displacement source, Nov 2026).
+RELEVANCE_HAZARD = "ACE"
+
+_DISPLACEMENT_TERMS = re.compile(
+    r"\b(?:displac\w*|fled|flee\w*|idps?|newly\s+displaced|movements?)\b", re.IGNORECASE
+)
+_OCHA = re.compile(r"\bocha\b|coordination of humanitarian affairs", re.IGNORECASE)
+_OCHA_PRODUCT = re.compile(r"situation report|sitrep|flash update", re.IGNORECASE)
+_IOM = re.compile(r"\biom\b|international organization for migration|\bdtm\b", re.IGNORECASE)
+_DTM_FLOW = re.compile(
+    r"emergency (?:event )?tracking|\bett\b|flash alert|rapid displacement tracking|\brdt\b",
+    re.IGNORECASE,
+)
+_UNHCR = re.compile(r"\bunhcr\b|high commissioner for refugees", re.IGNORECASE)
+_PROTECTION_MONITORING = re.compile(r"protection monitoring", re.IGNORECASE)
+_CCCM_RRM = re.compile(r"\bcccm\b|\brrm\b|rapid response mechanism|camp coordination",
+                       re.IGNORECASE)
+
+
+def displacement_relevance(document: dict[str, Any]) -> int:
+    """How likely a document is to state new conflict displacement. Higher
+    is better; 0 says nothing. Pure, from the cached fields alone.
+
+    3 for a product built to report movement (an OCHA situation report or
+    flash update; an IOM DTM flow product: emergency tracking, flash alert,
+    rapid displacement tracking; UNHCR protection monitoring; a CCCM or RRM
+    update), plus 2 when the title names displacement, plus 1 when the body
+    does.
+    """
+
+    title = str(document.get("title") or "")
+    body = str(document.get("body") or "")
+    publishers = " ".join(str(p) for p in (document.get("sources") or []))
+    formats = " ".join(str(f) for f in (document.get("formats") or [])).lower()
+    product = 0
+    if _OCHA.search(publishers) and (_OCHA_PRODUCT.search(title) or "situation report" in formats):
+        product = 3
+    elif _IOM.search(publishers + " " + title) and _DTM_FLOW.search(title):
+        product = 3
+    elif _UNHCR.search(publishers) and _PROTECTION_MONITORING.search(title):
+        product = 3
+    elif _CCCM_RRM.search(title):
+        product = 3
+    return (product
+            + (2 if _DISPLACEMENT_TERMS.search(title) else 0)
+            + (1 if _DISPLACEMENT_TERMS.search(body) else 0))
+
+
 def sort_documents(documents: list[dict[str, Any]]) -> None:
     """Order documents in place: authority, then recency, then id.
 
@@ -211,10 +261,15 @@ def sort_documents(documents: list[dict[str, Any]]) -> None:
     documents.sort(key=lambda d: str(d.get("doc_id") or ""))
     documents.sort(key=lambda d: str(d.get("date_created") or ""), reverse=True)
     documents.sort(key=lambda d: int(d.get("source_rank") or 0))
+    if documents and all(str(d.get("hazard") or "") == RELEVANCE_HAZARD for d in documents):
+        # ACE (Nov 2026): what the document says about displacement first;
+        # authority then breaks ties. Every other hazard is unchanged.
+        documents.sort(key=displacement_relevance, reverse=True)
 
 
 def select_documents(
-    items: list[dict[str, Any]], iso3: str, ym: str, hazard: str, rulebook: Rulebook
+    items: list[dict[str, Any]], iso3: str, ym: str, hazard: str, rulebook: Rulebook,
+    *, cap: int | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Rank and cap the API's hits. Returns (selected, discarded_count).
 
@@ -228,7 +283,8 @@ def select_documents(
         if doc is not None
     ]
     sort_documents(documents)
-    cap = int(rulebook.get("reliefweb.documents.max_docs_per_cell"))
+    if cap is None:
+        cap = int(rulebook.get("reliefweb.documents.max_docs_per_cell"))
     return documents[:cap], max(0, len(documents) - cap)
 
 
