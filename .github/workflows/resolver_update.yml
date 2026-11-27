@@ -32,8 +32,8 @@ concurrency:
           History: acled_history (ACLED monthly fatalities from 2018-01 to the month before last,
           one API year at a time, then the reference scores re-run; months_back is ignored).
           Conflict displacement: displacement_sources (ReliefWeb extraction for the trailing
-          3 months + IOM DTM lower bounds), displacement_backfill (the extraction for the last
-          24 complete months, with the cap raised for this dispatch, + DTM).
+          3 months + IOM DTM lower bounds), displacement_backfill (every listed ACE country
+          from 2024-10, with the cap raised for this dispatch and a USD 60 stop, + DTM).
           Leave empty to run all. Examples: "gdacs" or "gdacs, fewsnet_ipc".
         required: false
         default: ""
@@ -975,11 +975,13 @@ jobs:
       # (cells, the most calls, the most it can cost) is printed before any
       # call is made.
       #
-      # One-dispatch backfill: only_connector=displacement_backfill reads the
-      # last 24 complete months for every ACE country, with the cap raised
-      # for THIS dispatch only. ~1,080 cells x at most 5 documents; the plan
-      # line prices it before it starts. A run that hits the clock says which
-      # cells it did not reach; a second dispatch resumes from the cache.
+      # One-dispatch backfill: only_connector=displacement_backfill reads every
+      # ACE country on hs_country_list.txt from 2024-10, with the cap raised
+      # for THIS dispatch only. It first reports what the new ranking would
+      # read (no model call), re-reads the documents whose flag was blank,
+      # and stops before any call when the expected cost exceeds USD 60. A
+      # run that hits the clock says which cells it did not reach; a second
+      # dispatch resumes from the cache.
       - name: "Phase 2.6: Conflict displacement, ReliefWeb extraction (trailing months)"
         id: phase26_extract
         timeout-minutes: 30
@@ -996,28 +998,59 @@ jobs:
             || echo "::warning::conflict displacement extraction failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
-      - name: "Phase 2.6: Conflict displacement, ReliefWeb extraction BACKFILL (24 months, dispatch)"
+      - name: "Phase 2.6: Conflict displacement, ReliefWeb extraction BACKFILL (from 2024-10, dispatch)"
         id: phase26_extract_backfill
-        timeout-minutes: 270
+        timeout-minutes: 330
         if: ${{ contains(inputs.only_connector, 'displacement_backfill') }}
         continue-on-error: true
         env:
           # One dispatch only: the rulebook default (2000) is never edited.
-          PYTHIA_CONFLICT_EXTRACTION_MONTHLY_CAP: "6000"
+          # Sized for every ACE country on hs_country_list.txt from 2024-10
+          # (about 14,000 calls expected at 15 documents a cell); the USD 60
+          # stop below is what bounds the spend.
+          PYTHIA_CONFLICT_EXTRACTION_MONTHLY_CAP: "25000"
+          BACKFILL_SINCE: "2024-10"
+          BACKFILL_MAX_COST_USD: "60"
         run: |
           set -o pipefail
           mkdir -p diagnostics
-          echo "::group::Conflict displacement extraction backfill (plan first)"
+          echo "::group::What the new ranking would read in the cells the old cap bound (no model call)"
+          timeout 20m python -m resolver.ingestion.conflict_displacement_extract \
+            --db "${BACKFILL_DB_PATH}" --compare-ranking \
+            --summary-out diagnostics/conflict_displacement_compare_ranking.json \
+            2>&1 | tee diagnostics/phase26_compare_ranking.log \
+            || echo "::warning::ranking comparison failed (non-fatal; exit $?)"
+          echo "::endgroup::"
+          echo "::group::Plans: re-read of blank-flag documents, then the backfill"
           python -m resolver.ingestion.conflict_displacement_extract \
-            --db "${BACKFILL_DB_PATH}" --trailing 24 --plan-only \
+            --db "${BACKFILL_DB_PATH}" --reextract-flag-missing --plan-only \
+            --summary-out diagnostics/conflict_displacement_reextract_plan.json \
+            2>&1 | tee diagnostics/phase26_reextract_plan.log
+          python -m resolver.ingestion.conflict_displacement_extract \
+            --db "${BACKFILL_DB_PATH}" --since "${BACKFILL_SINCE}" --plan-only \
             --summary-out diagnostics/conflict_displacement_extract_plan.json \
             2>&1 | tee diagnostics/phase26_conflict_extract_plan.log
-          timeout 265m python -m resolver.ingestion.conflict_displacement_extract \
-            --db "${BACKFILL_DB_PATH}" --trailing 24 --max-minutes 255 \
-            --summary-out diagnostics/conflict_displacement_extract.json \
-            2>&1 | tee diagnostics/phase26_conflict_extract.log \
-            || echo "::warning::conflict displacement backfill failed or timed out (non-fatal; exit $?)"
+          TOTAL=$(python3 -c "import json; a=json.load(open('diagnostics/conflict_displacement_reextract_plan.json')); b=json.load(open('diagnostics/conflict_displacement_extract_plan.json')); print(round(float(a['reextract_plan']['expected_cost_usd'])+float(b['plan']['expected_cost_usd']),2))")
+          echo "Expected cost of this dispatch: USD ${TOTAL} (stop above USD ${BACKFILL_MAX_COST_USD})" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "::endgroup::"
+          if python3 -c "import sys; sys.exit(0 if float('${TOTAL}') <= float('${BACKFILL_MAX_COST_USD}') else 1)"; then
+            echo "::group::Re-read blank-flag documents (cached text, no ReliefWeb fetch)"
+            timeout 30m python -m resolver.ingestion.conflict_displacement_extract \
+              --db "${BACKFILL_DB_PATH}" --reextract-flag-missing \
+              --summary-out diagnostics/conflict_displacement_reextract.json \
+              2>&1 | tee diagnostics/phase26_reextract.log \
+              || echo "::warning::blank-flag re-read failed or timed out (non-fatal; exit $?)"
+            echo "::endgroup::"
+            echo "::group::Conflict displacement extraction backfill"
+            timeout 265m python -m resolver.ingestion.conflict_displacement_extract \
+              --db "${BACKFILL_DB_PATH}" --since "${BACKFILL_SINCE}" --max-minutes 250 \
+              --summary-out diagnostics/conflict_displacement_extract.json \
+              2>&1 | tee diagnostics/phase26_conflict_extract.log \
+              || echo "::warning::conflict displacement backfill failed or timed out (non-fatal; exit $?)"
+            echo "::endgroup::"
+          else
+            echo "::error::expected cost USD ${TOTAL} exceeds USD ${BACKFILL_MAX_COST_USD}; no extraction was run"
+          fi
 
       - name: "Phase 2.6: Conflict displacement, IOM DTM lower bounds"
         id: phase26_dtm

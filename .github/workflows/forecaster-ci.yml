@@ -255,6 +255,9 @@ on:
       - "scripts/ci/ace_pa_rung_table.py"
       - "scripts/ci/conflict_extraction_yield.py"
       - "scripts/ci/tests/test_conflict_extraction_yield.py"
+      - "resolver/tests/test_conflict_displacement_extract.py"
+      - "resolver/ingestion/conflict_displacement_extract.py"
+      - "resolver/hazard_resolution/reliefweb_docs.py"
       - "resolver/ingestion/conflict_displacement_extract.py"
       - "resolver/ingestion/dtm_conflict.py"
 
@@ -635,6 +638,7 @@ jobs:
             pythia/tests/test_conflict_displacement_ladder.py \
             pythia/tests/test_ace_pa_ladder_class.py \
             scripts/ci/tests/test_conflict_extraction_yield.py \
+            resolver/tests/test_conflict_displacement_extract.py \
             pythia/tests/test_compute_resolutions.py \
             pythia/tests/test_pa_resolves_from_machine.py \
             pythia/tests/test_resolutions_repair_question_provenance.py \

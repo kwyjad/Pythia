@@ -514,12 +514,15 @@ def test_resolver_update_runs_both_sources_non_fatally_with_their_own_timeouts()
     assert len(phase) == 3
     for step in phase:
         assert step.get("continue-on-error") is True, step["name"]
-        assert int(step["timeout-minutes"]) <= 270, step["name"]
+        assert int(step["timeout-minutes"]) <= 330, step["name"]
         assert "timeout " in step["run"] and "--summary-out" in step["run"], step["name"]
     backfill = next(s for s in phase if "BACKFILL" in s["name"])
     assert "displacement_backfill" in backfill["if"]
     assert backfill["env"][cde.CAP_OVERRIDE_ENV]
     assert "--plan-only" in backfill["run"]
+    assert "--compare-ranking" in backfill["run"] and "--reextract-flag-missing" in backfill["run"]
+    assert backfill["env"]["BACKFILL_SINCE"] == "2024-10"
+    assert float(backfill["env"]["BACKFILL_MAX_COST_USD"]) == 60
     # The rulebook default is never what a backfill edits.
     assert load_rulebook().get("conflict_displacement.extraction.max_calls_per_month") == 2000
 
@@ -681,3 +684,35 @@ def test_compare_ranking_reports_what_the_new_selection_adds(con, rulebook):
     assert report["cells_compared"] == 1 and report["previously_read"] == 5
     assert report["added"] == 3 and report["expected_new_calls"] == 3
     assert report["kept"] == 5 and report["dropped"] == 0
+
+
+# --- every listed ACE country is read ----------------------------------------
+
+
+def test_the_cell_list_includes_a_country_with_no_ace_question(con, monkeypatch):
+    con.execute("CREATE TABLE questions (iso3 TEXT, hazard_code TEXT, is_test BOOLEAN)")
+    con.execute("INSERT INTO questions VALUES ('SDN', 'ACE', FALSE)")
+    monkeypatch.setattr(cde, "listed_countries", lambda path=cde.COUNTRY_LIST: ["SDN", "LBR"])
+    assert cde.plan_countries(con) == ["SDN", "LBR"]
+
+
+def test_the_listed_countries_are_the_whole_horizon_scanner_list():
+    listed = cde.listed_countries()
+    assert len(listed) >= 100 and "SDN" in listed
+
+
+def test_months_since_runs_to_the_last_complete_month():
+    assert cde.months_since("2024-10", dt.date(2025, 1, 11)) == ["2024-12", "2024-11", "2024-10"]
+
+
+def test_the_plan_expects_calls_from_the_measured_documents(con, rulebook):
+    items = [_item(str(100 + i), body=BODY_SDN + f" Report {i}.") for i in range(3)]
+    _run(con, rulebook, items, [_fig()])
+    budget = cde.load_budget(con, rulebook, TODAY)
+    info = cde.plan(con, ["SDN", "COD"], ["2026-03"], rulebook, budget)
+    # SDN 2026-03 is measured (3 matched, 3 extracted: nothing new); COD is
+    # not, and is expected to read the measured mean (3).
+    assert info["cells_measured"] == 1
+    assert info["measured_documents_per_cell"] == 3
+    assert info["expected_calls"] == 3
+    assert info["expected_cost_usd"] == round(3 * info["cost_per_call_usd"], 2)

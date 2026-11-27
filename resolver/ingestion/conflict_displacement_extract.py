@@ -1821,16 +1821,32 @@ def ace_question_countries(con: "duckdb.DuckDBPyConnection") -> list[str]:
     return [r[0] for r in rows if r[0]]
 
 
-def plan_countries(con: "duckdb.DuckDBPyConnection", *, all_listed: bool = False) -> list[str]:
-    """ACE countries on the list: those with an ACE question, else every
-    listed country (or every listed country when ``all_listed``)."""
+def plan_countries(con: "duckdb.DuckDBPyConnection", *, all_listed: bool = True) -> list[str]:
+    """Every ACE country on ``hs_country_list.txt``.
 
-    listed = listed_countries()
-    if all_listed:
-        return listed
-    asked = set(ace_question_countries(con))
-    chosen = [c for c in listed if c in asked]
-    return chosen or listed
+    Not only those with an ACE question (Nov 2026). Whether a country is
+    asked ACE/PA depends on what this source finds (the ladder's
+    regular-reporter rule), so reading only the countries already asked
+    could confirm the choice and never widen it: 71 of 120 listed countries
+    had never been assessed. ``all_listed`` is kept for the old call shape
+    and has no other effect.
+    """
+
+    return listed_countries()
+
+
+def months_since(start: str, today: dt.date) -> list[str]:
+    """Every complete month from ``start`` (YYYY-MM) to the month before
+    ``today``, newest first."""
+
+    year, month = int(start[:4]), int(start[5:7])
+    out: list[str] = []
+    while (year, month) < (today.year, today.month):
+        out.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return list(reversed(out))
 
 
 def complete_months(today: dt.date, n: int) -> list[str]:
@@ -1844,6 +1860,62 @@ def complete_months(today: dt.date, n: int) -> list[str]:
             month, year = 12, year - 1
         out.append(f"{year:04d}-{month:02d}")
     return out
+
+
+def expected_new_calls(
+    con: "duckdb.DuckDBPyConnection",
+    countries: list[str],
+    months: list[str],
+    cap: int,
+) -> dict[str, Any]:
+    """Calls a run should make, from what the ledger measured.
+
+    A cell already assessed is expected to read ``min(documents matched,
+    cap)`` documents (ReliefWeb's ``totalCount``, kept in the ledger's fetch
+    detail) less those already extracted; a cell never assessed reads the
+    mean of ``min(matched, cap)`` over the assessed cells. An estimate, not a
+    bound: ``max_calls_upper_bound`` is the bound.
+    """
+
+    wanted = {c.upper() for c in countries}
+    months_set = set(months)
+    measured: dict[tuple[str, str], int] = {}
+    extracted: dict[tuple[str, str], int] = {}
+    try:
+        for iso3, ym, detail, selected in con.execute(
+            "SELECT iso3, ym, detail_json, docs_selected FROM conflict_displacement_cell_ledger"
+        ).fetchall():
+            fetch = _loads_obj(detail).get("fetch") or {}
+            if "total_available" in fetch:
+                matched = int(fetch.get("total_available") or 0)
+            elif selected is not None:
+                matched = int(selected or 0)
+            else:
+                continue
+            measured[(str(iso3), str(ym))] = min(matched, cap)
+        for iso3, year, month, n in con.execute(
+            "SELECT iso3, year, month, COUNT(DISTINCT doc_id) FROM conflict_doc_extractions "
+            "WHERE status = 'ok' AND hazard = ? GROUP BY 1, 2, 3", [HAZARD],
+        ).fetchall():
+            extracted[(str(iso3), f"{int(year):04d}-{int(month):02d}")] = int(n)
+    except Exception:  # noqa: BLE001 - no ledger yet: nothing measured
+        pass
+    docs_per_cell = (sum(measured.values()) / len(measured)) if measured else float(cap)
+    expected = 0.0
+    measured_cells = 0
+    for iso3 in wanted:
+        for ym in months_set:
+            key = (iso3, ym)
+            if key in measured:
+                measured_cells += 1
+                expected += max(0, measured[key] - extracted.get(key, 0))
+            else:
+                expected += docs_per_cell
+    return {
+        "expected_calls": int(round(expected)),
+        "measured_documents_per_cell": round(docs_per_cell, 2),
+        "cells_measured": measured_cells,
+    }
 
 
 def plan(
@@ -1867,6 +1939,7 @@ def plan(
         cached = 0
     per_call = observed_cost_per_call(con)
     upper = cells * cap
+    expected = expected_new_calls(con, countries, months, cap)
     return {
         "countries": len(countries),
         "months": months,
@@ -1876,6 +1949,8 @@ def plan(
         "cached_extractions_held": cached,
         "cost_per_call_usd": round(per_call, 5),
         "max_cost_upper_bound_usd": round(upper * per_call, 2),
+        **expected,
+        "expected_cost_usd": round(expected["expected_calls"] * per_call, 2),
         "monthly_cap": budget.max_calls_per_month,
         "used_this_month": budget.used_this_month,
         "calls_allowed_this_run": budget.remaining,
@@ -1958,6 +2033,9 @@ def _print_plan(info: dict[str, Any]) -> None:
         "[conflict_extract] plan: {countries} countries x {n} months = {cells} cells; "
         "at most {max_calls_upper_bound} calls ({max_docs_per_cell} documents a cell), "
         "<= USD {max_cost_upper_bound_usd} at USD {cost_per_call_usd} a call; "
+        "expected about {expected_calls} calls, USD {expected_cost_usd} "
+        "({measured_documents_per_cell} documents a cell measured, {cells_measured} cells "
+        "already assessed); "
         "monthly cap {monthly_cap}, {used_this_month} already used, so this run may make "
         "{calls_allowed_this_run} calls (<= USD {cost_allowed_this_run_usd}); "
         "{cached_extractions_held} documents already extracted are free".format(
@@ -1974,9 +2052,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--months", nargs="*", default=None, help="YYYY-MM months")
     parser.add_argument("--trailing", type=int, default=3,
                         help="complete months before today when --months is not given")
-    parser.add_argument("--countries", default="", help="ISO3s (default: ACE countries)")
+    parser.add_argument("--since", default=None,
+                        help="every complete month from this YYYY-MM to last month "
+                        "(instead of --trailing)")
+    parser.add_argument("--countries", default="",
+                        help="ISO3s (default: every ACE country on hs_country_list.txt)")
     parser.add_argument("--all-listed", action="store_true",
-                        help="every country on hs_country_list.txt, not only those with an ACE question")
+                        help="kept for old callers: every listed country is the default")
     parser.add_argument("--max-minutes", type=float, default=None)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--reextract-flag-missing", action="store_true",
@@ -2061,7 +2143,8 @@ def _main_run(con, rulebook: Rulebook, args, summary: dict[str, Any]) -> int:
     countries = [c.strip().upper() for c in args.countries.replace(",", " ").split() if c.strip()]
     countries = countries or plan_countries(con, all_listed=args.all_listed)
     today = dt.date.today()
-    months = args.months or complete_months(today, args.trailing)
+    months = args.months or (months_since(args.since, today) if args.since
+                             else complete_months(today, args.trailing))
     budget = load_budget(con, rulebook, today)
     info = plan(con, countries, months, rulebook, budget)
     _print_plan(info)
