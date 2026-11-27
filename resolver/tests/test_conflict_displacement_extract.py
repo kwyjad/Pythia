@@ -242,13 +242,88 @@ def test_a_definite_v1_answer_is_reused_and_not_paid_for_again(con, rulebook):
     assert row["reason"] == cde.CELL_ADMITTED
 
 
-def test_a_figure_for_another_month_is_rejected(con, rulebook):
+def test_a_figure_for_another_month_is_routed_not_rejected(con, rulebook):
     fig = _fig(value=4000, unit="households",
                quote="In February, 4,000 families fled Tawila after attacks.",
                period_start="2026-02-01", period_end="2026-02-28")
+    # February not assessed yet: stored, not used, counted.
     row = _run(con, rulebook, [_item("101")], [fig])
     assert row["reason"] == cde.CELL_NO_ADMISSIBLE
-    assert _reasons(con) == {cde.REJECT_OUTSIDE_MONTH: 1}
+    assert _reasons(con) == {}
+    assert json.loads(row["detail_json"])["routing"]["routed_out_outside_window"] == 1
+    assert cde.extracted_figure(con, "SDN", "2026-02") is None
+    status = con.execute("SELECT status, routed_from_ym FROM conflict_displacement_candidates "
+                         "WHERE ym='2026-02'").fetchone()
+    assert status == (cde.STATUS_OUTSIDE_WINDOW, "2026-03")
+    # Once February is assessed (no documents of its own), the figure is its.
+    _run(con, rulebook, [], [], ym="2026-02")
+    best = cde.extracted_figure(con, "SDN", "2026-02")
+    assert best is not None and best["routed_from_ym"] == "2026-03"
+    feb = con.execute("SELECT reason, figures_admitted FROM conflict_displacement_cell_ledger "
+                      "WHERE iso3='SDN' AND ym='2026-02'").fetchone()
+    assert feb == (cde.CELL_ADMITTED, 1)
+
+
+def _figure(**over):
+    base = dict(value=12500, unit="people", quote="q", stated_by="OCHA", area="", date="",
+                cumulative_or_new="new", doc_id="9", doc_url="", doc_title="",
+                doc_date="2026-03-25", doc_source_rank=0, model=MODEL,
+                doc_primary_country="SDN", period_start="2026-03-03",
+                period_end="2026-03-18", cause="conflict")
+    base.update(over)
+    return cde.ConflictFigure(**base)
+
+
+def test_routing_to_the_next_and_previous_month(rulebook):
+    nxt = _figure(quote="next", doc_id="1", period_start="2026-04-01", period_end="2026-04-10",
+                  doc_date="2026-04-12")
+    prev = _figure(quote="prev", doc_id="2", period_start="2026-02-20", period_end="2026-02-27",
+                   doc_date="2026-03-05")
+    out = cde.admit_country({"2026-03": [nxt, prev]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-03", "2026-04"])
+    assert [f.quote for f, _v, _i in out.admitted["2026-04"]] == ["next"]
+    assert [f.quote for f, _v, _i in out.admitted["2026-02"]] == ["prev"]
+    assert out.admitted.get("2026-03", []) == []
+    assert out.routed_out == {"2026-03": 2}
+    assert out.routed_in == {"2026-02": 1, "2026-04": 1}
+    assert out.admitted["2026-04"][0][2]["routed_from_ym"] == "2026-03"
+
+
+def test_one_document_read_by_both_cells_counts_once(rulebook):
+    # A document published early April, read in the March cell (its window
+    # runs to April 30) and in the April cell, states a March figure.
+    in_march = _figure(doc_id="7", doc_date="2026-04-03")
+    in_april = _figure(doc_id="7", doc_date="2026-04-03")
+    out = cde.admit_country({"2026-03": [in_march], "2026-04": [in_april]}, "SDN", rulebook)
+    assert len(out.admitted["2026-03"]) == 1
+    assert out.admitted["2026-03"][0][2].get("routed_from_ym") is None  # the native reading
+    assert [r["reason"] for r in out.rejected["2026-04"]] == [cde.REASON_DUPLICATE_ACROSS_CELLS]
+    assert out.routed_in == {}
+
+
+def test_a_routed_figure_is_not_available_before_its_document(rulebook):
+    # A February figure stated in a document of 5 April: the rule alone
+    # (February end + 30 days = 30 March) would read it before it existed.
+    late = _figure(period_start="2026-02-10", period_end="2026-02-20", doc_date="2026-04-05")
+    out = cde.admit_country({"2026-04": [late]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-04"])
+    info = out.admitted["2026-02"][0][2]
+    assert info["available_on"] == "2026-04-05"
+    native = cde.admit_country({"2026-03": [_figure()]}, "SDN", rulebook)
+    assert native.admitted["2026-03"][0][2]["available_on"] == "2026-04-30"
+    assert cde.available_on("2026-02", "2026-03-01") == dt.date(2026, 3, 30)
+
+
+def test_the_ladder_reads_a_routed_figure_from_its_document_date(con, rulebook):
+    from pythia.tools import base_rate_spd as brs
+
+    late = _figure(period_start="2026-02-10", period_end="2026-02-20", doc_date="2026-04-05",
+                   quote="Between 10 and 20 February 2026, 12,500 people fled.")
+    out = cde.admit_country({"2026-04": [late]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-04"])
+    cde.write_country_candidates(con, "SDN", out, rulebook=rulebook, run_id="t")
+    reading = brs.conflict_ladder_lower(con)["SDN"]["2026-02"][0]
+    assert reading.available_on == dt.date(2026, 4, 5)
 
 
 def test_a_period_longer_than_the_month_is_rejected_never_apportioned(con, rulebook):

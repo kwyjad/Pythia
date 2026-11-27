@@ -245,9 +245,21 @@ _DDL = (
 )
 
 
+#: Columns added after the table shipped (Nov 2026, routing).
+_CANDIDATE_MIGRATIONS = (
+    ("routed_from_ym", "TEXT"),
+    ("available_on", "TEXT"),
+    ("status", "TEXT"),
+)
+
+
 def ensure_schema(con: "duckdb.DuckDBPyConnection") -> None:
     for ddl in _DDL:
         con.execute(ddl)
+    for column, kind in _CANDIDATE_MIGRATIONS:
+        con.execute(
+            f"ALTER TABLE conflict_displacement_candidates ADD COLUMN IF NOT EXISTS {column} {kind}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -867,74 +879,261 @@ def _rejection(figure: ExtractedFigure, reason: str, **extra: Any) -> dict[str, 
     }
 
 
+def routed_month(start: dt.date | None, end: dt.date | None, ym: str) -> str | None:
+    """The OTHER month a period lies wholly inside, or None.
+
+    A figure for 1 to 20 April read in the March cell is not an error: it is
+    April's figure, and admission routes it there.
+    """
+
+    if start is None or end is None or end < start:
+        return None
+    if (start.year, start.month) != (end.year, end.month):
+        return None
+    other = f"{start.year:04d}-{start.month:02d}"
+    return None if other == ym else other
+
+
+def available_on(dest_ym: str, doc_date: Any) -> dt.date:
+    """When an extracted figure for ``dest_ym`` may be read: the extracted
+    rung's rule (``CONFLICT_EXTRACTED_AVAILABLE_DAYS`` after the month ends)
+    or the document's own date, whichever is later. A native figure's
+    document is published by month end + the pad, so for it this IS the
+    rule; a figure routed to an earlier month can come from a later
+    document, and is never read before that document existed."""
+
+    from pythia.tools.base_rate_spd import CONFLICT_EXTRACTED_AVAILABLE_DAYS  # noqa: PLC0415
+
+    _start, month_end = month_bounds(dest_ym)
+    rule = month_end + dt.timedelta(days=CONFLICT_EXTRACTED_AVAILABLE_DAYS)
+    published = parse_date(doc_date)
+    return max(rule, published) if published else rule
+
+
+REASON_DUPLICATE_ACROSS_CELLS = "duplicate_across_cells"
+STATUS_ADMITTED = "admitted"
+#: Routed to a month this source has not assessed for the country: stored,
+#: never read by the ladder, counted.
+STATUS_OUTSIDE_WINDOW = "outside_window"
+
+
+@dataclass
+class Admission:
+    """What admission decided for one country, over all its cells."""
+
+    admitted: dict[str, list[tuple[ConflictFigure, float, dict[str, Any]]]] = dataclasses.field(default_factory=dict)
+    outside_window: dict[str, list[tuple[ConflictFigure, float, dict[str, Any]]]] = dataclasses.field(default_factory=dict)
+    rejected: dict[str, list[dict[str, Any]]] = dataclasses.field(default_factory=dict)
+    routed_out: dict[str, int] = dataclasses.field(default_factory=dict)
+    routed_out_outside_window: dict[str, int] = dataclasses.field(default_factory=dict)
+    routed_in: dict[str, int] = dataclasses.field(default_factory=dict)
+
+
+def _classify(
+    figure: ConflictFigure, ym: str, causes: set[str]
+) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """``(destination month, info, None)`` for a figure that may be admitted,
+    or ``(None, None, rejection)``."""
+
+    flag_reason = flag_rejection(figure.cumulative_or_new)
+    if flag_reason is not None:
+        return None, None, _rejection(figure, flag_reason,
+                                      cumulative_or_new=figure.cumulative_or_new)
+    if str(figure.cause).lower() not in causes:
+        return None, None, _rejection(figure, REJECT_NOT_CONFLICT, cause=figure.cause)
+    start, end, end_source = figure_period(figure)
+    dest = routed_month(start, end, ym) or ym
+    reason = period_reason(start, end, dest)
+    if reason is not None:
+        return None, None, _rejection(
+            figure, reason,
+            period_start=start.isoformat() if start else "",
+            period_end=end.isoformat() if end else "",
+            cell_ym=ym,
+        )
+    info = {"period_start": start.isoformat(), "period_end": end.isoformat(),
+            "period_end_source": end_source}
+    if dest != ym:
+        info["routed_from_ym"] = ym
+    return dest, info, None
+
+
+def admit_country(
+    per_month: dict[str, list[ExtractedFigure]],
+    iso3: str,
+    rulebook: Rulebook,
+    *,
+    assessed: Iterable[str] | None = None,
+) -> Admission:
+    """Admission over every cell of one country at once.
+
+    ``per_month`` maps the cell a figure was READ in to its figures. A figure
+    whose period lies wholly inside another single month is routed there,
+    with its source cell in ``info['routed_from_ym']``. The same figure read
+    in two cells (one document, one quote, one value) counts once, the
+    native reading kept, before households are converted and authority
+    precedence ranks each destination (``figures.deduplicate`` /
+    ``preference_key``). A destination outside ``assessed`` (default: the
+    cells in ``per_month``) is kept in ``outside_window`` and never admitted.
+    """
+
+    iso3 = iso3.upper()
+    assessed_set = set(assessed) if assessed is not None else set(per_month)
+    causes = {str(c).strip().lower()
+              for c in rulebook.get("conflict_displacement.admissible_causes")}
+    out = Admission()
+    entries: list[tuple[str, str, ConflictFigure, dict[str, Any]]] = []
+    for ym in sorted(per_month):
+        out.rejected.setdefault(ym, [])
+        for raw in per_month[ym]:
+            figure = raw if isinstance(raw, ConflictFigure) else _with_extras(raw, {})
+            dest, info, rejection = _classify(figure, ym, causes)
+            if rejection is not None:
+                out.rejected[ym].append(rejection)
+                continue
+            entries.append((ym, dest, figure, info))
+
+    # One figure read in two cells counts once: the native reading wins,
+    # then the better-ranked one. Readings within one cell are left to
+    # figures.deduplicate, which already collapses them.
+    groups: dict[tuple[str, str, float], list[int]] = {}
+    for i, (_src, _dest, fig, _info) in enumerate(entries):
+        key = (str(fig.doc_id), figures_mod._normalise(fig.quote), round(float(fig.value), 3))
+        groups.setdefault(key, []).append(i)
+    drop: set[int] = set()
+    for members in groups.values():
+        if len({entries[i][0] for i in members}) < 2:
+            continue
+        best = min(members, key=lambda i: (entries[i][0] != entries[i][1],
+                                           figures_mod.preference_key(entries[i][2], rulebook),
+                                           entries[i][0]))
+        for i in members:
+            if entries[i][0] != entries[best][0]:
+                drop.add(i)
+                src, _d, fig, _info = entries[i]
+                out.rejected[src].append(_rejection(
+                    fig, REASON_DUPLICATE_ACROSS_CELLS, kept_in_cell=entries[best][0]))
+
+    by_dest: dict[str, list[tuple[str, ConflictFigure, dict[str, Any]]]] = {}
+    for i, (src, dest, fig, info) in enumerate(entries):
+        if i in drop:
+            continue
+        by_dest.setdefault(dest, []).append((src, fig, info))
+
+    for dest, items in sorted(by_dest.items()):
+        source_of: dict[int, str] = {}
+        pairs = []
+        info_of: dict[int, dict[str, Any]] = {}
+        for src, fig, info in items:
+            # The date the machine's attribution test reads is the period's
+            # end, inside the destination month, so only its country test
+            # can still bite.
+            dated = dataclasses.replace(fig, date=info["period_end"])
+            source_of[id(dated)] = src
+            info_of[id(dated)] = info
+            pairs.append((dated, float(dated.value)))
+        kept_pairs, attr_rej = figures_mod.apply_attribution(pairs, iso3, dest, rulebook)
+        src_by_doc_quote = {(f.doc_id, f.quote): source_of[id(f)] for f, _v in pairs}
+        for rej in attr_rej:
+            src = src_by_doc_quote.get((rej.get("doc_id"), rej.get("quote")), dest)
+            out.rejected.setdefault(src, []).append(rej)
+        converted: list[tuple[ConflictFigure, float]] = []
+        infos: dict[int, dict[str, Any]] = {}
+        for figure, _value in kept_pairs:
+            persons, conversion = figures_mod.convert_units(figure, iso3, rulebook)
+            factor, origin = figures_mod.conversion_for_unit(figure.unit, iso3, rulebook)
+            info = dict(info_of.get(id(figure), {}))
+            info.update(conversion_factor=factor, conversion_origin=origin,
+                        conversion=conversion,
+                        available_on=available_on(dest, figure.doc_date).isoformat())
+            infos[id(figure)] = info
+            converted.append((figure, persons))
+        kept, dropped = figures_mod.deduplicate(converted, rulebook)
+        for rej in dropped:
+            src = src_by_doc_quote.get((rej.get("doc_id"), rej.get("quote")), dest)
+            out.rejected.setdefault(src, []).append(rej)
+        admitted = [(f, v, infos.get(id(f), {})) for f, v in kept]
+        for _f, _v, info in admitted:
+            src = info.get("routed_from_ym")
+            if src:
+                if dest in assessed_set:
+                    out.routed_out[src] = out.routed_out.get(src, 0) + 1
+                    out.routed_in[dest] = out.routed_in.get(dest, 0) + 1
+                else:
+                    out.routed_out_outside_window[src] = out.routed_out_outside_window.get(src, 0) + 1
+        if dest in assessed_set:
+            out.admitted[dest] = admitted
+        else:
+            out.outside_window[dest] = admitted
+    return out
+
+
 def admit_figures(
     figures: Iterable[ExtractedFigure],
     iso3: str,
     ym: str,
     rulebook: Rulebook,
 ) -> tuple[list[tuple[ConflictFigure, float, dict[str, Any]]], list[dict[str, Any]]]:
-    """Apply the admissibility rules. Returns (admitted, rejected).
+    """One cell's admission. Returns (admitted, rejected).
 
     ``admitted`` is ``(figure, persons, info)`` in preference order (rank 0
-    first), after households are converted and restatements collapse.
-    Every rejection carries its reason.
+    first). A figure about another single month is routed away and appears
+    in neither list; :func:`admit_country` is what keeps it.
     """
 
-    iso3 = iso3.upper()
-    causes = {str(c).strip().lower()
-              for c in rulebook.get("conflict_displacement.admissible_causes")}
-    rejected: list[dict[str, Any]] = []
-    dated: list[tuple[ConflictFigure, dict[str, Any]]] = []
-    for raw in figures:
-        figure = raw if isinstance(raw, ConflictFigure) else _with_extras(raw, {})
-        flag_reason = flag_rejection(figure.cumulative_or_new)
-        if flag_reason is not None:
-            rejected.append(_rejection(figure, flag_reason,
-                                       cumulative_or_new=figure.cumulative_or_new))
-            continue
-        if str(figure.cause).lower() not in causes:
-            rejected.append(_rejection(figure, REJECT_NOT_CONFLICT, cause=figure.cause))
-            continue
-        start, end, end_source = figure_period(figure)
-        reason = period_reason(start, end, ym)
-        if reason is not None:
-            rejected.append(_rejection(
-                figure, reason,
-                period_start=start.isoformat() if start else "",
-                period_end=end.isoformat() if end else "",
-                cell_ym=ym,
-            ))
-            continue
-        # The date the machine's attribution test reads is the period's end,
-        # inside the month by now, so only its country test can still bite.
-        dated.append((
-            dataclasses.replace(figure, date=end.isoformat()),
-            {"period_start": start.isoformat(), "period_end": end.isoformat(),
-             "period_end_source": end_source},
-        ))
-    period_info = {id(f): info for f, info in dated}
-    pairs = [(f, float(f.value)) for f, _ in dated]
-    kept_pairs, attribution_rejected = figures_mod.apply_attribution(pairs, iso3, ym, rulebook)
-    rejected.extend(attribution_rejected)
-
-    converted: list[tuple[ConflictFigure, float]] = []
-    infos: dict[int, dict[str, Any]] = {}
-    for figure, _value in kept_pairs:
-        persons, conversion = figures_mod.convert_units(figure, iso3, rulebook)
-        factor, origin = figures_mod.conversion_for_unit(figure.unit, iso3, rulebook)
-        info = dict(period_info.get(id(figure), {}))
-        info.update(conversion_factor=factor, conversion_origin=origin,
-                    conversion=conversion)
-        infos[id(figure)] = info
-        converted.append((figure, persons))
-    kept, dropped = figures_mod.deduplicate(converted, rulebook)
-    rejected.extend(dropped)
-    return [(f, v, infos.get(id(f), {})) for f, v in kept], rejected
+    result = admit_country({ym: list(figures)}, iso3, rulebook, assessed=[ym])
+    return result.admitted.get(ym, []), result.rejected.get(ym, [])
 
 
 # ---------------------------------------------------------------------------
 # Writers and readers
 # ---------------------------------------------------------------------------
+
+
+_CANDIDATE_COLS = [
+    "iso3", "ym", "source_ref", "preference_rank", "value_type", "value_persons",
+    "stated_value", "stated_unit", "conversion_factor", "conversion_origin",
+    "quote", "stated_by", "attribution_source", "authority_tier", "area",
+    "figure_date", "period_start", "period_end", "period_end_source",
+    "cumulative_or_new", "cause", "doc_id", "doc_url", "doc_title", "doc_date",
+    "doc_date_original", "doc_publisher", "doc_primary_country", "model",
+    "prompt_version", "run_id", "routed_from_ym", "available_on", "status",
+]
+
+
+def _insert_candidates(
+    con: "duckdb.DuckDBPyConnection",
+    iso3: str,
+    ym: str,
+    admitted: list[tuple[ConflictFigure, float, dict[str, Any]]],
+    *,
+    prompt_version: str,
+    run_id: str | None,
+    status: str,
+    rulebook: Rulebook,
+) -> None:
+    for rank, (figure, persons, info) in enumerate(admitted):
+        stated_by, attribution = figures_mod._attribute(figure)
+        _tier_rank, tier = figures_mod.authority_tier(figure.stated_by, rulebook)
+        values = [
+            iso3, ym, figures_mod._source_ref(figure), rank, VALUE_TYPE,
+            float(persons), float(figure.value), figure.unit,
+            info.get("conversion_factor"), info.get("conversion_origin"),
+            figure.quote, stated_by, attribution, tier, figure.area,
+            figure.date, info.get("period_start"), info.get("period_end"),
+            info.get("period_end_source"), figure.cumulative_or_new, figure.cause,
+            figure.doc_id, figure.doc_url, figure.doc_title, figure.doc_date,
+            figure.doc_date_original, figure.doc_publisher,
+            figure.doc_primary_country, figure.model, prompt_version, run_id,
+            info.get("routed_from_ym"),
+            info.get("available_on") or available_on(ym, figure.doc_date).isoformat(),
+            status,
+        ]
+        con.execute(
+            f"INSERT OR REPLACE INTO conflict_displacement_candidates "
+            f"({', '.join(_CANDIDATE_COLS)}) VALUES ({', '.join('?' for _ in _CANDIDATE_COLS)})",
+            values,
+        )
 
 
 def write_candidates(
@@ -946,42 +1145,43 @@ def write_candidates(
     rulebook: Rulebook,
     run_id: str | None,
 ) -> int:
+    """Rewrite one cell's admitted candidates."""
+
     ensure_schema(con)
     iso3 = iso3.upper()
     con.execute(
         "DELETE FROM conflict_displacement_candidates WHERE iso3 = ? AND ym = ?",
         [iso3, ym],
     )
-    prompt_version = _prompt_version(rulebook)
-    for rank, (figure, persons, info) in enumerate(admitted):
-        stated_by, attribution = figures_mod._attribute(figure)
-        _tier_rank, tier = figures_mod.authority_tier(figure.stated_by, rulebook)
-        con.execute(
-            """
-            INSERT OR REPLACE INTO conflict_displacement_candidates
-                (iso3, ym, source_ref, preference_rank, value_type, value_persons,
-                 stated_value, stated_unit, conversion_factor, conversion_origin,
-                 quote, stated_by, attribution_source, authority_tier, area,
-                 figure_date, period_start, period_end, period_end_source,
-                 cumulative_or_new, cause, doc_id, doc_url, doc_title, doc_date,
-                 doc_date_original, doc_publisher, doc_primary_country, model,
-                 prompt_version, run_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                iso3, ym, figures_mod._source_ref(figure), rank, VALUE_TYPE,
-                float(persons), float(figure.value), figure.unit,
-                info.get("conversion_factor"), info.get("conversion_origin"),
-                figure.quote, stated_by, attribution, tier, figure.area,
-                figure.date, info.get("period_start"), info.get("period_end"),
-                info.get("period_end_source"), figure.cumulative_or_new, figure.cause,
-                figure.doc_id, figure.doc_url, figure.doc_title, figure.doc_date,
-                figure.doc_date_original, figure.doc_publisher,
-                figure.doc_primary_country, figure.model, prompt_version, run_id,
-            ],
-        )
+    _insert_candidates(con, iso3, ym, admitted, prompt_version=_prompt_version(rulebook),
+                       run_id=run_id, status=STATUS_ADMITTED, rulebook=rulebook)
     return len(admitted)
+
+
+def write_country_candidates(
+    con: "duckdb.DuckDBPyConnection",
+    iso3: str,
+    admission: Admission,
+    *,
+    rulebook: Rulebook,
+    run_id: str | None,
+) -> int:
+    """Rewrite every candidate of one country: admitted, and routed to a
+    month outside the assessed window (``status='outside_window'``)."""
+
+    ensure_schema(con)
+    iso3 = iso3.upper()
+    con.execute("DELETE FROM conflict_displacement_candidates WHERE iso3 = ?", [iso3])
+    version = _prompt_version(rulebook)
+    n = 0
+    for ym, admitted in sorted(admission.admitted.items()):
+        _insert_candidates(con, iso3, ym, admitted, prompt_version=version, run_id=run_id,
+                           status=STATUS_ADMITTED, rulebook=rulebook)
+        n += len(admitted)
+    for ym, held in sorted(admission.outside_window.items()):
+        _insert_candidates(con, iso3, ym, held, prompt_version=version, run_id=run_id,
+                           status=STATUS_OUTSIDE_WINDOW, rulebook=rulebook)
+    return n
 
 
 def write_ledger(con: "duckdb.DuckDBPyConnection", row: dict[str, Any]) -> None:
@@ -1028,7 +1228,11 @@ def extracted_figures(
     except Exception as exc:  # noqa: BLE001 - a reader must not raise
         LOG.warning("[conflict_extract] candidates unreadable: %s", exc)
         return {}
-    return {(r["iso3"], r["ym"]): r for r in rows}
+    # A figure routed to a month this source never assessed is stored with
+    # status 'outside_window' and is never read; a row from before the
+    # column existed is an admitted one.
+    return {(r["iso3"], r["ym"]): r for r in rows
+            if (r.get("status") or STATUS_ADMITTED) == STATUS_ADMITTED}
 
 
 def extracted_figure(
@@ -1064,8 +1268,15 @@ def run_cell(
     today: dt.date | None = None,
     run_id: str | None = None,
     fetch: bool = True,
+    admit: bool = True,
 ) -> dict[str, Any]:
-    """Select, extract, admit and record one (country, month). Never raises."""
+    """Select, extract and record one (country, month). Never raises.
+
+    Admission runs over the whole country (:func:`readmit_countries`),
+    because a figure read in one cell may belong to another month. With
+    ``admit=False`` the caller admits afterwards (:func:`run` does it once
+    per country, after every cell is read).
+    """
 
     iso3 = iso3.upper()
     today = today or dt.date.today()
@@ -1085,48 +1296,40 @@ def run_cell(
         documents = cell_documents(con, iso3, ym, rulebook)
         row["docs_selected"] = len(documents)
         if not documents:
+            # No documents of its own; admission below may still route a
+            # figure here from a neighbouring month's document.
             row["reason"] = (
                 CELL_FETCH_FAILED if fetch and not detail["fetch"].get("ok") else CELL_NO_DOCUMENTS
             )
-            row["detail_json"] = json.dumps(detail, default=str)
-            write_ledger(con, row)
-            return row
-        result = extract_mod.extract_for_cell(
-            con, iso3=iso3, ym=ym, hazard=HAZARD, rulebook=rulebook, budget=budget,
-            documents=documents, call=call, model_ref=model_ref,
-            country_name=country_name, profile=profile(run_id),
-        )
-        admitted, rejected = admit_figures(result.figures, iso3, ym, rulebook)
-        all_rejected = [*result.rejected, *rejected]
-        counts: dict[str, int] = {}
-        for r in all_rejected:
-            counts[str(r.get("reason"))] = counts.get(str(r.get("reason")), 0) + 1
-        write_candidates(con, iso3, ym, admitted, rulebook=rulebook, run_id=run_id)
-        row.update(
-            docs_read=result.docs_read, docs_cached=result.docs_cached,
-            docs_failed=result.docs_failed, calls_made=result.calls_made,
-            cost_usd=round(result.cost_usd, 6),
-            figures_extracted=len(result.figures), figures_admitted=len(admitted),
-            rejected_counts_json=json.dumps(counts, sort_keys=True),
-            rejected_json=json.dumps(all_rejected[:50], default=str),
-            budget_capped=bool(result.budget_capped),
-        )
-        if admitted:
-            best_fig, best_value, _info = admitted[0]
-            row["reason"] = CELL_ADMITTED
-            row["best_value"] = float(best_value)
-            row["best_source_ref"] = figures_mod._source_ref(best_fig)
-        elif result.skipped_reason:
-            row["reason"] = CELL_DISABLED if "disabled" in result.skipped_reason else CELL_EXTRACTION_FAILED
-            detail["skipped_reason"] = result.skipped_reason
-        elif result.budget_capped and result.docs_read + result.docs_cached < len(documents):
-            row["reason"] = CELL_BUDGET_CAPPED
-        elif result.docs_read + result.docs_cached == 0 and result.docs_failed:
-            row["reason"] = CELL_EXTRACTION_FAILED
-        elif not result.figures:
-            row["reason"] = CELL_NO_FIGURE_STATED
+            result = None
         else:
-            row["reason"] = CELL_NO_ADMISSIBLE
+            result = extract_mod.extract_for_cell(
+                con, iso3=iso3, ym=ym, hazard=HAZARD, rulebook=rulebook, budget=budget,
+                documents=documents, call=call, model_ref=model_ref,
+                country_name=country_name, profile=profile(run_id),
+            )
+            row.update(
+                docs_read=result.docs_read, docs_cached=result.docs_cached,
+                docs_failed=result.docs_failed, calls_made=result.calls_made,
+                cost_usd=round(result.cost_usd, 6),
+                figures_extracted=len(result.figures), figures_admitted=0,
+                rejected_counts_json=json.dumps(_count_reasons(result.rejected), sort_keys=True),
+                rejected_json=json.dumps(result.rejected[:50], default=str),
+                budget_capped=bool(result.budget_capped),
+            )
+            # The figure half of the reason (admitted / no admissible / none
+            # stated) is decided by admission, over the whole country.
+            if result.skipped_reason:
+                row["reason"] = CELL_DISABLED if "disabled" in result.skipped_reason else CELL_EXTRACTION_FAILED
+                detail["skipped_reason"] = result.skipped_reason
+            elif result.budget_capped and result.docs_read + result.docs_cached < len(documents):
+                row["reason"] = CELL_BUDGET_CAPPED
+            elif result.docs_read + result.docs_cached == 0 and result.docs_failed:
+                row["reason"] = CELL_EXTRACTION_FAILED
+            elif not result.figures:
+                row["reason"] = CELL_NO_FIGURE_STATED
+            else:
+                row["reason"] = CELL_NO_ADMISSIBLE
     except Exception as exc:  # noqa: BLE001 - one bad cell never ends the run
         LOG.exception("[conflict_extract] %s %s raised", iso3, ym)
         row["reason"] = CELL_RAISED
@@ -1136,6 +1339,14 @@ def run_cell(
         write_ledger(con, row)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("[conflict_extract] ledger not written for %s %s: %s", iso3, ym, exc)
+        return row
+    if admit and row.get("reason") != CELL_RAISED:
+        readmit_countries(con, [iso3], rulebook, today=today, run_id=run_id)
+        written = _ledger_cells(con, iso3).get(ym)
+        if written:
+            row.update({k: written.get(k) for k in (
+                "reason", "best_value", "best_source_ref", "figures_extracted",
+                "figures_admitted", "rejected_counts_json", "rejected_json", "detail_json")})
     return row
 
 
@@ -1214,6 +1425,14 @@ def _ledger_cells(con: "duckdb.DuckDBPyConnection", iso3: str) -> dict[str, dict
         return {}
 
 
+def _loads_obj(text: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(text or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _count_reasons(rejected: Iterable[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for r in rejected:
@@ -1254,12 +1473,21 @@ def readmit_countries(
         try:
             cells = _ledger_cells(con, iso3)
             per_month = cell_figures_from_cache(con, iso3, rulebook)
+            admission = admit_country(
+                {ym: figs for ym, (figs, _r, _n) in per_month.items()}, iso3, rulebook,
+                assessed=list(cells),
+            )
+            write_country_candidates(con, iso3, admission, rulebook=rulebook, run_id=run_id)
             for ym, ledger in cells.items():
                 figs, parse_rej, _n = per_month.get(ym, ([], [], 0))
-                admitted, rejected = admit_figures(figs, iso3, ym, rulebook)
-                write_candidates(con, iso3, ym, admitted, rulebook=rulebook,
-                                 run_id=run_id or ledger.get("run_id"))
-                all_rej = [*parse_rej, *rejected]
+                admitted = admission.admitted.get(ym, [])
+                all_rej = [*parse_rej, *admission.rejected.get(ym, [])]
+                detail = _loads_obj(ledger.get("detail_json"))
+                detail["routing"] = {
+                    "routed_out": admission.routed_out.get(ym, 0),
+                    "routed_out_outside_window": admission.routed_out_outside_window.get(ym, 0),
+                    "routed_in": admission.routed_in.get(ym, 0),
+                }
                 row = dict(ledger)
                 row.update(
                     figures_extracted=len(figs), figures_admitted=len(admitted),
@@ -1268,10 +1496,14 @@ def readmit_countries(
                     reason=_cell_reason(ledger.get("reason"), len(figs), len(admitted)),
                     best_value=float(admitted[0][1]) if admitted else None,
                     best_source_ref=figures_mod._source_ref(admitted[0][0]) if admitted else None,
+                    detail_json=json.dumps(detail, default=str),
                 )
                 write_ledger(con, row)
                 out["cells"] += 1
                 out["figures_admitted"] += len(admitted)
+            out["routed"] = out.get("routed", 0) + sum(admission.routed_in.values())
+            out["routed_outside_window"] = (out.get("routed_outside_window", 0)
+                                            + sum(admission.routed_out_outside_window.values()))
             out["countries"] += 1
         except Exception:  # noqa: BLE001 - one bad country never ends the pass
             LOG.exception("[conflict_extract] re-admission of %s raised", iso3)
@@ -1547,6 +1779,7 @@ def run(
     names = _country_names()
     reasons: dict[str, int] = {}
     not_reached: list[str] = []
+    touched: set[str] = set()
     calls = 0
     cost = 0.0
     for ym in sorted(months, reverse=True):
@@ -1557,12 +1790,20 @@ def run(
             row = run_cell(
                 con, iso3, ym, rulebook, budget, post=post, call=call,
                 model_ref=model_ref, country_name=names.get(iso3), today=today,
-                run_id=run_id,
+                run_id=run_id, admit=False,
             )
-            reasons[row["reason"]] = reasons.get(row["reason"], 0) + 1
+            touched.add(iso3)
             calls += int(row.get("calls_made") or 0)
             cost += float(row.get("cost_usd") or 0.0)
+    # Admission once per country, after every cell is read: a figure read
+    # in one month may belong to another.
+    admission = readmit_countries(con, sorted(touched), rulebook, today=today, run_id=run_id)
+    for iso3 in sorted(touched):
+        for ym, ledger in _ledger_cells(con, iso3).items():
+            if ym in months:
+                reasons[ledger["reason"]] = reasons.get(ledger["reason"], 0) + 1
     summary.update(
+        admission=admission,
         cells_by_reason=reasons,
         cells_not_reached_for_time=len(not_reached),
         not_reached=not_reached[:200],
