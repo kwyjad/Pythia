@@ -15,8 +15,8 @@
       "number": 1,
       "title": "Resolver",
       "file": "1_resolver.pptx",
-      "last_checked": "2026-11-26",
-      "last_checked_commit": "fda2635",
+      "last_checked": "2026-11-27",
+      "last_checked_commit": "6d30dbd",
       "overview_sections": ["3. Resolver", "4. Structured data connectors"],
       "code_paths": ["resolver/connectors/", "resolver/ingestion/", "resolver/transform/", "resolver/tools/", "resolver/hazard_resolution/", "resolver/config/known_issues.yml", "pythia/tools/compute_resolutions.py", "pythia/tools/base_rate_spd.py", "pythia/tools/ace_pa_eligibility.py"]
     },
@@ -51,8 +51,8 @@
       "number": 5,
       "title": "Resolution and Calibration (plus performance note)",
       "file": "5_resolution_calibration.pptx",
-      "last_checked": "2026-11-26",
-      "last_checked_commit": "fda2635",
+      "last_checked": "2026-11-27",
+      "last_checked_commit": "6d30dbd",
       "overview_sections": ["14. Scoring, calibration", "3. Resolver"],
       "code_paths": ["pythia/tools/compute_resolutions.py", "pythia/tools/compute_scores.py", "pythia/tools/compute_calibration_pythia.py", "pythia/tools/generate_calibration_advice.py", "pythia/tools/score_baselines.py", "pythia/tools/family_recalibration.py", "resolver/hazard_resolution/", "web/src/app/performance/"]
     },
