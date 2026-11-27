@@ -530,9 +530,9 @@ def build_report(
             "more_matched_max": max(more) if more else None,
             "not_about_cell_total": sum(not_about),
             "note": ("'more matched' is ReliefWeb's totalCount for the cell's query less the "
-                     "documents selected; it includes documents whose primary country is not "
-                     "the cell's, which the cap would have dropped anyway (not_about_cell counts "
-                     "those among the documents returned)."),
+                     "documents selected. The query already filters on the cell's primary "
+                     "country, so these are documents about this country, in the cell's "
+                     "publication window, that the cap left unread."),
         }
 
     # (f) publication lag ----------------------------------------------------
@@ -712,7 +712,10 @@ def render_markdown(rep: Dict[str, Any]) -> str:
                   [[f["cells_assessed"], f["cells_with_documents"], f["documents_selected"],
                     f["documents_extracted"], f["documents_extraction_failed"],
                     f["figures_extracted"], f["figures_admitted"], f["cells_admitted"]]])
-    out += ["", f"Cell reasons: {f['cell_reasons']}", "", "Per country:", ""]
+    out += ["", f"Cell reasons: {f['cell_reasons']}", "",
+            "Documents extracted can exceed documents selected: the ledger counts the cell's "
+            "current selection, while the extraction cache keeps every document a cell was "
+            "ever sent, including those an earlier fetch selected.", "", "Per country:", ""]
     prow = []
     for c, cf in rep["funnel_by_country"].items():
         if cf is None:
@@ -757,8 +760,7 @@ def render_markdown(rep: Dict[str, Any]) -> str:
                 f"Match count stored for {cp['cells_with_match_count_stored']}, not stored for "
                 f"{cp['cells_with_match_count_not_stored']}. More documents matched: "
                 f"{cp['more_matched_total']} in all, median {cp['more_matched_median']} a cell, "
-                f"most {cp['more_matched_max']}; {cp['not_about_cell_total']} returned documents "
-                "were about another country.", "", cp["note"]]
+                f"most {cp['more_matched_max']}.", "", cp["note"]]
     lg = rep.get("lag")
     if lg:
         out += ["", "## f. Publication lag of admitted figures", ""]
