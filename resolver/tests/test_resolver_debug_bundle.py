@@ -1743,3 +1743,23 @@ def test_an_overdue_known_issue_review_fails_the_check(tmp_path, full_run, monke
     monkeypatch.setenv("PYTHIA_ISSUES_TODAY", "2026-11-24")
     assert _checks(tmp_path, full_run["db"], full_run, "again")[
         "no_known_issue_is_past_its_review_date"]["verdict"] == "PASS"
+
+
+def test_the_bundle_writes_the_conflict_extraction_yield(tmp_path):
+    """Nov 2026: where the ReliefWeb conflict displacement figures are lost,
+    every month, and an empty ledger reads as "no extraction rows"."""
+
+    db = tmp_path / "pythia.duckdb"
+    duckdb.connect(str(db)).close()
+    builder = bundle.BundleBuilder(
+        out_path=tmp_path / "b.zip", db_path=db, diagnostics_dir=tmp_path / "diag",
+        run_log_dir=None, staging=tmp_path / "staging",
+        max_bytes=bundle.DEFAULT_MAX_BYTES, environ={},
+    )
+    dest = tmp_path / "hazard"
+    dest.mkdir()
+    out = builder._conflict_extraction_yield(dest)
+    report = json.loads((dest / "conflict_extraction_yield.json").read_text(encoding="utf-8"))
+    assert report["stub"] is True and report["reason"].startswith("no extraction rows")
+    assert "no extraction rows" in (dest / "conflict_extraction_yield.md").read_text(encoding="utf-8")
+    assert out["stub"] is True
