@@ -8,8 +8,18 @@
       "file": "0_overview.pptx",
       "last_checked": "2026-11-26",
       "last_checked_commit": "fda2635",
-      "overview_sections": ["System at a Glance", "1. Purpose", "2. Core objects", "15. Dashboard", "16. Operations", "Test Mode"],
-      "code_paths": ["pythia/config.yaml", ".github/workflows/resolver_update.yml", ".github/workflows/pythia_pipeline_stage.yml", "horizon_scanner/hs_country_list.txt"]
+      "overview_sections": [
+        "Fred in brief",
+        "1. Purpose",
+        "10. Dashboard",
+        "11. Operations"
+      ],
+      "code_paths": [
+        "pythia/config.yaml",
+        ".github/workflows/resolver_update.yml",
+        ".github/workflows/pythia_pipeline_stage.yml",
+        "horizon_scanner/hs_country_list.txt"
+      ]
     },
     {
       "number": 1,
@@ -17,8 +27,21 @@
       "file": "1_resolver.pptx",
       "last_checked": "2026-11-27",
       "last_checked_commit": "6d30dbd",
-      "overview_sections": ["3. Resolver", "4. Structured data connectors"],
-      "code_paths": ["resolver/connectors/", "resolver/ingestion/", "resolver/transform/", "resolver/tools/", "resolver/hazard_resolution/", "resolver/config/known_issues.yml", "pythia/tools/compute_resolutions.py", "pythia/tools/base_rate_spd.py", "pythia/tools/ace_pa_eligibility.py"]
+      "overview_sections": [
+        "2. Data",
+        "7. Grading"
+      ],
+      "code_paths": [
+        "resolver/connectors/",
+        "resolver/ingestion/",
+        "resolver/transform/",
+        "resolver/tools/",
+        "resolver/hazard_resolution/",
+        "resolver/config/known_issues.yml",
+        "pythia/tools/compute_resolutions.py",
+        "pythia/tools/base_rate_spd.py",
+        "pythia/tools/ace_pa_eligibility.py"
+      ]
     },
     {
       "number": 2,
@@ -26,8 +49,14 @@
       "file": "2_horizon_scan.pptx",
       "last_checked": "2026-11-26",
       "last_checked_commit": "fda2635",
-      "overview_sections": ["5. Web research", "6. Horizon Scanner", "7. Regime Change", "8. Adversarial evidence checks"],
-      "code_paths": ["horizon_scanner/", "pythia/adversarial_check.py", "pythia/web_research/"]
+      "overview_sections": [
+        "3. Horizon scan"
+      ],
+      "code_paths": [
+        "horizon_scanner/",
+        "pythia/adversarial_check.py",
+        "pythia/web_research/"
+      ]
     },
     {
       "number": 3,
@@ -35,8 +64,18 @@
       "file": "3_forecast_tracks.pptx",
       "last_checked": "2026-11-26",
       "last_checked_commit": "fda2635",
-      "overview_sections": ["10. Question bank", "12. Forecasting"],
-      "code_paths": ["forecaster/", "scripts/create_questions_from_triage.py", "pythia/config.yaml", "pythia/llm_profiles.py", "pythia/buckets.py", "pythia/tools/family_recalibration.py"]
+      "overview_sections": [
+        "4. Questions",
+        "5. Forecasting"
+      ],
+      "code_paths": [
+        "forecaster/",
+        "scripts/create_questions_from_triage.py",
+        "pythia/config.yaml",
+        "pythia/llm_profiles.py",
+        "pythia/buckets.py",
+        "pythia/tools/family_recalibration.py"
+      ]
     },
     {
       "number": 4,
@@ -44,8 +83,13 @@
       "file": "4_sibyl.pptx",
       "last_checked": "2026-11-26",
       "last_checked_commit": "fda2635",
-      "overview_sections": ["12b. Sibyl"],
-      "code_paths": ["sibyl/", ".github/workflows/run_sibyl.yml"]
+      "overview_sections": [
+        "6. Sibyl"
+      ],
+      "code_paths": [
+        "sibyl/",
+        ".github/workflows/run_sibyl.yml"
+      ]
     },
     {
       "number": 5,
@@ -53,8 +97,20 @@
       "file": "5_resolution_calibration.pptx",
       "last_checked": "2026-11-27",
       "last_checked_commit": "6d30dbd",
-      "overview_sections": ["14. Scoring, calibration", "3. Resolver"],
-      "code_paths": ["pythia/tools/compute_resolutions.py", "pythia/tools/compute_scores.py", "pythia/tools/compute_calibration_pythia.py", "pythia/tools/generate_calibration_advice.py", "pythia/tools/score_baselines.py", "pythia/tools/family_recalibration.py", "resolver/hazard_resolution/", "web/src/app/performance/"]
+      "overview_sections": [
+        "7. Grading",
+        "8. Scoring"
+      ],
+      "code_paths": [
+        "pythia/tools/compute_resolutions.py",
+        "pythia/tools/compute_scores.py",
+        "pythia/tools/compute_calibration_pythia.py",
+        "pythia/tools/generate_calibration_advice.py",
+        "pythia/tools/score_baselines.py",
+        "pythia/tools/family_recalibration.py",
+        "resolver/hazard_resolution/",
+        "web/src/app/performance/"
+      ]
     },
     {
       "number": 6,
@@ -62,8 +118,12 @@
       "file": "6_scenarios.pptx",
       "last_checked": "2026-11-26",
       "last_checked_commit": "fda2635",
-      "overview_sections": ["13. Scenarios"],
-      "code_paths": ["forecaster/scenario_writer.py"]
+      "overview_sections": [
+        "5. Forecasting"
+      ],
+      "code_paths": [
+        "forecaster/scenario_writer.py"
+      ]
     },
     {
       "number": 7,
@@ -71,8 +131,14 @@
       "file": "7_interpreter.pptx",
       "last_checked": "2026-11-26",
       "last_checked_commit": "fda2635",
-      "overview_sections": ["The monthly plain-language report"],
-      "code_paths": ["interpreter/", "scripts/ai_bundle/build_current_run_bundle.py", "pythia/tools/compute_deviation.py"]
+      "overview_sections": [
+        "9. The monthly report"
+      ],
+      "code_paths": [
+        "interpreter/",
+        "scripts/ai_bundle/build_current_run_bundle.py",
+        "pythia/tools/compute_deviation.py"
+      ]
     }
   ]
 }

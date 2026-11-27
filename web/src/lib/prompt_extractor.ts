@@ -277,15 +277,10 @@ export interface VersionEntry {
   label: string;
 }
 
-export interface VersionedPromptData {
-  versions: VersionEntry[];
-  prompts: Record<string, Record<string, string | null>>;
-}
-
 /**
  * Read the versions manifest from docs/prompts/versions.json.
  */
-async function listPromptVersions(): Promise<VersionEntry[]> {
+export async function listPromptVersions(): Promise<VersionEntry[]> {
   const candidates = [
     path.join(process.cwd(), "..", "docs", "prompts", "versions.json"),
     path.join(process.cwd(), "docs", "prompts", "versions.json"),
@@ -325,16 +320,15 @@ async function extractPromptsForVersion(
 }
 
 /**
- * Load all versioned prompt snapshots.
- * Returns the version list and a map of date -> extracted prompts.
+ * Extract the prompts of one archived version, or null when the version is
+ * not listed in docs/prompts/versions.json. The shape check comes first, so a
+ * crafted string never reaches the filesystem as a path.
  */
-export async function extractAllVersionedPrompts(): Promise<VersionedPromptData> {
+export async function extractListedVersionPrompts(
+  version: string,
+): Promise<Record<string, string | null> | null> {
+  if (!/^\d{4}-\d{2}-\d{2}(-\d{1,3})?$/.test(version)) return null;
   const versions = await listPromptVersions();
-  const prompts: Record<string, Record<string, string | null>> = {};
-  await Promise.all(
-    versions.map(async (v) => {
-      prompts[v.date] = await extractPromptsForVersion(v.date);
-    }),
-  );
-  return { versions, prompts };
+  if (!versions.some((v) => v.date === version)) return null;
+  return extractPromptsForVersion(version);
 }

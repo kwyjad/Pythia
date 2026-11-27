@@ -1,11 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { loadAllVersionedOverviews } from "../../lib/overview_loader";
-import {
-  extractAllPrompts,
-  extractAllVersionedPrompts,
-} from "../../lib/prompt_extractor";
+import { listOverviewVersions } from "../../lib/overview_loader";
+import { extractAllPrompts, listPromptVersions } from "../../lib/prompt_extractor";
 import { renderSimpleMarkdown } from "../../lib/simple_markdown";
 import { loadDecks } from "../../lib/decks";
 import AiPromptsSection from "./AiPromptsSection";
@@ -49,12 +46,15 @@ export const metadata = {
 };
 
 export default async function AboutPage() {
-  const [overviewMd, prompts, versionedData, versionedOverviewData, decks] =
+  // Only the current overview and prompts travel with the page. Archived
+  // versions are fetched on demand from /about/overview/[version] and
+  // /about/prompts/[version] when a reader picks one.
+  const [overviewMd, prompts, promptVersions, overviewVersions, decks] =
     await Promise.all([
       loadOverviewMarkdown(),
       extractAllPrompts(),
-      extractAllVersionedPrompts(),
-      loadAllVersionedOverviews(),
+      listPromptVersions(),
+      listOverviewVersions(),
       loadDecks(),
     ]);
 
@@ -72,14 +72,12 @@ export default async function AboutPage() {
         {overviewMd && (
           <OverviewSection
             currentOverview={overviewMd}
-            versions={versionedOverviewData.versions}
-            versionedOverviews={versionedOverviewData.overviews}
+            versions={overviewVersions}
           />
         )}
         <AiPromptsSection
           currentPrompts={prompts}
-          versions={versionedData.versions}
-          versionedPrompts={versionedData.prompts}
+          versions={promptVersions}
         />
       </article>
     </div>

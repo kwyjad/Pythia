@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import type { VersionEntry } from "../../lib/prompt_extractor";
 
@@ -299,23 +299,49 @@ const PANELS: PanelConfig[] = [
 
 const CURRENT_KEY = "__current__";
 
+type PromptMap = Record<string, string | null>;
+
 interface AiPromptsSectionProps {
-  currentPrompts: Record<string, string | null>;
+  currentPrompts: PromptMap;
   versions: VersionEntry[];
-  versionedPrompts: Record<string, Record<string, string | null>>;
 }
 
 export default function AiPromptsSection({
   currentPrompts,
   versions,
-  versionedPrompts,
 }: AiPromptsSectionProps) {
   const [selectedVersion, setSelectedVersion] = useState(CURRENT_KEY);
+  const [archived, setArchived] = useState<Record<string, PromptMap>>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const activePrompts =
+  // Archived prompt sets are fetched only when chosen, never shipped with the page.
+  useEffect(() => {
+    if (selectedVersion === CURRENT_KEY || archived[selectedVersion]) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`/about/prompts/${encodeURIComponent(selectedVersion)}`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as PromptMap;
+        if (!cancelled) setArchived((prev) => ({ ...prev, [selectedVersion]: data }));
+      })
+      .catch(() => {
+        if (!cancelled) setError(`The ${selectedVersion} prompts could not be loaded.`);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVersion, archived]);
+
+  const activePrompts: PromptMap =
     selectedVersion === CURRENT_KEY
       ? currentPrompts
-      : (versionedPrompts[selectedVersion] ?? currentPrompts);
+      : (archived[selectedVersion] ?? {});
 
   const hasVersions = versions.length > 0;
 
@@ -354,6 +380,16 @@ export default function AiPromptsSection({
         Each panel links to the source file in GitHub so you can inspect the
         exact code.
       </p>
+      {loading && (
+        <p role="status" className="text-sm italic text-fred-text/70">
+          Loading the {selectedVersion} prompts…
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-sm text-red-700">
+          {error}
+        </p>
+      )}
 
       {PANELS.map((panel) => (
         <details key={panel.id} className={panelClass}>

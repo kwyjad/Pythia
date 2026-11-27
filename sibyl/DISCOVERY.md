@@ -244,9 +244,11 @@ merges `forecast.ensemble_spd` + `raw_spd` sources by `model_name` — a
 
 ## 8. fred_overview.md
 
-`docs/fred_overview.md`, rendered on the About page. **Must run
-`bash scripts/snapshot_overview.sh` before editing** and commit the snapshot
-alongside (per CLAUDE.md). Prompt files similarly require
+`docs/fred_overview.md`, rendered on the About page. Sibyl is described in
+its Section 6 ("Sibyl"), summarised in "Fred in brief", and changes go in
+"Changes in this Version" at the end. **Must run
+`bash scripts/snapshot_overview.sh "" "<what is about to change>"` before
+editing** and commit the snapshot alongside (per CLAUDE.md). Prompt files similarly require
 `bash scripts/snapshot_prompts.sh` before editing.
 
 ## 9. GitHub Actions
@@ -314,7 +316,7 @@ disagreement is the mean pairwise JSD of the K trial bucket vectors.
 | `web/src/components/RiskIndexPanel.tsx` | Sibyl toggle for PA KPI view |
 | `web/src/app/sibyl/*` | new dashboard page |
 | `web/src/lib/types.ts` | Sibyl response types |
-| `docs/fred_overview.md` | Sibyl section (after snapshot) |
+| `docs/fred_overview.md` | Section 6, "Sibyl" (after snapshot) |
 | `.github/workflows/run_sibyl.yml` | new workflow |
 | `CLAUDE.md`, `README.md` | documentation |
 

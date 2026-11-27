@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Snapshot fred_overview.md for versioning on the About page.
-# Usage: bash scripts/snapshot_overview.sh [YYYY-MM-DD] [label]
-# If no date is provided, today's date is used.
-# If no label is provided, "Snapshot" is used.
+# Usage: bash scripts/snapshot_overview.sh [YYYY-MM-DD] "label"
+# If the date is empty or omitted, today's date is used.
+# The label is required: it says what is about to change, and it is what the
+# About page's version dropdown shows. Example:
+#   bash scripts/snapshot_overview.sh "" "Before the December model line-up"
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATE="${1:-$(date +%Y-%m-%d)}"
-LABEL="${2:-Snapshot}"
+LABEL="${2:-}"
+if [ -z "$LABEL" ] || [ "$LABEL" = "Snapshot" ]; then
+  echo "ERROR: give a label saying what is about to change, e.g."
+  echo "  bash scripts/snapshot_overview.sh \"\" \"Before the December model line-up\""
+  exit 1
+fi
 DIR="$REPO_ROOT/docs/overview/$DATE"
 MANIFEST="$REPO_ROOT/docs/overview/versions.json"
 
