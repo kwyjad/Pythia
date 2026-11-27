@@ -24,7 +24,7 @@ import numpy as np
 from pythia.buckets import interior_thresholds_for, labels_for, n_buckets_for
 from pythia.config import load as load_cfg
 from pythia.tools.compute_calibration_pythia import AGGREGATE_MODEL_NAMES
-from pythia.tools.scoring_class import scored_only_clause
+from pythia.tools.scoring_class import exact_outcome_clause, scored_only_clause
 from pythia.tools.compute_scores import (
     PA_THRESHOLDS,
     FATAL_THRESHOLDS,
@@ -156,8 +156,14 @@ def _latest_run_clause(conn: Any, table: str, alias: str) -> str:
 
 def _scored(conn: Any, alias: str) -> str:
     """Leave out indicative ACE/PA months (``pythia/tools/scoring_class.py``):
-    a selected sample, never advice. '' on a DB predating the column."""
-    return scored_only_clause(conn, alias, prefix="\n          AND ")
+    a selected sample, never advice. '' on a DB predating the column.
+
+    Also leaves out a horizon resolved to a LOWER BOUND (the ACE/PA DTM rung,
+    Nov 2026): its brier/log/crps rows do not exist (it is scored under the
+    censored types, which advice never reads), and its value read as an
+    observed bucket would bias the shares toward the bound's bucket."""
+    return (scored_only_clause(conn, alias, prefix="\n          AND ")
+            + exact_outcome_clause(conn, alias, prefix="\n          AND "))
 
 
 def _member_source_clause(names: Sequence[str] | str, alias: str = "fr") -> Tuple[str, List[Any]]:

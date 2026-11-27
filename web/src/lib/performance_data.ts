@@ -360,3 +360,36 @@ export function skillBarGeometry(
   if (Math.abs(c) < 1e-9) return { side: "zero", widthPct: 0, clipped: false };
   return { side: c > 0 ? "pos" : "neg", widthPct: (Math.abs(c) / sc) * 50, clipped };
 }
+
+/** Score types written for an ACE/PA outcome that is only a LOWER BOUND
+ *  (the IOM DTM rung). Their own scale; never pooled with brier/log/crps,
+ *  never in a headline, shown as their own line. */
+export const CENSORED_SCORE_TYPES = ["brier_censored", "log_censored", "crps_censored"] as const;
+export const CENSORED_SCORE_LABELS: Record<(typeof CENSORED_SCORE_TYPES)[number], string> = {
+  brier_censored: "Brier (at least)",
+  log_censored: "Log Loss (at least)",
+  crps_censored: "CRPS (at least)",
+};
+
+export type CensoredCell = {
+  scoreType: (typeof CENSORED_SCORE_TYPES)[number];
+  value: number;
+  nQuestions: number;
+};
+
+/** The censored scores of one model, from the overall rows; [] when none. */
+export function censoredCells(
+  rows: PerformanceSummaryRow[] | undefined,
+  model: string | null | undefined,
+  stat: Stat,
+): CensoredCell[] {
+  const out: CensoredCell[] = [];
+  for (const st of CENSORED_SCORE_TYPES) {
+    const r = (rows ?? []).find((x) => x.score_type === st && x.model_name === model);
+    const v = r ? (stat === "median" ? r.median_value ?? r.avg_value : r.avg_value) : null;
+    if (r && v != null && r.n_questions > 0) {
+      out.push({ scoreType: st, value: v, nQuestions: r.n_questions });
+    }
+  }
+  return out;
+}

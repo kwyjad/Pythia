@@ -14,7 +14,7 @@ from resolver.db import duckdb_io
 
 from pythia.buckets import bucket_schema_version, get_bucket_specs
 from pythia.config import load as load_cfg
-from pythia.tools.scoring_class import scored_only_clause
+from pythia.tools.scoring_class import exact_outcome_clause, scored_only_clause
 
 
 LOGGER = logging.getLogger(__name__)
@@ -379,7 +379,7 @@ def update_bucket_centroids_ema(
                 FROM resolutions r
                 JOIN questions q ON q.question_id = r.question_id
                 WHERE upper(q.metric) = ?
-                  AND r.value IS NOT NULL{scored_only_clause(conn, "r", prefix=chr(10) + "                  AND ")}
+                  AND r.value IS NOT NULL{scored_only_clause(conn, "r", prefix=chr(10) + "                  AND ")}{exact_outcome_clause(conn, "r", prefix=chr(10) + "                  AND ")}
             )
             SELECT
                 COALESCE(UPPER(hazard_code), '*') AS hazard_code,

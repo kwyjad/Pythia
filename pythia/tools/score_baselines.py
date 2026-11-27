@@ -60,10 +60,14 @@ from pythia.tools.base_rate_spd import (
 from pythia.tools.compute_deviation import _anchor_ym
 from pythia.tools.compute_scores import (
     _brier,
+    _brier_censored,
     _bucket_index,
     _crps_like,
     _log_score,
+    _log_score_censored,
+    _rps_censored,
 )
+from pythia.tools.scoring_class import censored_applies, migrate_resolutions_is_lower_bound
 from resolver.db import duckdb_io
 
 LOGGER = logging.getLogger(__name__)
@@ -184,7 +188,8 @@ def _load_resolution_pairs(conn) -> List[Dict[str, Any]]:
         r.value AS resolved_value,
         q.window_start_date,
         q.target_month,
-        COALESCE(q.is_test, FALSE) AS is_test
+        COALESCE(q.is_test, FALSE) AS is_test,
+        COALESCE(r.is_lower_bound, FALSE) AS is_lower_bound
       FROM questions q
       JOIN resolutions r ON q.question_id = r.question_id
       JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
@@ -203,9 +208,21 @@ def _load_resolution_pairs(conn) -> List[Dict[str, Any]]:
             "window_start_date": r[6],
             "target_month": r[7],
             "is_test": bool(r[8]),
+            "is_lower_bound": bool(r[9]),
         }
         for r in rows
     ]
+
+
+def _score_rows(vec: List[float], j: int, censored: bool) -> List[Tuple[str, float]]:
+    """The three SPD scores, exact or censored (a lower-bound outcome, see
+    compute_scores), so a reference is scored the same way as the models it
+    is paired with."""
+    if censored:
+        return [("brier_censored", _brier_censored(vec, j)),
+                ("log_censored", _log_score_censored(vec, j)),
+                ("crps_censored", _rps_censored(vec, j))]
+    return [("brier", _brier(vec, j)), ("log", _log_score(vec, j)), ("crps", _crps_like(vec, j))]
 
 
 def _write_scores(
@@ -315,6 +332,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                 LOGGER.info("score_baselines: table %s not found; nothing to do.", table)
                 return counters
 
+        migrate_resolutions_is_lower_bound(conn)
         pairs = _load_resolution_pairs(conn)
         LOGGER.info("score_baselines: %d (question, horizon) pairs with resolutions.", len(pairs))
         if not pairs:
@@ -398,16 +416,22 @@ def score_baselines(db_url: str) -> Dict[str, int]:
             if j is None:
                 counters["skipped_bad_resolution"] += 1
                 continue
+            censored = censored_applies(pair["hazard_code"], metric, pair.get("is_lower_bound"))
+            if censored and j == 0:
+                # A lower bound in bucket 0 states nothing; clear and skip.
+                conn.execute(
+                    "DELETE FROM scores WHERE question_id = ? AND horizon_m = ? AND metric = ? "
+                    "AND model_name LIKE '\\_\\_ext\\_%' ESCAPE '\\' AND run_id IS NULL",
+                    [qid, hm, metric],
+                )
+                counters["skipped_lower_bound_bucket_0"] = counters.get("skipped_lower_bound_bucket_0", 0) + 1
+                continue
 
             uniform = [1.0 / k] * k
             _write_scores(
                 conn, question_id=qid, horizon_m=hm, metric=metric,
                 model_name=UNIFORM_MODEL_NAME,
-                score_rows=[
-                    ("brier", _brier(uniform, j)),
-                    ("log", _log_score(uniform, j)),
-                    ("crps", _crps_like(uniform, j)),
-                ],
+                score_rows=_score_rows(uniform, j, censored),
                 is_test=pair["is_test"], now=now,
             )
             _audit(conn, qid, hm, UNIFORM_MODEL_NAME, metric, uniform,
@@ -427,11 +451,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                     _write_scores(
                         conn, question_id=qid, horizon_m=hm, metric=metric,
                         model_name=PERSISTENCE_MODEL_NAME,
-                        score_rows=[
-                            ("brier", _brier(vec, j)),
-                            ("log", _log_score(vec, j)),
-                            ("crps", _crps_like(vec, j)),
-                        ],
+                        score_rows=_score_rows(vec, j, censored),
                         is_test=pair["is_test"], now=now,
                     )
                     _audit(conn, qid, hm, PERSISTENCE_MODEL_NAME, metric, vec,
@@ -459,11 +479,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                     _write_scores(
                         conn, question_id=qid, horizon_m=hm, metric=metric,
                         model_name=ref_name,
-                        score_rows=[
-                            ("brier", _brier(lv_vec, j)),
-                            ("log", _log_score(lv_vec, j)),
-                            ("crps", _crps_like(lv_vec, j)),
-                        ],
+                        score_rows=_score_rows(lv_vec, j, censored),
                         is_test=pair["is_test"], now=now,
                     )
                     _audit(
@@ -497,11 +513,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
             _write_scores(
                 conn, question_id=qid, horizon_m=hm, metric=metric,
                 model_name=CLIMATOLOGY_MODEL_NAME,
-                score_rows=[
-                    ("brier", _brier(base_probs, j)),
-                    ("log", _log_score(base_probs, j)),
-                    ("crps", _crps_like(base_probs, j)),
-                ],
+                score_rows=_score_rows(base_probs, j, censored),
                 is_test=pair["is_test"], now=now,
             )
             _audit(conn, qid, hm, CLIMATOLOGY_MODEL_NAME, metric, base_probs,
