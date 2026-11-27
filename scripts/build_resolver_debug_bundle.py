@@ -1713,8 +1713,45 @@ class BundleBuilder:
         self._crisiswatch_backfill(dest)
         conflict = self._conflict_displacement(dest)
         no_data = self._pa_no_data(dest)
+        yield_ = self._conflict_extraction_yield(dest)
         return {"cells": cells, "figures": figures, "source_fetches": fetches,
-                "conflict_displacement": conflict, "pa_no_data": no_data}
+                "conflict_displacement": conflict, "pa_no_data": no_data,
+                "conflict_extraction_yield": yield_}
+
+    #: Seconds the conflict extraction yield report may spend; sections past
+    #: it are named as skipped in the report.
+    CONFLICT_YIELD_BUDGET_SEC = 180.0
+
+    def _conflict_extraction_yield(self, dest: Path) -> dict[str, Any]:
+        """Where the ReliefWeb conflict displacement figures are lost.
+
+        ``scripts/ci/conflict_extraction_yield.py`` over 2024-10 to the latest
+        complete month: the funnel from cells to admitted figures, rejections
+        by reason, the period and not-new splits, the document cap, the
+        publication lag, and the months each ladder rung resolves. It reads
+        only; written as ``hazard/conflict_extraction_yield.{md,json}``.
+        """
+
+        out_dir = dest
+        if self.con is None:
+            write_json(out_dir / "conflict_extraction_yield.json",
+                       {"stub": True, "reason": "no database"})
+            return {}
+        try:
+            from scripts.ci import conflict_extraction_yield as cey
+
+            report = cey.build_report(self.con, max_seconds=self.CONFLICT_YIELD_BUDGET_SEC)
+            report = redact_obj(report, self.secrets)
+            write_json(out_dir / "conflict_extraction_yield.json", report)
+            write_text(out_dir / "conflict_extraction_yield.md",
+                       redact_text(cey.render_markdown(report), self.secrets))
+        except Exception as exc:  # noqa: BLE001 - a collector must not fail the phase
+            self.problem(f"conflict extraction yield failed: {exc}")
+            write_json(out_dir / "conflict_extraction_yield.json",
+                       {"stub": True, "reason": str(exc)})
+            return {}
+        return {"funnel": report.get("funnel"), "stub": report.get("stub", False),
+                "top_reasons": [t["reason"] for t in report.get("top_reasons") or []]}
 
     #: Seconds the NO_DATA breakdown may spend replaying cached extractions
     #: per hazard. Cells past it are counted from their stored reasons.
@@ -5749,7 +5786,8 @@ class BundleBuilder:
             "| `http/` | every outbound call: URL, status, timing, response envelope |",
             "| `db/` | table counts before and after, freshness per table, fixed queries |",
             "| `hazard/` | per-cell and per-figure ledgers, extraction spend, backcast state, "
-            "and `pa_no_data_breakdown.json` (why flood and cyclone cells ended NO_DATA) |",
+            "`pa_no_data_breakdown.json` (why flood and cyclone cells ended NO_DATA), and "
+            "`conflict_extraction_yield.md` (where ReliefWeb conflict displacement figures are lost) |",
             "| `config/` | the rulebook, connector configs and workflows, verbatim |",
             "| `code/` | the source files that participated, verbatim |",
             "| `checks/` | the issue register, contradictions and reconciliation |",

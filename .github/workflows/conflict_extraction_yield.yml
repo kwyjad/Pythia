@@ -1,0 +1,92 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: where the ReliefWeb conflict displacement figures are lost
+# (scripts/ci/conflict_extraction_yield.py, Nov 2026). Opens the canonical DB
+# read-only and writes nothing back, so it is not in the pythia-resolver-db
+# concurrency group and can never queue behind or block a pipeline stage. It
+# changes no resolution, scoring or eligibility rule. The same report is built
+# every month inside the resolver debug bundle (hazard/conflict_extraction_yield.md).
+name: Conflict extraction yield
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First month (YYYY-MM)"
+        required: false
+        default: "2024-10"
+        type: string
+      db_run_id:
+        description: "Optional: force the canonical DB from a specific Actions run ID"
+        required: false
+        default: ""
+        type: string
+  pull_request:
+    paths:
+      - "scripts/ci/conflict_extraction_yield.py"
+      - ".github/workflows/conflict_extraction_yield.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  yield:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pip install -r python_library_requirements.txt
+          pip install "duckdb>=1.4,<2"
+
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          include-failed-runs-from: |
+            Hazard Backcast
+            Resolver Update
+
+      - name: Run the report
+        env:
+          IN_START: ${{ inputs.start || '2024-10' }}
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m scripts.ci.conflict_extraction_yield --db data/resolver.duckdb \
+            --start "${IN_START}" --out-dir diagnostics/conflict_extraction_yield
+
+      - name: Print the report
+        if: always()
+        run: |
+          f=diagnostics/conflict_extraction_yield/conflict_extraction_yield.md
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+            cat diagnostics/conflict_extraction_yield/conflict_extraction_yield.json
+          else
+            echo "The report was not written; check the previous step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conflict-extraction-yield
+          path: diagnostics/conflict_extraction_yield/
+          if-no-files-found: warn
+          retention-days: 14
