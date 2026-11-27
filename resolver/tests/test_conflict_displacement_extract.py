@@ -126,7 +126,7 @@ def test_a_new_conflict_figure_inside_the_month_is_admitted(con, rulebook):
     assert best["value_type"] == "new_displacements"
     assert best["period_start"] == "2026-03-03" and best["period_end"] == "2026-03-18"
     assert best["doc_url"].endswith("/101")
-    assert best["prompt_version"] == "conflict_v1"
+    assert best["prompt_version"] == "conflict_v2"
     assert "12,500" in best["quote"]
     # The document went into the machine's shared cache, under ACE.
     n = con.execute(
@@ -172,10 +172,74 @@ def test_a_cumulative_figure_is_rejected(con, rulebook):
     assert _reasons(con) == {cde.REJECT_NOT_NEW: 1}
 
 
-def test_an_unstated_figure_is_rejected_as_not_new(con, rulebook):
-    row = _run(con, rulebook, [_item("101")], [_fig(cumulative_or_new="unstated")])
+@pytest.mark.parametrize("flag", ["", None, "unstated", "maybe"])
+def test_a_blank_flag_is_flag_missing_never_not_new(con, rulebook, flag):
+    fig = _fig()
+    if flag is None:
+        fig.pop("cumulative_or_new")
+    else:
+        fig["cumulative_or_new"] = flag
+    row = _run(con, rulebook, [_item("101")], [fig])
     assert row["reason"] == cde.CELL_NO_ADMISSIBLE
-    assert _reasons(con) == {cde.REJECT_NOT_NEW: 1}
+    assert _reasons(con) == {cde.REJECT_FLAG_MISSING: 1}
+
+
+def test_unclear_has_its_own_reason_and_current_stock_is_not_new(con, rulebook):
+    fig_unclear = _fig(cumulative_or_new="unclear")
+    stock = _fig(value=8900000, quote="Since April 2023, 8,900,000 people have been displaced across Sudan.",
+                 cumulative_or_new="current_stock")
+    _run(con, rulebook, [_item("101")], [fig_unclear, stock])
+    assert _reasons(con) == {cde.REJECT_FLAG_UNCLEAR: 1, cde.REJECT_NOT_NEW: 1}
+
+
+def test_the_prompt_requires_the_flag_from_the_enum(con, rulebook):
+    calls: list[str] = []
+    _run(con, rulebook, [_item("101")], [_fig()], calls=calls)
+    assert '"new" | "cumulative" | "current_stock" | "unclear"' in calls[0]
+    assert "REQUIRED" in calls[0] and "Never leave it empty" in calls[0]
+    assert rulebook.get("conflict_displacement.extraction.prompt_version") == "conflict_v2"
+
+
+def _seed_v1(con, rulebook, figures, doc="101", ym="2026-03"):
+    """A cached v1 answer for one document, as the Oct 2026 backfill wrote it."""
+    _run(con, rulebook, [_item(doc)], [], ym=ym)  # caches the document text
+    con.execute("DELETE FROM conflict_doc_extractions")
+    con.execute(
+        "INSERT INTO conflict_doc_extractions (doc_id, iso3, year, month, hazard, model, "
+        "prompt_version, status, figures_json, cost_usd) VALUES (?, 'SDN', ?, ?, 'ACE', ?, "
+        "'conflict_v1', 'ok', ?, 0.002)",
+        [doc, int(ym[:4]), int(ym[5:]), MODEL, json.dumps({"figures": figures, "rejected": []})],
+    )
+
+
+def test_only_flag_missing_documents_are_read_again(con, rulebook):
+    blank = dict(_fig(cumulative_or_new="unstated"), doc_id="101")
+    _seed_v1(con, rulebook, [blank])
+    _seed_definite = dict(_fig(), doc_id="102")
+    con.execute(
+        "INSERT INTO conflict_doc_extractions (doc_id, iso3, year, month, hazard, model, "
+        "prompt_version, status, figures_json) VALUES ('102', 'SDN', 2026, 3, 'ACE', ?, "
+        "'conflict_v1', 'ok', ?)", [MODEL, json.dumps({"figures": [_seed_definite]})],
+    )
+    wanted = cde.flag_missing_documents(con, rulebook)
+    assert [(w["doc_id"], w["n_figures_flag_missing"]) for w in wanted] == [("101", 1)]
+    plan = cde.plan_reextract(con, rulebook, cde.load_budget(con, rulebook, TODAY))
+    assert plan["expected_calls"] == 1 and plan["documents"] == 1
+    calls: list[str] = []
+    out = cde.reextract_flag_missing(con, rulebook, call=_call([_fig()], calls),
+                                     model_ref=MODEL, today=TODAY)
+    assert len(calls) == 1 and out["calls_made"] == 1
+    # The document now has a v2 answer and is no longer wanted.
+    assert cde.flag_missing_documents(con, rulebook) == []
+    assert cde.extracted_figure(con, "SDN", "2026-03")["value_persons"] == 12500
+
+
+def test_a_definite_v1_answer_is_reused_and_not_paid_for_again(con, rulebook):
+    _seed_v1(con, rulebook, [dict(_fig(), doc_id="101")])
+    calls: list[str] = []
+    row = _run(con, rulebook, [_item("101")], [_fig()], calls=calls)
+    assert calls == [] and row["docs_cached"] == 1
+    assert row["reason"] == cde.CELL_ADMITTED
 
 
 def test_a_figure_for_another_month_is_rejected(con, rulebook):

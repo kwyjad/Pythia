@@ -173,7 +173,8 @@ def _reason_codes() -> Dict[str, Any]:
 
     period = (cde.REJECT_UNDATED, cde.REJECT_REVERSED, cde.REJECT_LONGER_THAN_MONTH,
               cde.REJECT_OUTSIDE_MONTH, cde.REJECT_CROSSES_MONTH)
-    conflict_rules = (cde.REJECT_NOT_NEW, cde.REJECT_NOT_CONFLICT, *period)
+    conflict_rules = (cde.REJECT_NOT_NEW, cde.REJECT_FLAG_MISSING, cde.REJECT_FLAG_UNCLEAR,
+                      cde.REJECT_NOT_CONFLICT, *period)
     return {"module": cde, "period": period, "conflict_rules": conflict_rules,
             "not_new": cde.REJECT_NOT_NEW}
 
@@ -423,7 +424,9 @@ def build_report(
 
     # (a) funnel -------------------------------------------------------------
     try:
-        ex = extraction_counts(con, countries, months, settings.get("prompt_version"))
+        # Every prompt version: a document read under conflict_v1 and kept under
+        # conflict_v2 (REUSABLE_PRIOR_VERSIONS) was still read once.
+        ex = extraction_counts(con, countries, months, None)
     except Exception as exc:  # noqa: BLE001
         ex = {}
         report["sections_skipped"]["documents_extracted"] = str(exc)

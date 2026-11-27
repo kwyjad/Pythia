@@ -47,7 +47,9 @@ Admissible only if all hold, each rejection counted with its reason:
 1. the quote is found in the text sent and states the value
    (``extract.parse_response``);
 2. ``cumulative_or_new == "new"`` (a total since an earlier date, or people
-   currently displaced, is a stock, not a month's flow);
+   currently displaced, is a stock, not a month's flow). The field is
+   required (``conflict_v2``): a blank or missing flag is a parse defect,
+   ``flag_missing``, never an answer, and ``unclear`` is ``flag_unclear``;
 3. the figure is attributed to conflict or violence
    (``conflict_displacement.admissible_causes``);
 4. the figure's date or period lies inside the month. A period longer than
@@ -112,6 +114,30 @@ REJECT_REVERSED = "period_reversed"
 REJECT_LONGER_THAN_MONTH = "period_longer_than_month"
 REJECT_CROSSES_MONTH = "period_crosses_month_boundary"
 REJECT_OUTSIDE_MONTH = "period_outside_month"
+#: The model left the required new/cumulative flag blank, or wrote a value
+#: outside the enum. A parse defect, never read as "not new" (Nov 2026: 360
+#: of the 505 not-new rejections were this). The v1 parser folded a blank
+#: into "unstated", so a v1 "unstated" is read the same way.
+REJECT_FLAG_MISSING = "flag_missing"
+#: The model said it could not tell whether the figure is new.
+REJECT_FLAG_UNCLEAR = "flag_unclear"
+
+# --- The new/cumulative flag (conflict_v2) -------------------------------------
+FLAG_NEW = "new"
+FLAG_CUMULATIVE = "cumulative"
+FLAG_CURRENT_STOCK = "current_stock"
+FLAG_UNCLEAR = "unclear"
+FLAG_VALUES = (FLAG_NEW, FLAG_CUMULATIVE, FLAG_CURRENT_STOCK, FLAG_UNCLEAR)
+#: Flags that say the figure is a stock or a running total, not a month's flow.
+FLAG_NOT_NEW = (FLAG_CUMULATIVE, FLAG_CURRENT_STOCK)
+#: Earlier conflict prompt versions whose cached answers stay valid under the
+#: current one when every figure carries a definite flag (v1 "new" and
+#: "cumulative" mean what v2 means; v1 "cumulative" also covered what v2 calls
+#: current_stock, and both are rejected as not new). A v1 answer with a blank
+#: or "unstated" flag is never reused: that document is read again.
+REUSABLE_PRIOR_VERSIONS = ("conflict_v1",)
+#: v1 flags that are definite answers under v2.
+_DEFINITE_V1_FLAGS = (FLAG_NEW, FLAG_CUMULATIVE)
 # Per cell.
 CELL_ADMITTED = "admitted_figure"
 CELL_NO_DOCUMENTS = "no_documents"
@@ -273,10 +299,12 @@ report the number of households and set "unit" to "households".
 separately with its own area.
 4. Every figure must carry the exact sentence it came from, copied \
 character for character from the document.
-5. Say whether the figure counts people NEWLY displaced in a stated period \
-("new"), or a running total since an earlier date or people currently \
-displaced ("cumulative"). If the document does not make this clear, use \
-"unstated".
+5. "cumulative_or_new" is REQUIRED for every figure and must be exactly \
+one of: "new" (people newly displaced during a stated period), "cumulative" \
+(a running total since an earlier date, such as "since 15 April" or "to \
+date"), "current_stock" (people currently displaced, hosted or living in \
+displacement, with no period of new movement), or "unclear" (the document \
+does not say which). Never leave it empty.
 6. Give the date or period the figure refers to exactly as the document \
 states it, as YYYY-MM-DD. For a period give its first and last day. Leave \
 a field empty if the document does not state it. Never guess a date.
@@ -304,7 +332,7 @@ stated>",
 YYYY-MM-DD, else empty>",
     "period_end": "<last day of the period the figure covers, YYYY-MM-DD, \
 else empty>",
-    "cumulative_or_new": "new" | "cumulative" | "unstated",
+    "cumulative_or_new": "new" | "cumulative" | "current_stock" | "unclear",
     "cause": "conflict" | "violence" | "disaster" | "other" | "unstated"
   }}
 ]}}
@@ -339,9 +367,20 @@ def build_prompt(
     )
 
 
+def normalise_flag(value: Any) -> str:
+    """The new/cumulative flag as written, lower-cased; ``""`` when absent."""
+
+    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
 def _with_extras(figure: ExtractedFigure, raw: Any) -> ConflictFigure:
     raw = raw if isinstance(raw, dict) else {}
     base = {f.name: getattr(figure, f.name) for f in dataclasses.fields(ExtractedFigure)}
+    if "cumulative_or_new" in raw:
+        # The flag as the model wrote it. The machine parser folds a blank,
+        # and any value outside ITS enum (current_stock, unclear), into
+        # "unstated"; the conflict rules need to tell those apart.
+        base["cumulative_or_new"] = normalise_flag(raw.get("cumulative_or_new"))
     return ConflictFigure(
         **base,
         period_start=str(raw.get("period_start") or "").strip(),
@@ -408,13 +447,62 @@ def load_cached(
         [str(doc_id), str(model), str(prompt_version), iso3.upper(), hazard, year, month],
     ).fetchone()
     if row is None:
-        return None
+        return _load_reusable_prior(
+            con, doc_id, model, prompt_version, iso3=iso3, hazard=hazard, ym=ym
+        )
     return {
         "status": row[0],
         "payload": json.loads(row[1] or "{}"),
         "n_rejected": int(row[2] or 0),
         "cost_usd": float(row[3] or 0.0),
     }
+
+
+def prior_answer_reusable(payload: dict[str, Any]) -> bool:
+    """True when an earlier-version answer means the same under the current
+    prompt: every figure carries a definite v1 flag (or there are none)."""
+
+    for fig in (payload or {}).get("figures") or []:
+        if normalise_flag(fig.get("cumulative_or_new")) not in _DEFINITE_V1_FLAGS:
+            return False
+    return True
+
+
+def _load_reusable_prior(
+    con: "duckdb.DuckDBPyConnection",
+    doc_id: str,
+    model: str,
+    prompt_version: str,
+    *,
+    iso3: str,
+    hazard: str,
+    ym: str,
+) -> dict[str, Any] | None:
+    """An earlier prompt version's ok answer that the current one would give
+    the same way, or None (the document is then read again)."""
+
+    priors = [v for v in REUSABLE_PRIOR_VERSIONS if v != prompt_version]
+    if not priors:
+        return None
+    year, month = _year_month(ym)
+    rows = con.execute(
+        f"""
+        SELECT status, figures_json, n_rejected, cost_usd, prompt_version
+        FROM conflict_doc_extractions
+        WHERE doc_id = ? AND model = ? AND prompt_version IN ({', '.join('?' for _ in priors)})
+          AND iso3 = ? AND hazard = ? AND year = ? AND month = ? AND status = 'ok'
+        ORDER BY created_at DESC
+        """,
+        [str(doc_id), str(model), *priors, iso3.upper(), hazard, year, month],
+    ).fetchall()
+    for status, figures_json, n_rejected, cost, version in rows:
+        payload = json.loads(figures_json or "{}")
+        if prior_answer_reusable(payload):
+            return {
+                "status": status, "payload": payload, "n_rejected": int(n_rejected or 0),
+                "cost_usd": float(cost or 0.0), "reused_prompt_version": version,
+            }
+    return None
 
 
 def write_extraction(
@@ -750,6 +838,24 @@ def period_reason(start: dt.date | None, end: dt.date | None, ym: str) -> str | 
     return None
 
 
+def flag_rejection(flag: Any) -> str | None:
+    """None for a new figure; otherwise the reason the flag rejects it.
+
+    ``cumulative`` and ``current_stock`` are stocks (not new); ``unclear`` is
+    the model saying it cannot tell; a blank, the v1 parser's ``unstated``
+    (which a blank became) or any value outside the enum is a parse defect.
+    """
+
+    value = normalise_flag(flag)
+    if value == FLAG_NEW:
+        return None
+    if value in FLAG_NOT_NEW:
+        return REJECT_NOT_NEW
+    if value == FLAG_UNCLEAR:
+        return REJECT_FLAG_UNCLEAR
+    return REJECT_FLAG_MISSING
+
+
 def _rejection(figure: ExtractedFigure, reason: str, **extra: Any) -> dict[str, Any]:
     return {
         "reason": reason,
@@ -781,8 +887,9 @@ def admit_figures(
     dated: list[tuple[ConflictFigure, dict[str, Any]]] = []
     for raw in figures:
         figure = raw if isinstance(raw, ConflictFigure) else _with_extras(raw, {})
-        if str(figure.cumulative_or_new).lower() != "new":
-            rejected.append(_rejection(figure, REJECT_NOT_NEW,
+        flag_reason = flag_rejection(figure.cumulative_or_new)
+        if flag_reason is not None:
+            rejected.append(_rejection(figure, flag_reason,
                                        cumulative_or_new=figure.cumulative_or_new))
             continue
         if str(figure.cause).lower() not in causes:
@@ -1033,6 +1140,281 @@ def run_cell(
 
 
 # ---------------------------------------------------------------------------
+# Admission over the cache (no model call, no ReliefWeb fetch)
+# ---------------------------------------------------------------------------
+
+
+def _cached_answers(
+    con: "duckdb.DuckDBPyConnection", iso3: str, rulebook: Rulebook
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Per (ym, doc_id), the answer admission reads: the current prompt
+    version's ok row when there is one, else the newest ok row of an earlier
+    version (its blank flags then reject as ``flag_missing``)."""
+
+    current = _prompt_version(rulebook)
+    rows = con.execute(
+        """
+        SELECT doc_id, year, month, model, prompt_version, figures_json, created_at
+        FROM conflict_doc_extractions
+        WHERE status = 'ok' AND hazard = ? AND iso3 = ?
+        ORDER BY created_at
+        """,
+        [HAZARD, iso3.upper()],
+    ).fetchall()
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for doc_id, year, month, model, version, figures_json, _created in rows:
+        key = (f"{int(year):04d}-{int(month):02d}", str(doc_id))
+        held = out.get(key)
+        if held is not None and held["prompt_version"] == current and version != current:
+            continue
+        try:
+            payload = json.loads(figures_json or "{}")
+        except ValueError:
+            continue
+        out[key] = {"model": str(model), "prompt_version": str(version), "payload": payload}
+    return out
+
+
+def cell_figures_from_cache(
+    con: "duckdb.DuckDBPyConnection",
+    iso3: str,
+    rulebook: Rulebook,
+    answers: dict[tuple[str, str], dict[str, Any]] | None = None,
+    documents: dict[tuple[str, str], dict[str, Any]] | None = None,
+) -> dict[str, tuple[list[ConflictFigure], list[dict[str, Any]], int]]:
+    """Per month: (figures, parse rejections, documents answered), rebuilt
+    from the cached answers and the cached document text."""
+
+    iso3 = iso3.upper()
+    answers = answers if answers is not None else _cached_answers(con, iso3, rulebook)
+    if documents is None:
+        documents = {}
+        for doc in docs_mod.documents_for_country_month(con, iso3, None, HAZARD):
+            documents[(str(doc.get("ym") or ""), str(doc.get("doc_id") or ""))] = doc
+    out: dict[str, tuple[list[ConflictFigure], list[dict[str, Any]], int]] = {}
+    for (ym, doc_id), answer in sorted(answers.items()):
+        figs, rej, n = out.get(ym, ([], [], 0))
+        cached = {"payload": answer["payload"]}
+        document = documents.get((ym, doc_id))
+        figs = figs + figures_from_cache(cached, answer["model"], document)
+        rej = rej + [{**r, "doc_id": doc_id} for r in answer["payload"].get("rejected") or []]
+        out[ym] = (figs, rej, n + 1)
+    return out
+
+
+def _ledger_cells(con: "duckdb.DuckDBPyConnection", iso3: str) -> dict[str, dict[str, Any]]:
+    try:
+        return {
+            r["ym"]: r
+            for r in _row_dict(con.execute(
+                "SELECT * FROM conflict_displacement_cell_ledger WHERE iso3 = ?", [iso3.upper()]
+            ))
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _count_reasons(rejected: Iterable[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in rejected:
+        counts[str(r.get("reason"))] = counts.get(str(r.get("reason")), 0) + 1
+    return counts
+
+
+_FIGURE_REASONS = (CELL_ADMITTED, CELL_NO_ADMISSIBLE, CELL_NO_FIGURE_STATED)
+
+
+def _cell_reason(previous: str | None, n_extracted: int, n_admitted: int) -> str:
+    if n_admitted:
+        return CELL_ADMITTED
+    if previous in (None, "", *_FIGURE_REASONS):
+        return CELL_NO_ADMISSIBLE if n_extracted else CELL_NO_FIGURE_STATED
+    return str(previous)
+
+
+def readmit_countries(
+    con: "duckdb.DuckDBPyConnection",
+    countries: Iterable[str],
+    rulebook: Rulebook,
+    *,
+    today: dt.date | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Admit every assessed cell of each country again from the cache.
+
+    No model call and no fetch. Rewrites the cell's candidates and the
+    admission half of its ledger row (figures, admitted, best, rejections);
+    the reading half (documents, calls, cost) is left as the run wrote it.
+    """
+
+    ensure_schema(con)
+    out: dict[str, Any] = {"countries": 0, "cells": 0, "figures_admitted": 0}
+    for iso3 in countries:
+        iso3 = iso3.upper()
+        try:
+            cells = _ledger_cells(con, iso3)
+            per_month = cell_figures_from_cache(con, iso3, rulebook)
+            for ym, ledger in cells.items():
+                figs, parse_rej, _n = per_month.get(ym, ([], [], 0))
+                admitted, rejected = admit_figures(figs, iso3, ym, rulebook)
+                write_candidates(con, iso3, ym, admitted, rulebook=rulebook,
+                                 run_id=run_id or ledger.get("run_id"))
+                all_rej = [*parse_rej, *rejected]
+                row = dict(ledger)
+                row.update(
+                    figures_extracted=len(figs), figures_admitted=len(admitted),
+                    rejected_counts_json=json.dumps(_count_reasons(all_rej), sort_keys=True),
+                    rejected_json=json.dumps(all_rej[:50], default=str),
+                    reason=_cell_reason(ledger.get("reason"), len(figs), len(admitted)),
+                    best_value=float(admitted[0][1]) if admitted else None,
+                    best_source_ref=figures_mod._source_ref(admitted[0][0]) if admitted else None,
+                )
+                write_ledger(con, row)
+                out["cells"] += 1
+                out["figures_admitted"] += len(admitted)
+            out["countries"] += 1
+        except Exception:  # noqa: BLE001 - one bad country never ends the pass
+            LOG.exception("[conflict_extract] re-admission of %s raised", iso3)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Re-reading documents whose flag was missing (no ReliefWeb fetch)
+# ---------------------------------------------------------------------------
+
+
+def flag_missing_documents(
+    con: "duckdb.DuckDBPyConnection", rulebook: Rulebook
+) -> list[dict[str, Any]]:
+    """Documents whose cached answer carries a blank or ``unstated`` flag and
+    that have no answer under the current prompt version yet.
+
+    One row per (document, cell): ``{iso3, ym, doc_id, model, prompt_version,
+    n_figures_flag_missing}``. These are the only documents the flag fix
+    re-reads; every other cached answer is reused (``REUSABLE_PRIOR_VERSIONS``).
+    """
+
+    current = _prompt_version(rulebook)
+    try:
+        rows = con.execute(
+            """
+            SELECT doc_id, iso3, year, month, model, prompt_version, figures_json
+            FROM conflict_doc_extractions
+            WHERE status = 'ok' AND hazard = ? AND prompt_version <> ?
+            """,
+            [HAZARD, current],
+        ).fetchall()
+        done = {
+            (str(d), str(i), int(y), int(m))
+            for d, i, y, m in con.execute(
+                "SELECT doc_id, iso3, year, month FROM conflict_doc_extractions "
+                "WHERE status = 'ok' AND hazard = ? AND prompt_version = ?",
+                [HAZARD, current],
+            ).fetchall()
+        }
+    except Exception as exc:  # noqa: BLE001 - no table: nothing to re-read
+        LOG.info("[conflict_extract] no extraction ledger to re-read: %s", exc)
+        return []
+    out: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+    for doc_id, iso3, year, month, model, version, figures_json in rows:
+        key = (str(doc_id), str(iso3), int(year), int(month))
+        if key in done:
+            continue
+        try:
+            figs = json.loads(figures_json or "{}").get("figures") or []
+        except ValueError:
+            continue
+        n_missing = sum(
+            1 for f in figs if normalise_flag(f.get("cumulative_or_new")) not in _DEFINITE_V1_FLAGS
+        )
+        if n_missing and key not in out:
+            out[key] = {
+                "iso3": str(iso3), "ym": f"{int(year):04d}-{int(month):02d}",
+                "doc_id": str(doc_id), "model": str(model), "prompt_version": str(version),
+                "n_figures_flag_missing": n_missing,
+            }
+    return sorted(out.values(), key=lambda r: (r["iso3"], r["ym"], r["doc_id"]))
+
+
+def plan_reextract(
+    con: "duckdb.DuckDBPyConnection", rulebook: Rulebook, budget: ExtractionBudget
+) -> dict[str, Any]:
+    """What re-reading the flag-missing documents will ask for and cost."""
+
+    docs = flag_missing_documents(con, rulebook)
+    per_call = observed_cost_per_call(con)
+    cells = sorted({(d["iso3"], d["ym"]) for d in docs})
+    return {
+        "documents": len(docs),
+        "cells": len(cells),
+        "countries": len({c for c, _ in cells}),
+        "figures_flag_missing": sum(d["n_figures_flag_missing"] for d in docs),
+        "expected_calls": len(docs),
+        "cost_per_call_usd": round(per_call, 5),
+        "expected_cost_usd": round(len(docs) * per_call, 2),
+        "calls_allowed_this_run": budget.remaining,
+        "prompt_version": _prompt_version(rulebook),
+    }
+
+
+def reextract_flag_missing(
+    con: "duckdb.DuckDBPyConnection",
+    rulebook: Rulebook,
+    *,
+    call: Any = None,
+    model_ref: str | None = None,
+    today: dt.date | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Re-read ONLY the flag-missing documents, from the cached text in
+    ``haz_raw_reliefweb_docs`` (no ReliefWeb fetch), under the current prompt,
+    then re-admit the countries touched. Never raises per cell."""
+
+    ensure_schema(con)
+    today = today or dt.date.today()
+    run_id = run_id or f"conflict_reextract_{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%S}"
+    budget = load_budget(con, rulebook, today)
+    wanted = flag_missing_documents(con, rulebook)
+    by_cell: dict[tuple[str, str], set[str]] = {}
+    for d in wanted:
+        by_cell.setdefault((d["iso3"], d["ym"]), set()).add(d["doc_id"])
+    names = _country_names()
+    calls = 0
+    cost = 0.0
+    missing_text = 0
+    for (iso3, ym), doc_ids in sorted(by_cell.items()):
+        try:
+            documents = [
+                d for d in docs_mod.documents_for_country_month(con, iso3, ym, HAZARD)
+                if str(d.get("doc_id") or "") in doc_ids
+            ]
+            missing_text += len(doc_ids) - len(documents)
+            if not documents:
+                continue
+            result = extract_mod.extract_for_cell(
+                con, iso3=iso3, ym=ym, hazard=HAZARD, rulebook=rulebook, budget=budget,
+                documents=documents, call=call, model_ref=model_ref,
+                country_name=names.get(iso3), profile=profile(run_id),
+            )
+            calls += result.calls_made
+            cost += result.cost_usd
+        except Exception:  # noqa: BLE001 - one bad cell never ends the run
+            LOG.exception("[conflict_extract] re-read of %s %s raised", iso3, ym)
+    readmitted = readmit_countries(con, sorted({c for c, _ in by_cell}), rulebook,
+                                   today=today, run_id=run_id)
+    return {
+        "run_id": run_id,
+        "documents_wanted": len(wanted),
+        "documents_without_cached_text": missing_text,
+        "cells": len(by_cell),
+        "calls_made": calls,
+        "cost_usd": round(cost, 4),
+        "budget": budget.as_provenance(),
+        "readmitted": readmitted,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Country and month planning
 # ---------------------------------------------------------------------------
 
@@ -1227,6 +1609,15 @@ def main(argv: list[str] | None = None) -> int:
                         help="every country on hs_country_list.txt, not only those with an ACE question")
     parser.add_argument("--max-minutes", type=float, default=None)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--reextract-flag-missing", action="store_true",
+                        help="re-read only the documents whose cached answer left the "
+                        "new/cumulative flag blank, from the cached text (no ReliefWeb "
+                        "fetch); prints the expected calls and cost first")
+    parser.add_argument("--readmit", action="store_true",
+                        help="admit every assessed cell again from the cache (no model "
+                        "call, no fetch)")
+    parser.add_argument("--max-cost-usd", type=float, default=None,
+                        help="stop before any call when the plan's expected cost exceeds this")
     parser.add_argument("--summary-out", default=None)
     args = parser.parse_args(argv)
     logging.basicConfig(level=env_log_level("LOG_LEVEL"),
@@ -1244,20 +1635,34 @@ def main(argv: list[str] | None = None) -> int:
         rulebook = load_rulebook()
         con = get_db(db)
         ensure_schema(con)
-        countries = [c.strip().upper() for c in args.countries.replace(",", " ").split() if c.strip()]
-        countries = countries or plan_countries(con, all_listed=args.all_listed)
-        today = dt.date.today()
-        months = args.months or complete_months(today, args.trailing)
-        budget = load_budget(con, rulebook, today)
-        info = plan(con, countries, months, rulebook, budget)
-        _print_plan(info)
-        summary = {"plan": info, "countries": countries}
-        if not args.plan_only:
-            summary = run(con, countries, months, rulebook, today=today,
-                          max_minutes=args.max_minutes)
-            summary["countries"] = countries
-            print(f"[conflict_extract] done: {json.dumps(summary['cells_by_reason'])}; "
-                  f"{summary['calls_made']} calls, USD {summary['cost_usd']}", flush=True)
+        if args.reextract_flag_missing:
+            budget = load_budget(con, rulebook)
+            info = plan_reextract(con, rulebook, budget)
+            print("[conflict_extract] re-read plan: {documents} documents in {cells} cells "
+                  "({countries} countries) carry {figures_flag_missing} figures with a blank "
+                  "flag; {expected_calls} calls, about USD {expected_cost_usd} at USD "
+                  "{cost_per_call_usd} a call; {calls_allowed_this_run} calls allowed this "
+                  "run".format(**info), flush=True)
+            summary = {"reextract_plan": info}
+            if args.max_cost_usd is not None and info["expected_cost_usd"] > args.max_cost_usd:
+                print(f"::error::expected cost USD {info['expected_cost_usd']} exceeds "
+                      f"--max-cost-usd {args.max_cost_usd}; nothing was called", flush=True)
+                summary["stopped"] = "over_max_cost"
+                exit_code = 1
+            elif not args.plan_only:
+                summary.update(reextract_flag_missing(con, rulebook))
+                print(f"[conflict_extract] re-read done: {summary['calls_made']} calls, "
+                      f"USD {summary['cost_usd']}", flush=True)
+        elif args.readmit:
+            countries = [c.strip().upper() for c in args.countries.replace(",", " ").split()
+                         if c.strip()] or [r[0] for r in con.execute(
+                "SELECT DISTINCT iso3 FROM conflict_displacement_cell_ledger ORDER BY 1"
+            ).fetchall()]
+            summary = {"readmitted": readmit_countries(con, countries, rulebook)}
+            print(f"[conflict_extract] re-admitted: {json.dumps(summary['readmitted'])}",
+                  flush=True)
+        else:
+            exit_code = _main_run(con, rulebook, args, summary)
     except Exception as exc:  # noqa: BLE001
         LOG.exception("[conflict_extract] run failed")
         summary["error"] = f"{type(exc).__name__}: {exc}"[:500]
@@ -1269,6 +1674,32 @@ def main(argv: list[str] | None = None) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return exit_code
+
+
+def _main_run(con, rulebook: Rulebook, args, summary: dict[str, Any]) -> int:
+    """The ordinary run: plan, then extract the cells (unless --plan-only)."""
+
+    countries = [c.strip().upper() for c in args.countries.replace(",", " ").split() if c.strip()]
+    countries = countries or plan_countries(con, all_listed=args.all_listed)
+    today = dt.date.today()
+    months = args.months or complete_months(today, args.trailing)
+    budget = load_budget(con, rulebook, today)
+    info = plan(con, countries, months, rulebook, budget)
+    _print_plan(info)
+    summary.update({"plan": info, "countries": countries})
+    if args.max_cost_usd is not None and info.get("expected_cost_usd", 0) > args.max_cost_usd:
+        print(f"::error::expected cost USD {info['expected_cost_usd']} exceeds "
+              f"--max-cost-usd {args.max_cost_usd}; nothing was called", flush=True)
+        summary["stopped"] = "over_max_cost"
+        return 1
+    if not args.plan_only:
+        result = run(con, countries, months, rulebook, today=today,
+                     max_minutes=args.max_minutes)
+        summary.update(result)
+        summary["countries"] = countries
+        print(f"[conflict_extract] done: {json.dumps(summary['cells_by_reason'])}; "
+              f"{summary['calls_made']} calls, USD {summary['cost_usd']}", flush=True)
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

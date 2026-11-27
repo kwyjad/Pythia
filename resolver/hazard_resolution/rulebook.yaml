@@ -1145,7 +1145,7 @@ conflict_displacement:
     enabled: true
     # The cache key. Distinct from extraction.prompt_version, so a PA cache
     # entry can never answer a conflict question or the reverse.
-    prompt_version: conflict_v1
+    prompt_version: conflict_v2
     # Its OWN monthly cap, counted over conflict_doc_extractions only. It
     # never draws on extraction.max_calls_per_month or the PA machine's
     # live reserve, which count haz_doc_extractions. At the observed USD
