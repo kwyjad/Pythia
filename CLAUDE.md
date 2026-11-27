@@ -543,7 +543,7 @@ After making any code changes, evaluate whether the following files need updatin
 
 - **CLAUDE.md** – Update if you've changed architecture, environment variables, failure modes, component behavior, workflow steps, or database schema. This is the authoritative reference for future Claude Code sessions.
 - **README.md** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
-- **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
+- **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Follow "Overview editing" below for its shape and rules. Assume readers understand forecasting and humanitarian data, but not code.
 - **docs/decks/** – The eight Fred slide decks. Any change that earns a "Changes in this Version" entry in `docs/fred_overview.md` also requires checking the decks `docs/decks/manifest.json` maps to the touched sections or code paths; see "Deck editing" below.
 
 Do not update these files for trivial changes (e.g. formatting, minor refactors with no behavioral change). Use your judgment.
@@ -1343,7 +1343,19 @@ Key prompt files:
 
 ## Overview editing
 
-Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overview.sh` first. This archives the current overview before changes so the About page can show historical versions. Commit the snapshot alongside the overview edits. A snapshot for today's date that already holds a DIFFERENT overview is never overwritten: the script writes `DATE-2` (then `-3`, ...), since the version key is a plain string to the About page (Oct 2026; before that a second edit on one day replaced the morning's "before" copy).
+Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overview.sh "" "<what is about to change>"` first. This archives the current overview so the About page can show historical versions. **The label is required** (the script refuses an empty label or the bare word "Snapshot"): it is what the version dropdown shows, and 77 of the first 87 snapshots said only "Snapshot". Commit the snapshot alongside the overview edits. A snapshot for today's date that already holds a DIFFERENT overview is never overwritten: the script writes `DATE-2` (then `-3`, ...).
+
+**Shape of the document (Nov 2026).** In order: `## Fred in brief` (at most 1,200 words: what Fred is, the monthly cycle, what is forecast and how it is graded, how a forecast is made, the experiments running now, what Fred cannot see, where to look on the dashboard); the numbered detail sections `## 1.` to `## 13.` (about 12,000 to 15,000 words, in the order a forecast moves through the system: purpose and terms, data, horizon scan, questions, forecasting, Sibyl, grading, scoring, the monthly report, dashboard, operations, switched off or retired, guidance); and `## Changes in this Version` LAST (at most about 3,500 words). Top-level sections are `##` and must stay so: `docs/decks/manifest.json` and `scripts/decks/check_deck_sync.py` key on `##` heading prefixes, and the About page builds its contents list from them and splits off the change log at that heading (`web/src/lib/overview_split.ts`).
+
+**Rules.**
+- The body describes what the system does NOW, in present tense. No "until/since/no longer" history in the body; dates and history belong in the change log.
+- When a change alters a fact stated in "Fred in brief" (the schedule, hazards and questions, models, experiments, limits), update the brief in the same PR. Every fact in the brief also appears, with its detail, in the body, and the two agree.
+- A new feature gets body text first, in the section it belongs to, then a change-log entry of at most about 60 words at the end of the change log, under the current month's `###` heading (newest month first): a bold one-line headline and at most two further sentences saying what changed for the reader and why.
+- When a later change supersedes an entry, edit or remove the older entry rather than adding a contradicting one.
+- A feature that is switched off moves to "Switched off or retired", with one line on why.
+- No function, file, table or column names and no environment variables in the prose (the only exception is the measure glossary table in Section 1). No em dashes. One fact, one place: refer to another section by name rather than repeat it. The master feed table in Section 2 is the one place that says which stage reads which feed.
+
+**About page.** `web/src/app/about/page.tsx` ships only the current overview and prompts and the version lists. An archived overview or prompt set is fetched when a reader picks it, from `web/src/app/about/overview/[version]/route.ts` and `web/src/app/about/prompts/[version]/route.ts`, which serve only versions listed in the matching `versions.json` (a version string is shape-checked before any file is read; anything else is 404). Shipping every version with the page made it 23 MB. Tests: `web/src/app/about/__tests__/OverviewSection.test.tsx`, `version_routes.test.ts`.
 
 ## Deck editing
 

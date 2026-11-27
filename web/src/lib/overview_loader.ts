@@ -6,15 +6,19 @@ export interface OverviewVersionEntry {
   label: string;
 }
 
-export interface VersionedOverviewData {
-  versions: OverviewVersionEntry[];
-  overviews: Record<string, string>;
+/** An archived version key: a date, optionally followed by -2, -3, ... */
+const VERSION_PATTERN = /^\d{4}-\d{2}-\d{2}(-\d{1,3})?$/;
+
+/** True when the string has the shape of a version key. Checked before any
+ *  file is read, so a crafted string can never become a path. */
+export function isVersionShaped(version: string): boolean {
+  return VERSION_PATTERN.test(version);
 }
 
 /**
  * Read the versions manifest from docs/overview/versions.json.
  */
-async function listOverviewVersions(): Promise<OverviewVersionEntry[]> {
+export async function listOverviewVersions(): Promise<OverviewVersionEntry[]> {
   const candidates = [
     path.join(process.cwd(), "..", "docs", "overview", "versions.json"),
     path.join(process.cwd(), "docs", "overview", "versions.json"),
@@ -31,14 +35,17 @@ async function listOverviewVersions(): Promise<OverviewVersionEntry[]> {
 }
 
 /**
- * Read the archived fred_overview.md for a specific version date.
+ * Read the archived fred_overview.md for one version, or null when the
+ * version is not listed in the manifest. The shape check comes first, then
+ * the manifest; only a listed version is ever turned into a path.
  */
-async function loadOverviewForVersion(
-  date: string,
-): Promise<string | null> {
+export async function loadListedOverview(version: string): Promise<string | null> {
+  if (!isVersionShaped(version)) return null;
+  const versions = await listOverviewVersions();
+  if (!versions.some((v) => v.date === version)) return null;
   const candidates = [
-    path.join(process.cwd(), "..", "docs", "overview", date, "fred_overview.md"),
-    path.join(process.cwd(), "docs", "overview", date, "fred_overview.md"),
+    path.join(process.cwd(), "..", "docs", "overview", version, "fred_overview.md"),
+    path.join(process.cwd(), "docs", "overview", version, "fred_overview.md"),
   ];
   for (const p of candidates) {
     try {
@@ -48,22 +55,4 @@ async function loadOverviewForVersion(
     }
   }
   return null;
-}
-
-/**
- * Load all versioned overview snapshots.
- * Returns the version list and a map of date -> markdown content.
- */
-export async function loadAllVersionedOverviews(): Promise<VersionedOverviewData> {
-  const versions = await listOverviewVersions();
-  const overviews: Record<string, string> = {};
-  await Promise.all(
-    versions.map(async (v) => {
-      const content = await loadOverviewForVersion(v.date);
-      if (content) {
-        overviews[v.date] = content;
-      }
-    }),
-  );
-  return { versions, overviews };
 }

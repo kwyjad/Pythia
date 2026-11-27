@@ -16,7 +16,7 @@ MANIFEST = json.loads((Path(__file__).resolve().parents[3] / "docs/decks/manifes
 OVERVIEW = "\n".join([
     "## Changes in this Version",   # 1
     "- something new",              # 2
-    "## 12b. Sibyl: the parallel deep-research track",  # 3
+    "## 6. Sibyl",                  # 3
     "Sibyl takes 15 questions.",    # 4
     "### Cost control",             # 5
     "The cap is $25.",              # 6
@@ -25,11 +25,11 @@ OVERVIEW = "\n".join([
 
 def test_touched_sections_follow_the_diff():
     diff = "@@ -2,0 +2,1 @@\n+- something new\n@@ -6 +6 @@\n-The cap is $60.\n+The cap is $25.\n"
-    assert touched_sections(OVERVIEW, diff) == {CHANGES_HEADING, "12b. Sibyl: the parallel deep-research track"}
+    assert touched_sections(OVERVIEW, diff) == {CHANGES_HEADING, "6. Sibyl"}
 
 
 def test_no_warning_without_a_change_log_entry():
-    assert decide(MANIFEST, ["sibyl/run.py"], {"12b. Sibyl"}) is None
+    assert decide(MANIFEST, ["sibyl/run.py"], {"6. Sibyl"}) is None
 
 
 def test_no_warning_when_a_deck_changed():
@@ -38,7 +38,7 @@ def test_no_warning_when_a_deck_changed():
 
 def test_warning_names_decks_from_sections_and_code_paths():
     msg = decide(MANIFEST, ["docs/fred_overview.md", "interpreter/pdf.py"],
-                 {CHANGES_HEADING, "12b. Sibyl: the parallel deep-research track"})
+                 {CHANGES_HEADING, "6. Sibyl"})
     assert "4 Forecast: Sibyl Track" in msg and "7 The Interpreter" in msg
     assert "0 Introductory" not in msg
 
