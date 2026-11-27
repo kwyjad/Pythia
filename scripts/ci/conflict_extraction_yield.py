@@ -69,13 +69,14 @@ EXTRACTIONS = "conflict_doc_extractions"
 CANDIDATES = "conflict_displacement_candidates"
 DOC_CACHE = "haz_raw_reliefweb_docs"
 
-# Period split categories (section c).
+# Period split categories (section c): the extraction module's own calendar
+# classification (``classify_period``), so the report and the rule agree.
 SPLIT_UNDATED = "undated"
 SPLIT_REVERSED = "reversed"
-SPLIT_LONGER = "longer_than_month"
+SPLIT_LONGER = "longer_than_any_month"
 SPLIT_CROSSES = "crosses_month_boundary"
-SPLIT_SUB_MONTH_OTHER = "sub_month_in_another_month"
-SPLIT_SUB_MONTH_INSIDE = "sub_month_inside_cell_month"
+SPLIT_SUB_MONTH_OTHER = "inside_another_month"
+SPLIT_SUB_MONTH_INSIDE = "inside_this_month"
 
 # not_new split categories (section d).
 NOT_NEW_SINCE = "since_date"
@@ -292,19 +293,10 @@ def classify_period(rejection: Dict[str, Any], cell_ym: str, period_reasons: Dic
         return SPLIT_UNDATED
     if reason == period_reasons["reversed"]:
         return SPLIT_REVERSED
-    start = _date(rejection.get("period_start"))
-    end = _date(rejection.get("period_end"))
-    if start is None or end is None:
-        return SPLIT_UNDATED
-    if end < start:
-        return SPLIT_REVERSED
-    days = calendar.monthrange(start.year, start.month)[1]
-    if (end - start).days + 1 > days:
-        return SPLIT_LONGER
-    if (start.year, start.month) != (end.year, end.month):
-        return SPLIT_CROSSES
-    ym = f"{start.year:04d}-{start.month:02d}"
-    return SPLIT_SUB_MONTH_INSIDE if ym == cell_ym else SPLIT_SUB_MONTH_OTHER
+    from resolver.ingestion import conflict_displacement_extract as cde  # noqa: PLC0415
+
+    return cde.classify_period(_date(rejection.get("period_start")),
+                               _date(rejection.get("period_end")), cell_ym)
 
 
 def month_offset(rejection: Dict[str, Any], cell_ym: str) -> Optional[int]:
@@ -346,7 +338,8 @@ def _lag_label(days: int) -> str:
 def _funnel(rows: List[Dict[str, Any]], extractions: Dict[Tuple[str, str], Dict[str, int]]) -> Dict[str, Any]:
     f = {"cells_assessed": len(rows), "cells_with_documents": 0, "documents_selected": 0,
          "documents_extracted": 0, "documents_extraction_failed": 0,
-         "figures_extracted": 0, "figures_admitted": 0, "cells_admitted": 0}
+         "figures_extracted": 0, "figures_admitted": 0, "cells_admitted": 0,
+         "figures_routed_in": 0, "figures_routed_out_outside_window": 0}
     reasons: Counter = Counter()
     for r in rows:
         sel = int(r.get("docs_selected") or 0)
@@ -357,6 +350,9 @@ def _funnel(rows: List[Dict[str, Any]], extractions: Dict[Tuple[str, str], Dict[
         f["documents_extraction_failed"] += ex.get("error", 0)
         f["figures_extracted"] += int(r.get("figures_extracted") or 0)
         f["figures_admitted"] += int(r.get("figures_admitted") or 0)
+        routing = (_loads(r.get("detail_json"), {}) or {}).get("routing") or {}
+        f["figures_routed_in"] += int(routing.get("routed_in") or 0)
+        f["figures_routed_out_outside_window"] += int(routing.get("routed_out_outside_window") or 0)
         reasons[str(r.get("reason"))] += 1
     f["cells_admitted"] = reasons.get("admitted_figure", 0)
     f["cell_reasons"] = dict(reasons.most_common())
@@ -716,6 +712,10 @@ def render_markdown(rep: Dict[str, Any]) -> str:
                     f["documents_extracted"], f["documents_extraction_failed"],
                     f["figures_extracted"], f["figures_admitted"], f["cells_admitted"]]])
     out += ["", f"Cell reasons: {f['cell_reasons']}", "",
+            f"Figures routed to another assessed month of the same country: "
+            f"{f.get('figures_routed_in', 0)}; routed to a month not assessed (stored, "
+            f"not used): {f.get('figures_routed_out_outside_window', 0)}. A routed figure is "
+            "counted as admitted in the month it is about.", "",
             "Documents extracted can exceed documents selected: the ledger counts the cell's "
             "current selection, while the extraction cache keeps every document a cell was "
             "ever sent, including those an earlier fetch selected.", "", "Per country:", ""]

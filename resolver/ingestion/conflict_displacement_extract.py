@@ -64,7 +64,6 @@ backcast path calls it.
 from __future__ import annotations
 
 import argparse
-import calendar
 import dataclasses
 import datetime as dt
 import json
@@ -832,22 +831,56 @@ def figure_period(
     return start, end, end_source
 
 
-def period_reason(start: dt.date | None, end: dt.date | None, ym: str) -> str | None:
-    """None when the period lies inside ``ym``; otherwise the rejection reason."""
+# Where a figure's period lies, against the CALENDAR (Nov 2026). Until then
+# period_reason measured a period against the length of the cell's own
+# month, so "In March" (31 days) read in a February cell was called longer
+# than the month (16 of the 114 such rejections in the Nov 2026 report).
+PERIOD_INSIDE = "inside_this_month"
+PERIOD_OTHER_MONTH = "inside_another_month"
+PERIOD_CROSSES = "crosses_month_boundary"
+PERIOD_LONGER = "longer_than_any_month"
+PERIOD_UNDATED = "undated"
+PERIOD_REVERSED = "reversed"
+#: The longest calendar month: a period longer than this fits no month.
+LONGEST_MONTH_DAYS = 31
+
+
+def classify_period(start: dt.date | None, end: dt.date | None, ym: str) -> str:
+    """Where a period lies against the calendar, seen from the cell ``ym``.
+
+    Inside this month; inside another single month (routed there); crossing
+    a month boundary (spans two months, no longer than the longest month);
+    longer than any one month; undated; reversed.
+    """
 
     if start is None or end is None:
-        return REJECT_UNDATED
+        return PERIOD_UNDATED
     if end < start:
-        return REJECT_REVERSED
-    m_start, m_end = month_bounds(ym)
-    days_in_month = calendar.monthrange(m_start.year, m_start.month)[1]
-    if (end - start).days + 1 > days_in_month:
-        return REJECT_LONGER_THAN_MONTH
-    if end < m_start or start > m_end:
-        return REJECT_OUTSIDE_MONTH
-    if start < m_start or end > m_end:
-        return REJECT_CROSSES_MONTH
-    return None
+        return PERIOD_REVERSED
+    if (start.year, start.month) == (end.year, end.month):
+        return PERIOD_INSIDE if f"{start.year:04d}-{start.month:02d}" == ym else PERIOD_OTHER_MONTH
+    if (end - start).days + 1 > LONGEST_MONTH_DAYS:
+        return PERIOD_LONGER
+    return PERIOD_CROSSES
+
+
+_PERIOD_REJECTION = {
+    PERIOD_UNDATED: REJECT_UNDATED,
+    PERIOD_REVERSED: REJECT_REVERSED,
+    PERIOD_LONGER: REJECT_LONGER_THAN_MONTH,
+    PERIOD_CROSSES: REJECT_CROSSES_MONTH,
+    PERIOD_OTHER_MONTH: REJECT_OUTSIDE_MONTH,
+}
+
+
+def period_reason(start: dt.date | None, end: dt.date | None, ym: str) -> str | None:
+    """None when the period lies inside ``ym``; otherwise the rejection reason.
+
+    ``period_outside_month`` is now reached only by a caller that does not
+    route (admission routes a figure inside another single month first).
+    """
+
+    return _PERIOD_REJECTION.get(classify_period(start, end, ym))
 
 
 def flag_rejection(flag: Any) -> str | None:

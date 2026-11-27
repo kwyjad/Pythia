@@ -568,3 +568,40 @@ def test_the_debug_bundle_reports_and_checks_both_sources(tmp_path, rulebook):
     builder._check_conflict_displacement_inside_its_month()
     check = builder.checks[-1]
     assert check["verdict"] == "FAIL" and "2026-04-02" in check["detail"]
+
+
+# --- the period against the calendar --------------------------------------------
+
+
+D = dt.date
+
+
+@pytest.mark.parametrize("start,end,ym,expected", [
+    # "In March" read in a February cell: inside another single month, not
+    # "longer than the month" (the pre-Nov-2026 label, which measured 31
+    # days against February's 28).
+    (D(2026, 3, 1), D(2026, 3, 31), "2026-02", cde.PERIOD_OTHER_MONTH),
+    (D(2026, 3, 1), D(2026, 3, 31), "2026-03", cde.PERIOD_INSIDE),
+    (D(2026, 2, 1), D(2026, 2, 28), "2026-03", cde.PERIOD_OTHER_MONTH),
+    # A 31-day May read in a 30-day April cell, and the reverse.
+    (D(2026, 5, 1), D(2026, 5, 31), "2026-04", cde.PERIOD_OTHER_MONTH),
+    (D(2026, 4, 1), D(2026, 4, 30), "2026-05", cde.PERIOD_OTHER_MONTH),
+    # Spans the April/May boundary in 31 days: crosses, never "longer".
+    (D(2026, 4, 15), D(2026, 5, 15), "2026-04", cde.PERIOD_CROSSES),
+    # 28 February to 1 March: crosses.
+    (D(2026, 2, 28), D(2026, 3, 1), "2026-02", cde.PERIOD_CROSSES),
+    # 32 days fits no month.
+    (D(2026, 3, 1), D(2026, 4, 1), "2026-03", cde.PERIOD_LONGER),
+    (None, None, "2026-03", cde.PERIOD_UNDATED),
+    (D(2026, 3, 9), D(2026, 3, 2), "2026-03", cde.PERIOD_REVERSED),
+])
+def test_periods_are_classified_against_the_calendar(start, end, ym, expected):
+    assert cde.classify_period(start, end, ym) == expected
+
+
+def test_a_whole_march_figure_read_in_february_is_routed_to_march(rulebook):
+    march = _figure(period_start="2026-03-01", period_end="2026-03-31", doc_date="2026-03-02")
+    out = cde.admit_country({"2026-02": [march]}, "SDN", rulebook,
+                            assessed=["2026-02", "2026-03"])
+    assert out.rejected["2026-02"] == []
+    assert len(out.admitted["2026-03"]) == 1
