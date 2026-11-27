@@ -185,7 +185,7 @@ def _rulebook_settings() -> Dict[str, Any]:
 
     rb = load_rulebook()
     return {
-        "max_docs_per_cell": int(rb.get("conflict_displacement.documents.max_docs_per_cell")),
+        "max_docs_per_cell": int(rb.get("conflict_displacement.extraction.max_docs_per_cell")),
         "publication_pad_days": int(rb.get("conflict_displacement.documents.publication_pad_days")),
         "prompt_version": str(rb.get("conflict_displacement.extraction.prompt_version")),
     }

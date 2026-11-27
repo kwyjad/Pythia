@@ -750,7 +750,7 @@ def fetch_documents(
 
     Ranked by the machine (``reliefweb_docs.select_documents``), kept only
     when the document's primary country is the cell's, capped at
-    ``conflict_displacement.documents.max_docs_per_cell``, and cached in
+    ``conflict_displacement.extraction.max_docs_per_cell``, and cached in
     ``haz_raw_reliefweb_docs`` under hazard ``ACE``.
     """
 
@@ -766,9 +766,12 @@ def fetch_documents(
         LOG.warning("[conflict_extract] fetch failed for %s %s: %s", iso3, ym, exc)
         return {"ok": False, "error": str(exc)[:500]}
     items = list((data or {}).get("data") or [])
-    ranked, _over = docs_mod.select_documents(items, iso3, ym, HAZARD, rulebook)
+    # Ranked by displacement relevance, then authority (ACE); uncapped here
+    # so the PA machine's cap never cuts the pool before this source's own.
+    ranked, _over = docs_mod.select_documents(items, iso3, ym, HAZARD, rulebook,
+                                              cap=len(items) or 1)
     about_cell = [d for d in ranked if (d.get("primary_country_iso3") or iso3) == iso3]
-    cap = int(rulebook.get("conflict_displacement.documents.max_docs_per_cell"))
+    cap = int(rulebook.get("conflict_displacement.extraction.max_docs_per_cell"))
     selected = about_cell[:cap]
     stored = store_raw_records(
         con,
@@ -797,7 +800,7 @@ def cell_documents(
     """The cached documents for the cell, best first, capped."""
 
     docs = docs_mod.documents_for_country_month(con, iso3.upper(), ym, HAZARD)
-    cap = int(rulebook.get("conflict_displacement.documents.max_docs_per_cell"))
+    cap = int(rulebook.get("conflict_displacement.extraction.max_docs_per_cell"))
     return docs[:cap]
 
 
@@ -1384,6 +1387,99 @@ def run_cell(
 
 
 # ---------------------------------------------------------------------------
+# What the new ranking would select, before anything is spent
+# ---------------------------------------------------------------------------
+
+#: The cap the Oct 2026 backfill read under; a ledger cell with this many
+#: documents selected was cut short by it.
+PREVIOUS_DOC_CAP = 5
+
+
+def compare_ranking(
+    con: "duckdb.DuckDBPyConnection",
+    rulebook: Rulebook,
+    *,
+    post: PostFn | None = None,
+    previous_cap: int = PREVIOUS_DOC_CAP,
+    countries: Iterable[str] | None = None,
+    max_cells: int | None = None,
+) -> dict[str, Any]:
+    """For every ledger cell the previous cap bound, fetch the ReliefWeb pool
+    again (no model call, nothing cached) and compare what the new ranking
+    and cap would read with what was read.
+
+    Reports per cell the documents kept, the documents newly selected and
+    how many of those the ranking scores as displacement-relevant, and the
+    totals; ``expected_new_calls`` is the number of documents the new
+    selection reads that were never extracted.
+    """
+
+    from resolver.hazard_resolution.reliefweb_sweep import appname, default_post
+
+    post = post or default_post
+    api_url = str(rulebook.get("reliefweb.api_base_url")).rstrip("/") + "/reports"
+    timeout = float(rulebook.get("reliefweb.documents.request_timeout_sec"))
+    cap = int(rulebook.get("conflict_displacement.extraction.max_docs_per_cell"))
+    wanted = {c.upper() for c in countries} if countries else None
+    try:
+        cells = con.execute(
+            "SELECT iso3, ym FROM conflict_displacement_cell_ledger "
+            "WHERE docs_selected >= ? ORDER BY iso3, ym", [previous_cap],
+        ).fetchall()
+        read = {}
+        for doc_id, iso3, year, month in con.execute(
+            "SELECT DISTINCT doc_id, iso3, year, month FROM conflict_doc_extractions "
+            "WHERE hazard = ? AND status = 'ok'", [HAZARD],
+        ).fetchall():
+            read.setdefault((str(iso3), f"{int(year):04d}-{int(month):02d}"), set()).add(str(doc_id))
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"ledger unreadable: {exc}"}
+    cells = [(i, y) for i, y in cells if wanted is None or i in wanted]
+    if max_cells:
+        cells = cells[:max_cells]
+    per_cell: list[dict[str, Any]] = []
+    failed = 0
+    for iso3, ym in cells:
+        try:
+            data = post(api_url, _payload(iso3, ym, rulebook), {"appname": appname()}, timeout)
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            LOG.warning("[conflict_extract] compare: fetch failed for %s %s: %s", iso3, ym, exc)
+            continue
+        items = list((data or {}).get("data") or [])
+        ranked, _ = docs_mod.select_documents(items, iso3, ym, HAZARD, rulebook,
+                                              cap=len(items) or 1)
+        about = [d for d in ranked if (d.get("primary_country_iso3") or iso3) == iso3]
+        new_sel = about[:cap]
+        old = read.get((iso3, ym), set())
+        new_ids = [str(d["doc_id"]) for d in new_sel]
+        added = [d for d in new_sel if str(d["doc_id"]) not in old]
+        per_cell.append({
+            "iso3": iso3, "ym": ym, "pool": len(about), "previously_read": len(old),
+            "kept": sum(1 for i in new_ids if i in old),
+            "dropped": len(old - set(new_ids)),
+            "added": len(added),
+            "added_relevant": sum(1 for d in added if docs_mod.displacement_relevance(d) > 0),
+            "added_product": sum(1 for d in added if docs_mod.displacement_relevance(d) >= 3),
+            "previously_read_relevant_in_pool": sum(
+                1 for d in about if str(d["doc_id"]) in old and docs_mod.displacement_relevance(d) > 0),
+        })
+    tot = {k: sum(c[k] for c in per_cell) for k in (
+        "pool", "previously_read", "kept", "dropped", "added", "added_relevant", "added_product")}
+    per_call = observed_cost_per_call(con)
+    return {
+        "previous_cap": previous_cap, "new_cap": cap,
+        "cells_compared": len(per_cell), "cells_fetch_failed": failed,
+        "cells_at_previous_cap": len(cells),
+        **tot,
+        "expected_new_calls": tot["added"],
+        "expected_new_cost_usd": round(tot["added"] * per_call, 2),
+        "share_added_relevant": round(tot["added_relevant"] / tot["added"], 3) if tot["added"] else None,
+        "cells": per_cell,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Admission over the cache (no model call, no ReliefWeb fetch)
 # ---------------------------------------------------------------------------
 
@@ -1759,7 +1855,7 @@ def plan(
 ) -> dict[str, Any]:
     """What a run will ask for, and what it may cost, before it runs."""
 
-    cap = int(rulebook.get("conflict_displacement.documents.max_docs_per_cell"))
+    cap = int(rulebook.get("conflict_displacement.extraction.max_docs_per_cell"))
     cells = len(countries) * len(months)
     try:
         ensure_schema(con)
@@ -1890,6 +1986,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--readmit", action="store_true",
                         help="admit every assessed cell again from the cache (no model "
                         "call, no fetch)")
+    parser.add_argument("--compare-ranking", action="store_true",
+                        help="for the cells the previous cap bound, fetch the ReliefWeb pool "
+                        "and report what the new ranking and cap would read against what was "
+                        "read; no model call, nothing written")
     parser.add_argument("--max-cost-usd", type=float, default=None,
                         help="stop before any call when the plan's expected cost exceeds this")
     parser.add_argument("--summary-out", default=None)
@@ -1927,6 +2027,11 @@ def main(argv: list[str] | None = None) -> int:
                 summary.update(reextract_flag_missing(con, rulebook))
                 print(f"[conflict_extract] re-read done: {summary['calls_made']} calls, "
                       f"USD {summary['cost_usd']}", flush=True)
+        elif args.compare_ranking:
+            report = compare_ranking(con, rulebook)
+            summary = {"compare_ranking": report}
+            print("[conflict_extract] ranking comparison: " + json.dumps(
+                {k: v for k, v in report.items() if k != "cells"}), flush=True)
         elif args.readmit:
             countries = [c.strip().upper() for c in args.countries.replace(",", " ").split()
                          if c.strip()] or [r[0] for r in con.execute(

@@ -1186,7 +1186,7 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                 "conflict question"
             )
         _require_int_in("conflict_displacement.extraction.max_calls_per_month", 0, 100_000)
-        _require_int_in("conflict_displacement.documents.max_docs_per_cell", 1, 30)
+        _require_int_in("conflict_displacement.extraction.max_docs_per_cell", 1, 30)
         _require_int_in("conflict_displacement.documents.publication_pad_days", 0, 120)
         _require_str_list("conflict_displacement.documents.source_types")
         _require_str_list("conflict_displacement.documents.formats")

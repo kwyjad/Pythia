@@ -1153,12 +1153,18 @@ conflict_displacement:
     # backfill raises it through PYTHIA_CONFLICT_EXTRACTION_MONTHLY_CAP;
     # this default is never edited to clear a backlog.
     max_calls_per_month: 2000
+    # Documents read per country-month: the extraction call count per cell.
+    # Was documents.max_docs_per_cell = 5 until Nov 2026, when the yield
+    # report (2024-10..2026-10, 1,181 cells) found it binding in 486 of the
+    # 827 cells with a document, with 8,132 further matching documents
+    # unread (median 9 a capped cell). Raised to 15 only after the ACE
+    # ranking (reliefweb_docs.displacement_relevance) put displacement
+    # situation reports, flash updates and DTM flow products first, so the
+    # extra documents read are the ones most likely to state a figure. Its
+    # own key: the PA machine's reliefweb.documents.max_docs_per_cell (30)
+    # is a shared section and must not move.
+    max_docs_per_cell: 15
   documents:
-    # Documents read per country-month. The extraction call count per cell,
-    # so the first lever if the cap binds. Five, because the ranking puts
-    # OCHA and government documents first and the backfill (about 1,080
-    # cells) must fit one workflow job.
-    max_docs_per_cell: 5
     # Published month start .. month end + this many days. A figure for a
     # month is admissible only if its own date or period lies inside the
     # month; the pad only lets a later report state it.

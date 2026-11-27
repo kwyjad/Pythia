@@ -605,3 +605,79 @@ def test_a_whole_march_figure_read_in_february_is_routed_to_march(rulebook):
                             assessed=["2026-02", "2026-03"])
     assert out.rejected["2026-02"] == []
     assert len(out.admitted["2026-03"]) == 1
+
+
+# --- ranking and the document cap ---------------------------------------------
+
+
+def _doc(doc_id, title, body, source, hazard="ACE", fmt="News and Press Release",
+         created="2026-03-20T00:00:00+00:00"):
+    return {"id": doc_id, "fields": {
+        "title": title, "url": f"https://reliefweb.int/report/x/{doc_id}", "body": body,
+        "date": {"created": created, "original": created},
+        "source": [{"name": source, "shortname": source}],
+        "primary_country": {"iso3": "SDN"}, "country": [{"iso3": "SDN"}],
+        "format": [{"name": fmt}]}}
+
+
+def test_ranking_prefers_a_displacement_sitrep_over_a_higher_priority_unrelated_report(rulebook):
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    priority = [str(p) for p in rulebook.get("reliefweb.documents.source_priority")]
+    high, low = priority[0], "Norwegian Refugee Council"
+    unrelated = _doc("1", "Sudan: food security outlook", "Prices rose in March.", high,
+                     created="2026-03-28T00:00:00+00:00")
+    sitrep = _doc("2", "Sudan: El Fasher flash update No. 4",
+                  "Between 3 and 18 March, 12,500 people fled El Fasher.", low)
+    ranked, _ = docs_mod.select_documents([unrelated, sitrep], "SDN", "2026-03", "ACE", rulebook)
+    assert [d["doc_id"] for d in ranked] == ["2", "1"]
+    # Authority still breaks a tie between equally relevant documents.
+    twin = _doc("3", "Sudan: El Fasher flash update No. 5",
+                "Between 3 and 18 March, 12,500 people fled El Fasher.", high)
+    ranked, _ = docs_mod.select_documents([sitrep, twin], "SDN", "2026-03", "ACE", rulebook)
+    assert ranked[0]["doc_id"] == "3"
+
+
+def test_the_pa_machines_ranking_is_unchanged(rulebook):
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    priority = [str(p) for p in rulebook.get("reliefweb.documents.source_priority")]
+    unrelated = _doc("1", "Floods outlook", "Rain.", priority[0])
+    sitrep = _doc("2", "Flash update: people displaced", "Thousands fled.", "Somebody else")
+    ranked, _ = docs_mod.select_documents([sitrep, unrelated], "SDN", "2026-03", "FL", rulebook)
+    assert [d["doc_id"] for d in ranked] == ["1", "2"]
+
+
+def test_a_dtm_flow_product_scores_as_a_displacement_product():
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    doc = {"title": "DTM Sudan - Flash Alert: Mellit", "body": "", "sources": ["IOM"]}
+    assert docs_mod.displacement_relevance(doc) >= 3
+    assert docs_mod.displacement_relevance({"title": "Market prices", "body": "", "sources": []}) == 0
+
+
+def test_the_conflict_cap_is_its_own_and_moves_no_pa_fingerprint(rulebook):
+    assert rulebook.get("conflict_displacement.extraction.max_docs_per_cell") == 15
+    assert rulebook.get("reliefweb.documents.max_docs_per_cell") == 30
+    changed = copy.deepcopy(rulebook.raw)
+    changed["conflict_displacement"]["extraction"]["max_docs_per_cell"] = 3
+    edited = Rulebook(changed, rulebook.path)
+    for hazard in ("flood", "cyclone", "drought"):
+        assert rulebook.hazard_fingerprint(hazard) == edited.hazard_fingerprint(hazard)
+        assert rulebook.legacy_hazard_fingerprint(hazard) == edited.legacy_hazard_fingerprint(hazard)
+
+
+def test_the_cell_reads_up_to_the_conflict_cap(con, rulebook):
+    items = [_item(str(100 + i), body=BODY_SDN + f" Report {i}.") for i in range(20)]
+    calls: list[str] = []
+    row = _run(con, rulebook, items, [_fig()], calls=calls)
+    assert row["docs_selected"] == 15 and len(calls) == 15
+
+
+def test_compare_ranking_reports_what_the_new_selection_adds(con, rulebook):
+    items = [_item(str(100 + i), body=BODY_SDN + f" Report {i}.") for i in range(8)]
+    _run(con, rulebook, items[:5], [_fig()])  # read under the old cap of five
+    report = cde.compare_ranking(con, rulebook, post=_post(items))
+    assert report["cells_compared"] == 1 and report["previously_read"] == 5
+    assert report["added"] == 3 and report["expected_new_calls"] == 3
+    assert report["kept"] == 5 and report["dropped"] == 0
