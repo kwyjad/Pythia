@@ -1,0 +1,84 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: ACE/PA lower-bound outcomes, exact scores stored now beside the
+# censored scores compute_scores writes (scripts/ci/censored_rescore_report.py,
+# Nov 2026). Opens the canonical DB read-only and writes nothing back, so it is
+# not in the pythia-resolver-db concurrency group.
+name: Censored rescore report
+
+on:
+  workflow_dispatch:
+    inputs:
+      db_run_id:
+        description: "Optional: force the canonical DB from a specific Actions run ID"
+        required: false
+        default: ""
+        type: string
+  pull_request:
+    paths:
+      - "scripts/ci/censored_rescore_report.py"
+      - "pythia/tools/compute_scores.py"
+      - ".github/workflows/censored_rescore_report.yml"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rescore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pip install -r python_library_requirements.txt
+          pip install "duckdb>=1.4,<2"
+
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          include-failed-runs-from: |
+            Hazard Backcast
+            Resolver Update
+
+      - name: Run the report
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m scripts.ci.censored_rescore_report --db data/resolver.duckdb \
+            --out-dir diagnostics/censored_rescore
+
+      - name: Print the report
+        if: always()
+        run: |
+          f=diagnostics/censored_rescore/censored_rescore.md
+          if [ -f "$f" ]; then
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+            cat diagnostics/censored_rescore/censored_rescore.json
+          else
+            echo "The report was not written; check the previous step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: censored-rescore-report
+          path: diagnostics/censored_rescore/
+          if-no-files-found: warn
+          retention-days: 14

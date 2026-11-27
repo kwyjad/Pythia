@@ -137,6 +137,13 @@ All scores: **lower is better**.
   `score_type='crps'` (range 0–1).
 - `score_family='binary'` (EVENT_OCCURRENCE): single Brier (range 0–1).
   Binary questions are scored under the *mean* ensemble only.
+- `score_type` `brier_censored` / `log_censored` / `crps_censored` (Nov
+  2026): an ACE/PA month whose resolution is only a LOWER BOUND (the IOM DTM
+  rung, `resolutions.is_lower_bound`) is scored on "the outcome is in this
+  bucket or above": binary Brier of that event, -log P(>= bucket), and RPS
+  over the thresholds below the bucket only. Never pool them with
+  brier/log/crps; such a month has no exact score at all. Calibration,
+  advice, recalibration and the centroid EMA leave these months out.
 
 **HARD RULE: never average `binary` and `spd` scores together.** They are on
 different scales; a blended mean is meaningless. Group by `score_family`

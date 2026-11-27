@@ -125,7 +125,12 @@ from pythia.tools._db_utils import (
     row_count as _row_count,
     table_exists as _table_exists,
 )
-from pythia.tools.scoring_class import INDICATIVE_REASON_SHORT, conflict_scoring_class
+from pythia.tools.scoring_class import (
+    INDICATIVE_REASON_SHORT,
+    conflict_scoring_class,
+    is_lower_bound_source,
+    migrate_resolutions_is_lower_bound,
+)
 from pythia.tools.base_rate_spd import (
     CONFLICT_DISPLACEMENT_SERIES,
     CONFLICT_STATUS_QUIET,
@@ -1063,6 +1068,9 @@ def _ensure_resolutions_table(conn) -> None:
                 conn.execute(f"ALTER TABLE resolutions ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+    # Whether the value is a LOWER BOUND (Nov 2026): compute_scores scores
+    # such a row as a censored outcome. Backfilled from source_desc.
+    migrate_resolutions_is_lower_bound(conn, existing)
 
 
 def compute_resolutions(
@@ -1495,8 +1503,9 @@ def compute_resolutions(
                       is_test,
                       acled_snapshot_date,
                       scoring_class,
-                      scoring_class_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      scoring_class_reason,
+                      is_lower_bound
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         question_id,
@@ -1512,6 +1521,7 @@ def compute_resolutions(
                         _snapshot_date(source_ts) if metric_norm == "FATALITIES" else None,
                         scoring[0] if scoring else None,
                         scoring[1] if scoring else None,
+                        is_lower_bound_source(source_desc),
                     ],
                 )
                 written += 1

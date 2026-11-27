@@ -256,6 +256,8 @@ on:
       - "scripts/ci/conflict_extraction_yield.py"
       - "scripts/ci/tests/test_conflict_extraction_yield.py"
       - "resolver/tests/test_conflict_displacement_extract.py"
+      - "pythia/tests/test_censored_lower_bound_scoring.py"
+      - "scripts/ci/censored_rescore_report.py"
       - "resolver/ingestion/conflict_displacement_extract.py"
       - "resolver/hazard_resolution/reliefweb_docs.py"
       - "resolver/ingestion/conflict_displacement_extract.py"
@@ -639,6 +641,7 @@ jobs:
             pythia/tests/test_ace_pa_ladder_class.py \
             scripts/ci/tests/test_conflict_extraction_yield.py \
             resolver/tests/test_conflict_displacement_extract.py \
+            pythia/tests/test_censored_lower_bound_scoring.py \
             pythia/tests/test_compute_resolutions.py \
             pythia/tests/test_pa_resolves_from_machine.py \
             pythia/tests/test_resolutions_repair_question_provenance.py \

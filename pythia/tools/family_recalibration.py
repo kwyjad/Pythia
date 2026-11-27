@@ -278,9 +278,11 @@ def _member_rows(con) -> List[Tuple]:
     latest = record_run_clause(con, "fr", keep_runless=False)
     # An indicative ACE/PA month is a selected sample and never fits a
     # factor (pythia/tools/scoring_class.py).
-    from pythia.tools.scoring_class import scored_only_clause  # noqa: PLC0415
+    from pythia.tools.scoring_class import exact_outcome_clause, scored_only_clause  # noqa: PLC0415
 
-    scored = scored_only_clause(con, "r")
+    # A lower-bound outcome (Nov 2026) is not the bucket the truth fell in,
+    # so it never fits a factor.
+    scored = scored_only_clause(con, "r") + exact_outcome_clause(con, "r")
     sql = f"""
         SELECT fr.question_id, fr.model_name, fr.month_index, fr.bucket_index,
                fr.probability, upper(q.hazard_code), upper(q.metric),

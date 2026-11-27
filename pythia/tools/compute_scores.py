@@ -172,6 +172,84 @@ _crps_like = _rps
 
 
 # ---------------------------------------------------------------------------
+# Censored scores: the outcome is a LOWER BOUND (Nov 2026)
+# ---------------------------------------------------------------------------
+#
+# A lower-bound resolution in bucket k says the outcome is in bucket k or
+# above. Scoring it as exactly bucket k rewards forecasts that put their
+# mass on k and penalises those that put it above, which is the direction
+# the truth lies. These three scores use only what the bound says, and are
+# stored under their own score types (brier_censored, log_censored,
+# crps_censored), never pooled with brier/log/crps. A bound in bucket 0
+# says nothing (every outcome is at least 0) and is not scored.
+
+
+def _tail(p: List[float], k: int) -> float:
+    """P(outcome bucket >= k)."""
+    return float(sum(p[k:]))
+
+
+def _log_score_censored(p: List[float], k: int) -> float:
+    """-log P(bucket >= k): the log score of the event the bound states."""
+    return -math.log(max(_tail(p, k), EPS))
+
+
+def _brier_censored(p: List[float], k: int) -> float:
+    """Binary Brier of the event "outcome is in bucket k or above", which
+    the bound says happened: (P(>= k) - 1)^2. Range 0..1, the binary scale,
+    which is why it is never pooled with the multiclass SPD Brier (0..2)."""
+    return (_tail(p, k) - 1.0) ** 2
+
+
+def _rps_censored(p: List[float], k: int) -> float:
+    """RPS over the thresholds the bound decides (interval form).
+
+    The exact RPS sums (F_t - H_t)^2 over thresholds t = 0..K-2, with F_t
+    the forecast CDF up to bucket t and H_t the outcome CDF (0 below the
+    outcome bucket, 1 from it). A bound in bucket k fixes H_t = 0 for every
+    t < k and leaves H_t unknown for t >= k, so only the first k thresholds
+    are scored:
+
+        RPS_cens = sum_{t=0..k-1} F_t^2 / (K - 1)
+
+    Divided by K - 1 like the exact RPS, so it is the part of the exact RPS
+    the bound decides, and never more than the exact RPS of any outcome at
+    or above the bound.
+
+    Worked example: PA has K = 6 buckets; forecast p = (0.1, 0.2, 0.3, 0.2,
+    0.1, 0.1); the bound lies in bucket k = 2 (10,000 to 49,999). F_0 = 0.1,
+    F_1 = 0.3, so RPS_cens = (0.01 + 0.09) / 5 = 0.02. Scored as exactly
+    bucket 2 it would also add (1 - F_2)^2 + ... = (0.4^2 + 0.2^2 + 0.1^2) / 5
+    = 0.042, a penalty for mass above the bound that the bound cannot
+    support.
+    """
+    K = len(p)
+    if K < 2:
+        return 0.0
+    F = 0.0
+    sq = 0.0
+    for t in range(min(k, K - 1)):
+        F += p[t]
+        sq += F * F
+    return sq / float(K - 1)
+
+
+#: Why a lower-bound row wrote no score.
+CENSORED_SKIP_BUCKET_ZERO = "lower_bound_in_bucket_0_states_nothing"
+
+
+def _migrate_resolutions_add_is_lower_bound(conn) -> int:
+    """Add ``resolutions.is_lower_bound`` if missing and backfill it from
+    ``source_desc`` (pythia/tools/scoring_class.py), in the style of
+    :func:`_migrate_scores_add_run_id`. Returns the rows marked."""
+    from pythia.tools.scoring_class import migrate_resolutions_is_lower_bound  # noqa: PLC0415
+
+    n = migrate_resolutions_is_lower_bound(conn)
+    LOGGER.info("resolutions: %d row(s) carry a lower-bound value.", n)
+    return n
+
+
+# ---------------------------------------------------------------------------
 # run_id helpers and migrations
 # ---------------------------------------------------------------------------
 
@@ -686,6 +764,26 @@ def compute_scores(db_url: str) -> dict:
             LOGGER.info("compute_scores: resolutions table is empty; nothing to do.")
             return report
 
+        report["lower_bound_resolutions"] = _migrate_resolutions_add_is_lower_bound(conn)
+        report["censored"] = {"scored_rows": 0, "skipped": {}, "exact_rows_replaced": 0}
+        from pythia.tools.scoring_class import CENSORED_HAZARD_METRICS  # noqa: PLC0415
+
+        try:
+            # Exact scores an earlier run wrote against a lower bound; this
+            # run replaces them with censored ones.
+            report["censored"]["exact_rows_replaced"] = int(conn.execute(
+                """
+                SELECT COUNT(*) FROM scores s
+                JOIN resolutions r ON r.question_id = s.question_id AND r.horizon_m = s.horizon_m
+                JOIN questions q ON q.question_id = s.question_id
+                WHERE COALESCE(r.is_lower_bound, FALSE)
+                  AND (upper(q.hazard_code), upper(q.metric)) IN ({pairs})
+                  AND s.score_type IN ('brier', 'log', 'crps')
+                """.format(pairs=", ".join(f"('{h}', '{m}')" for h, m in sorted(CENSORED_HAZARD_METRICS)))
+            ).fetchone()[0])
+        except Exception:  # noqa: BLE001 - a count only
+            pass
+
         # Each resolution row now has its own horizon_m, so each horizon is
         # scored against its own calendar month's ground truth.
         q_sql = """
@@ -695,7 +793,8 @@ def compute_scores(db_url: str) -> dict:
             q.hazard_code,
             upper(q.metric) AS metric,
             r.horizon_m,
-            r.value AS resolved_value
+            r.value AS resolved_value,
+            COALESCE(r.is_lower_bound, FALSE) AS is_lower_bound
           FROM questions q
           JOIN resolutions r
             ON q.question_id = r.question_id
@@ -703,7 +802,9 @@ def compute_scores(db_url: str) -> dict:
           WHERE upper(q.metric) IN ('PA','FATALITIES','EVENT_OCCURRENCE','PHASE3PLUS_IN_NEED')
           ORDER BY q.question_id, r.horizon_m
         """
-        qrows = conn.execute(q_sql).fetchall()
+        rows_lb = conn.execute(q_sql).fetchall()
+        lower_bound = {(r[0], r[4]): bool(r[6]) for r in rows_lb}
+        qrows = [r[:6] for r in rows_lb]
         LOGGER.info("Found %d (question, horizon) pairs with resolutions for scoring.", len(qrows))
 
         # Discover all distinct run_ids per (question_id, horizon_m) from
@@ -846,6 +947,22 @@ def compute_scores(db_url: str) -> dict:
             j = _bucket_index(resolved_value, metric)
             if j is None:
                 continue
+            from pythia.tools.scoring_class import censored_applies  # noqa: PLC0415
+
+            censored = censored_applies(hazard_code, metric,
+                                        lower_bound.get((question_id, horizon_m)))
+            if censored and j == 0:
+                # Every outcome is at least bucket 0: the bound says nothing.
+                # Clear any exact score an earlier run wrote, score nothing.
+                skips = report["censored"]["skipped"]
+                skips[CENSORED_SKIP_BUCKET_ZERO] = skips.get(CENSORED_SKIP_BUCKET_ZERO, 0) + 1
+                conn.execute(
+                    "DELETE FROM scores WHERE question_id = ? AND horizon_m = ? AND metric = ?",
+                    [question_id, horizon_m, metric],
+                )
+                LOGGER.info("%s h%d: lower bound in bucket 0, not scored (%s).",
+                            question_id, horizon_m, CENSORED_SKIP_BUCKET_ZERO)
+                continue
 
             # Score each run_id independently; default to [None] for unknown/old data.
             rid_list = run_ids_map.get((question_id, horizon_m)) or [None]
@@ -884,9 +1001,13 @@ def compute_scores(db_url: str) -> dict:
                     if not spd_m:
                         continue
 
-                    brier_m = _brier(spd_m, j)
-                    log_m = _log_score(spd_m, j)
-                    crps_m = _rps(spd_m, j)
+                    if censored:
+                        triples = (("brier_censored", _brier_censored(spd_m, j)),
+                                   ("log_censored", _log_score_censored(spd_m, j)),
+                                   ("crps_censored", _rps_censored(spd_m, j)))
+                    else:
+                        triples = (("brier", _brier(spd_m, j)), ("log", _log_score(spd_m, j)),
+                                   ("crps", _rps(spd_m, j)))
 
                     conn.execute(
                         f"""
@@ -905,21 +1026,31 @@ def compute_scores(db_url: str) -> dict:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
-                            (question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now, is_test_val),
-                            (question_id, horizon_m, metric, "log", model_name, log_m, run_id, now, is_test_val),
-                            (question_id, horizon_m, metric, "crps", model_name, crps_m, run_id, now, is_test_val),
+                            (question_id, horizon_m, metric, st, model_name, val, run_id, now, is_test_val)
+                            for st, val in triples
                         ],
                     )
                     n_written += 3
+                    if censored:
+                        report["censored"]["scored_rows"] += 3
 
         LOGGER.info("compute_scores: wrote %d score rows.", n_written)
         report["score_rows_written"] = n_written
 
         # --- EIV scoring (Phase 1) ---
         eiv_rows = []
+        from pythia.tools.scoring_class import censored_applies  # noqa: PLC0415
+
         for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
             class_bins = _class_bins(metric, hazard_code)
             if not class_bins:
+                continue
+            if censored_applies(hazard_code, metric, lower_bound.get((question_id, horizon_m))):
+                # A lower bound is not the outcome an EIV error is measured
+                # against; it would read every forecast above it as wrong.
+                if _table_exists(conn, "eiv_scores"):
+                    conn.execute("DELETE FROM eiv_scores WHERE question_id = ? AND horizon_m = ?",
+                                 [question_id, horizon_m])
                 continue
             rid_list = run_ids_map.get((question_id, horizon_m)) or [None]
             for run_id in rid_list:

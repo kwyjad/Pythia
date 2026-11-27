@@ -26,6 +26,8 @@ import {
   isAcePa,
 } from "../../lib/score_glossary";
 import {
+  CENSORED_SCORE_LABELS,
+  censoredCells,
   SCORE_TYPES,
   SCORE_TYPE_LABELS,
   headlineCell,
@@ -821,6 +823,10 @@ export default function PerformancePanel({
     [data],
   );
   const referenceRows = useMemo(() => data.reference_rows ?? [], [data]);
+  const censored = useMemo(
+    () => censoredCells(data.overall_rows, activeEnsemble, headlineStat),
+    [data, activeEnsemble, headlineStat],
+  );
 
   const headline = useMemo(
     () =>
@@ -1232,6 +1238,16 @@ export default function PerformancePanel({
               ))}
             </div>
           )}
+          {!loading && censored.length ? (
+            <p className="mt-3 text-xs text-fred-muted" data-testid="censored-scores-line">
+              Conflict displacement months known only as a lower bound (IOM DTM), scored on
+              &ldquo;at least this many&rdquo;, apart from the cards above:{" "}
+              {censored
+                .map((c) => `${CENSORED_SCORE_LABELS[c.scoreType]} ${c.value.toFixed(3)}`)
+                .join(" · ")}{" "}
+              ({censored[0].nQuestions} question{censored[0].nQuestions === 1 ? "" : "s"}).
+            </p>
+          ) : null}
         </div>
       </section>
 

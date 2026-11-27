@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   LOW_N_THRESHOLD,
+  censoredCells,
   SKILL_LOW_N,
   availableScoreTypes,
   buildSeries,
@@ -217,5 +218,33 @@ describe("headline", () => {
       "sibyl", "__ext_climatology", "__ext_views", "gpt-6-sol__raw", "gemini-3.6-flash__recal", "",
     ];
     expect(names.filter(isIndividualForecaster)).toEqual(["gpt-6-sol", "claude-opus-5-5"]);
+  });
+});
+
+describe("censoredCells", () => {
+  const row = (score_type: string, model: string, avg: number, n = 3) => ({
+    hazard_code: "*",
+    metric: "*",
+    score_family: "spd" as const,
+    score_type,
+    model_name: model,
+    n_samples: n,
+    n_questions: n,
+    avg_value: avg,
+    median_value: avg / 2,
+  });
+
+  it("reads the censored score types of one model and nothing else", () => {
+    const rows = [
+      row("brier", "ensemble_mean_v2", 0.5),
+      row("brier_censored", "ensemble_mean_v2", 0.09),
+      row("crps_censored", "ensemble_mean_v2", 0.02),
+      row("brier_censored", "track2_flash", 0.3),
+    ];
+    const cells = censoredCells(rows, "ensemble_mean_v2", "avg");
+    expect(cells.map((c) => c.scoreType)).toEqual(["brier_censored", "crps_censored"]);
+    expect(cells[0].value).toBeCloseTo(0.09);
+    expect(censoredCells(rows, "ensemble_mean_v2", "median")[0].value).toBeCloseTo(0.045);
+    expect(censoredCells([], "ensemble_mean_v2", "avg")).toEqual([]);
   });
 });

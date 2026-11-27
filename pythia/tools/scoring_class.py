@@ -47,6 +47,7 @@ same way and cannot drift from the resolution it scores.
 from __future__ import annotations
 
 import os
+import logging
 from typing import Any, Mapping, Optional, Tuple
 
 SCORED = "scored"
@@ -139,3 +140,106 @@ def scored_only_clause(con: Any, alias: str, *, prefix: str = " AND ") -> str:
     """``scored_only_sql`` with a leading ``AND``, or '' on a DB whose
     resolutions table predates the column."""
     return f"{prefix}{scored_only_sql(alias)}" if has_scoring_class(con) else ""
+
+
+_LOG = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Lower-bound outcomes (Nov 2026)
+# ---------------------------------------------------------------------------
+#
+# A resolution whose value is a LOWER BOUND (the IOM DTM rung of the ACE/PA
+# ladder: the rise in an IDP stock between two rounds) says the outcome is
+# at least that bucket, not that bucket. compute_scores scores it as a
+# censored outcome under its own score types, never under brier/log/crps,
+# and every reader that LEARNS from outcomes (calibration weights, advice,
+# family recalibration, the centroid EMA) leaves those rows out: a lower
+# bound read as the answer biases toward its bucket.
+
+#: Score types written for a lower-bound outcome. Never pooled with the
+#: exact types.
+CENSORED_SCORE_TYPES = ("brier_censored", "log_censored", "crps_censored")
+#: Where censored scoring applies. FL/PA and TC/PA also carry IDMC
+#: displacement wins labelled as lower bounds, but those are scored as the
+#: answer by owner decision (2026-10-12), so they are not censored here.
+CENSORED_HAZARD_METRICS = frozenset({("ACE", "PA")})
+#: source_desc markers of a lower-bound value.
+LOWER_BOUND_MARKERS = ("displaced_lower_bound", ":lower_bound")
+
+
+def is_lower_bound_source(source_desc: Any) -> bool:
+    """True when a resolution's ``source_desc`` names a lower-bound value."""
+
+    text = str(source_desc or "")
+    return any(text.endswith(m) or f"{m}:" in text for m in LOWER_BOUND_MARKERS)
+
+
+def censored_applies(hazard_code: Any, metric: Any, is_lower_bound: Any) -> bool:
+    """Whether a resolution is scored as a censored (at-least) outcome."""
+
+    return bool(is_lower_bound) and (
+        (str(hazard_code or "").upper(), str(metric or "").upper()) in CENSORED_HAZARD_METRICS
+    )
+
+
+def has_lower_bound_column(con: Any) -> bool:
+    try:
+        rows = con.execute("PRAGMA table_info('resolutions')").fetchall()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(str(r[1]).lower() == "is_lower_bound" for r in rows)
+
+
+def exact_outcome_sql(alias: str, resolutions: str = "resolutions") -> str:
+    """Predicate keeping rows of ``alias`` (question_id, horizon_m) whose
+    resolution is an exact value, not a lower bound."""
+
+    return (
+        f"NOT EXISTS (SELECT 1 FROM {resolutions} lb_r WHERE lb_r.question_id = {alias}.question_id "
+        f"AND lb_r.horizon_m = {alias}.horizon_m AND COALESCE(lb_r.is_lower_bound, FALSE))"
+    )
+
+
+def exact_outcome_clause(con: Any, alias: str, *, prefix: str = " AND ") -> str:
+    """``exact_outcome_sql`` with a leading ``AND``, or '' on a DB whose
+    resolutions table predates the column."""
+
+    return f"{prefix}{exact_outcome_sql(alias)}" if has_lower_bound_column(con) else ""
+
+
+def exact_score_types_sql(alias: str) -> str:
+    """Predicate keeping only the exact score types of ``alias``."""
+
+    types = ", ".join(f"'{t}'" for t in CENSORED_SCORE_TYPES)
+    return f"{alias}.score_type NOT IN ({types})"
+
+
+def migrate_resolutions_is_lower_bound(conn, existing: Optional[set] = None) -> int:
+    """Add ``resolutions.is_lower_bound`` if missing and set it from
+    ``source_desc`` on every row (idempotent). Returns the rows marked."""
+    if existing is None:
+        try:
+            existing = {str(r[1]).lower() for r in conn.execute(
+                "PRAGMA table_info('resolutions')").fetchall()}
+        except Exception:
+            return 0
+    if "is_lower_bound" not in existing:
+        try:
+            conn.execute("ALTER TABLE resolutions ADD COLUMN is_lower_bound BOOLEAN DEFAULT FALSE")
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("resolutions: failed to add is_lower_bound: %r", exc)
+            return 0
+    if "source_desc" not in existing:
+        # A table from before source_desc: nothing says a value is a bound.
+        return 0
+    cond = " OR ".join(
+        f"COALESCE(source_desc, '') LIKE '%{m}' OR COALESCE(source_desc, '') LIKE '%{m}:%'"
+        for m in LOWER_BOUND_MARKERS
+    )
+    try:
+        conn.execute(f"UPDATE resolutions SET is_lower_bound = ({cond})")
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM resolutions WHERE is_lower_bound").fetchone()[0])
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("resolutions: is_lower_bound backfill failed: %r", exc)
+        return 0
